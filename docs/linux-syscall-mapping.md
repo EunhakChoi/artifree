@@ -7,13 +7,13 @@ The public acceptance mapping of decision 0042 (rule 4 and the acceptance sectio
 - **Probe.** A static x86-64 program of a few instructions, generated as bytes by the test-support program (`execution::probes`), installed in the tool root under `probes/` and covered by its manifest. It sets the arguments, enters the kernel once (`syscall`, or `int 0x80` for i386), and exits with the call's error number. One launch of the scenario `probes` starts every probe as a child of the payload, so each runs after a `fork` and an `exec`.
 - **Expected denial.** The filter kills the probe with `SIGSYS`. The evidence is the kernel's seccomp record (`audit: type=1326`) naming the probe's program (`exe=`), `sig=31`, the architecture and the number. The job test reads the kernel log from its end before the launch to its end after it and requires exactly the expected records: none missing, none repeated, no other seccomp record. Exit statuses and error numbers are not evidence.
 - **Control (unfiltered).** What the kernel did with the same probe and no filter, measured on the runner (kernel 7.0.0-1017-azure) by a temporary job on 2026-11-13. Most calls fail in the kernel for another reason, which is why only the record counts. _not measured_ marks probes added after that job.
-- **Mutation.** Run by a script on a temporary branch, never in the product: one patch at a time, then the named job test must fail. Every refused call is also allowed alone in turn; the results are attached to the pull request and rerun whenever the filter, this table or the bootstrap's limits change. Rows marked _measured_ were already observed by the planning job.
+- **Mutation.** Run by a script on a temporary branch, never in the product: one patch at a time, then the named job test must fail. Every refused call is also allowed alone in turn; the results are attached to the pull request and rerun whenever the filter, this table or the bootstrap's limits change. Rows marked _measured_ were already observed by the planning job; the results of the R02ad run are at the end.
 
 Beyond the probes, the job also proves: a refused call from a payload thread started after `exec` (record of the payload, `unshare`); a `prlimit64` that sets the limit of the payload's own child (record, `prlimit64`); a lower-and-restore of the soft descriptor limit within the hard limit is refused (the setter guard's case); the descriptor ceiling of 256 in the payload and in a child after `exec` (`EMFILE` with the highest descriptor 255); and, read from outside through `/proc`, `NoNewPrivs` 1, seccomp mode 2 with two filters, empty capability sets and both limits in every payload task. The descriptor guard's mutations: the ceiling raised to 512, and the initial limit guard removed so that the runner's own limit is inherited; both must fail the ceiling test. A descriptor inherited above the ceiling is refused by the bootstrap; its proof with a real leak is R02ae's.
 
 ## controls
 
-Allowed calls in the same launch; each must succeed and leave no record.
+Allowed calls in the same launch; each must run, exit on its own with a code and leave no record, and `ok_prlimit_query` must exit 0. The exit codes of the others are a thread or child id, so they cannot tell an allowed call from one answered with an error number; no rule of this filter answers these calls with one.
 
 | Probe                  | Call                     | Entry      | Expected           | Control (unfiltered) | Mutation |
 | ---------------------- | ------------------------ | ---------- | ------------------ | -------------------- | -------- |
@@ -36,22 +36,22 @@ Calls outside the reviewed allowlist that are not named dangerous: default denia
 
 Namespace changes and process creation with namespace flags (0042 rule 4: permitted creation must not create namespaces).
 
-| Probe                   | Call                                                 | Entry      | Expected                                 | Control (unfiltered) | Mutation                                                             |
-| ----------------------- | ---------------------------------------------------- | ---------- | ---------------------------------------- | -------------------- | -------------------------------------------------------------------- |
-| `ns_unshare`            | unshare(CLONE_NEWNS)                                 | x86-64 272 | record `sig=31 arch=c000003e`            | exit 1 (EPERM)       | allowed alone                                                        |
-| `ns_setns`              | setns                                                | x86-64 308 | record `sig=31 arch=c000003e`            | exit 22 (EINVAL)     | allowed alone                                                        |
-| `ns_fork`               | fork                                                 | x86-64 57  | record `sig=31 arch=c000003e`            | succeeded            | allowed alone                                                        |
-| `ns_vfork`              | vfork                                                | x86-64 58  | record `sig=31 arch=c000003e`            | succeeded            | allowed alone                                                        |
-| `ns_clone_newns`        | clone(CLONE_NEWNS)                                   | x86-64 56  | record `sig=31 arch=c000003e`            | exit 1 (EPERM)       | namespace mask removed: EPERM from the kernel, no record (measured)  |
-| `ns_clone_newcgroup`    | clone(CLONE_NEWCGROUP)                               | x86-64 56  | record `sig=31 arch=c000003e`            | not measured         | allowed alone                                                        |
-| `ns_clone_newuts`       | clone(CLONE_NEWUTS)                                  | x86-64 56  | record `sig=31 arch=c000003e`            | not measured         | allowed alone                                                        |
-| `ns_clone_newipc`       | clone(CLONE_NEWIPC)                                  | x86-64 56  | record `sig=31 arch=c000003e`            | not measured         | allowed alone                                                        |
-| `ns_clone_newuser`      | clone(CLONE_NEWUSER)                                 | x86-64 56  | record `sig=31 arch=c000003e`            | exit 28 (ENOSPC)     | namespace mask removed: ENOSPC from the kernel, no record (measured) |
-| `ns_clone_newpid`       | clone(CLONE_NEWPID)                                  | x86-64 56  | record `sig=31 arch=c000003e`            | not measured         | allowed alone                                                        |
-| `ns_clone_newnet`       | clone(CLONE_NEWNET)                                  | x86-64 56  | record `sig=31 arch=c000003e`            | not measured         | allowed alone                                                        |
-| `ns_clone_newtime`      | clone(CLONE_NEWTIME)                                 | x86-64 56  | record `sig=31 arch=c000003e`            | not measured         | allowed alone                                                        |
-| `ns_fork_child_unshare` | unshare in a forked child                            | x86-64 272 | record `sig=31 arch=c000003e`            | exit 0 (0)           | allowed alone                                                        |
-| `ns_clone3`             | clone3 with CLONE_NEWUSER and an invalid exit signal | x86-64 435 | ENOSYS from the first program, no record | exit 22 (EINVAL)     | first program removed: EINVAL (measured)                             |
+| Probe                   | Call                                                                                | Entry      | Expected                                 | Control (unfiltered) | Mutation                                                             |
+| ----------------------- | ----------------------------------------------------------------------------------- | ---------- | ---------------------------------------- | -------------------- | -------------------------------------------------------------------- |
+| `ns_unshare`            | unshare(CLONE_NEWNS)                                                                | x86-64 272 | record `sig=31 arch=c000003e`            | exit 1 (EPERM)       | allowed alone                                                        |
+| `ns_setns`              | setns                                                                               | x86-64 308 | record `sig=31 arch=c000003e`            | exit 22 (EINVAL)     | allowed alone                                                        |
+| `ns_fork`               | fork                                                                                | x86-64 57  | record `sig=31 arch=c000003e`            | succeeded            | allowed alone                                                        |
+| `ns_vfork`              | vfork                                                                               | x86-64 58  | record `sig=31 arch=c000003e`            | succeeded            | allowed alone                                                        |
+| `ns_clone_newns`        | clone(CLONE_NEWNS)                                                                  | x86-64 56  | record `sig=31 arch=c000003e`            | exit 1 (EPERM)       | namespace mask removed: EPERM from the kernel, no record (measured)  |
+| `ns_clone_newcgroup`    | clone(CLONE_NEWCGROUP)                                                              | x86-64 56  | record `sig=31 arch=c000003e`            | not measured         | its flag removed from the mask                                       |
+| `ns_clone_newuts`       | clone(CLONE_NEWUTS)                                                                 | x86-64 56  | record `sig=31 arch=c000003e`            | not measured         | its flag removed from the mask                                       |
+| `ns_clone_newipc`       | clone(CLONE_NEWIPC)                                                                 | x86-64 56  | record `sig=31 arch=c000003e`            | not measured         | its flag removed from the mask                                       |
+| `ns_clone_newuser`      | clone(CLONE_NEWUSER)                                                                | x86-64 56  | record `sig=31 arch=c000003e`            | exit 28 (ENOSPC)     | namespace mask removed: ENOSPC from the kernel, no record (measured) |
+| `ns_clone_newpid`       | clone(CLONE_NEWPID)                                                                 | x86-64 56  | record `sig=31 arch=c000003e`            | not measured         | its flag removed from the mask                                       |
+| `ns_clone_newnet`       | clone(CLONE_NEWNET)                                                                 | x86-64 56  | record `sig=31 arch=c000003e`            | not measured         | its flag removed from the mask                                       |
+| `ns_clone_newtime`      | clone with bit 0x80 (CLONE_NEWTIME's bit, read by clone as part of the exit signal) | x86-64 56  | record `sig=31 arch=c000003e`            | not measured         | its flag removed from the mask                                       |
+| `ns_fork_child_unshare` | unshare in a forked child                                                           | x86-64 272 | record `sig=31 arch=c000003e`            | exit 0 (0)           | allowed alone                                                        |
+| `ns_clone3`             | clone3 with CLONE_NEWUSER and an invalid exit signal                                | x86-64 435 | ENOSYS from the first program, no record | exit 22 (EINVAL)     | first program removed: EINVAL (measured)                             |
 
 ## mount
 
@@ -83,7 +83,7 @@ Credential, capability and privilege changes, and attempts to undo the boundary.
 | `priv_setresuid`     | setresuid                                       | x86-64 117 | record `sig=31 arch=c000003e` | exit 22 (EINVAL)                 | allowed alone |
 | `priv_setresgid`     | setresgid                                       | x86-64 119 | record `sig=31 arch=c000003e` | not measured                     | allowed alone |
 | `priv_setgroups`     | setgroups                                       | x86-64 116 | record `sig=31 arch=c000003e` | exit 1 (EPERM)                   | allowed alone |
-| `priv_setfsuid`      | setfsuid                                        | x86-64 122 | record `sig=31 arch=c000003e` | exit 23 (ENFILE?)                | allowed alone |
+| `priv_setfsuid`      | setfsuid                                        | x86-64 122 | record `sig=31 arch=c000003e` | returned the old fsuid           | allowed alone |
 | `priv_setfsgid`      | setfsgid                                        | x86-64 123 | record `sig=31 arch=c000003e` | not measured                     | allowed alone |
 | `priv_capset`        | capset (undo: capabilities)                     | x86-64 126 | record `sig=31 arch=c000003e` | exit 14 (EFAULT)                 | allowed alone |
 | `priv_prctl_nnp_off` | prctl(PR_SET_NO_NEW_PRIVS) (undo: no_new_privs) | x86-64 157 | record `sig=31 arch=c000003e` | exit 22 (EINVAL)                 | allowed alone |
@@ -182,9 +182,20 @@ Alternate system-call ABIs. **x32 FAILS acceptance on the reviewed kernel**: it 
 | `abi_x32_gettid`      | gettid with the x32 bit | x86-64 0x400000BA | record `sig=31 arch=c000003e` | exit 38 (ENOSYS)     | none possible on this kernel                  |
 | `abi_x32_getpid`      | getpid with the x32 bit | x86-64 0x40000027 | record `sig=31 arch=c000003e` | exit 38 (ENOSYS)     | none possible on this kernel                  |
 | `abi_i386_exit`       | exit                    | i386 1            | record `sig=31 arch=40000003` | exit 0 (0)           | architecture check opened: exits 0 (measured) |
-| `abi_i386_getpid`     | getpid                  | i386 20           | record `sig=31 arch=40000003` | succeeded            | allowed alone                                 |
-| `abi_i386_setrlimit`  | setrlimit               | i386 75           | record `sig=31 arch=40000003` | exit 14 (EFAULT)     | allowed alone                                 |
-| `abi_i386_ugetrlimit` | ugetrlimit              | i386 191          | record `sig=31 arch=40000003` | not measured         | allowed alone                                 |
-| `abi_i386_prlimit64`  | prlimit64               | i386 340          | record `sig=31 arch=40000003` | exit 22 (EINVAL)     | allowed alone                                 |
-| `abi_i386_socketcall` | socketcall              | i386 102          | record `sig=31 arch=40000003` | exit 14 (EFAULT)     | allowed alone                                 |
-| `abi_i386_ipc`        | ipc                     | i386 117          | record `sig=31 arch=40000003` | exit 38 (ENOSYS)     | allowed alone                                 |
+| `abi_i386_getpid`     | getpid                  | i386 20           | record `sig=31 arch=40000003` | succeeded            | architecture check opened                     |
+| `abi_i386_setrlimit`  | setrlimit               | i386 75           | record `sig=31 arch=40000003` | exit 14 (EFAULT)     | architecture check opened                     |
+| `abi_i386_ugetrlimit` | ugetrlimit              | i386 191          | record `sig=31 arch=40000003` | not measured         | architecture check opened                     |
+| `abi_i386_prlimit64`  | prlimit64               | i386 340          | record `sig=31 arch=40000003` | exit 22 (EINVAL)     | architecture check opened                     |
+| `abi_i386_socketcall` | socketcall              | i386 102          | record `sig=31 arch=40000003` | exit 14 (EFAULT)     | architecture check opened                     |
+| `abi_i386_ipc`        | ipc                     | i386 117          | record `sig=31 arch=40000003` | exit 38 (ENOSYS)     | architecture check opened                     |
+
+## Mutation results
+
+Run on 2026-11-13 by `scripts/enforcement/mutate.py` on the temporary branch `mutation/r02ad` (never merged), workflow run 43327325321 on `ubuntu-24.04`: one job per mutation, each applying one patch, rebuilding, and running only the named job test. The unmutated baseline passed. All 71 mutations failed their test:
+
+- `job_probes_are_refused_with_their_records`: the architecture check opened in both programs (the first missing record was `abi_i386_exit`); the default action changed from kill to `EPERM` (`default_uname`); the whole namespace mask removed (`ns_clone_newns`); each of the eight namespace flags removed from the mask alone (its `ns_clone_*` probe); the setter guard removed (`limit_prlimit_set`); and each of the 54 refused x86-64 numbers allowed alone (the probes with that number).
+- `job_clone3_is_refused_with_enosys`: the first program no longer answers `clone3` (the payload did not exit with `ENOSYS`).
+- `job_lowering_the_soft_limit_is_refused` and `job_a_descendants_limit_cannot_be_set`: the setter guard removed (the payload was not killed with `SIGSYS`).
+- `job_descriptors_stop_at_the_ceiling`: the ceiling raised to 512, and the initial limit guard removed with the readiness check of that limit bypassed, so the payload kept the unit's limit (the payload's soft descriptor limit differed in both).
+
+No mutation is possible for the x32 rows on this kernel.

@@ -70,7 +70,7 @@ mod linux {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::{CommandExt, ExitStatusExt};
     use std::path::Path;
-    use std::process::{Command, ExitCode};
+    use std::process::{Child, Command, ExitCode};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread::{self, Builder};
@@ -502,20 +502,28 @@ mod linux {
     /// Starts a `hold` child and sets its descriptor limit. The filter kills the process for that call, so a returned call is a failure and the status is 4.
     fn descendant_refusal() -> io::Result<ExitCode> {
         let mut child = Command::new(SELF).arg("hold").spawn()?;
+        let reported = set_descendant_limit(&child);
+        // Reached only when the filter did not kill the payload, or when a report failed: stop and reap the child either way before returning.
+        let killed = child.kill();
+        let reaped = child.wait();
+        reported?;
+        killed?;
+        reaped?;
+        Ok(ExitCode::from(4))
+    }
+
+    /// Reports the child, then sets its descriptor limit, which the filter refuses, and reports the result if the call returns.
+    fn set_descendant_limit(child: &Child) -> io::Result<()> {
         say(&format!("descendant pid={}", child.id()))?;
         let result = process::prlimit(
-            Some(process::Pid::from_child(&child)),
+            Some(process::Pid::from_child(child)),
             process::Resource::Nofile,
             process::Rlimit {
                 current: Some(128),
                 maximum: Some(256),
             },
         );
-        say(&format!("descendant-refusal returned {result:?}"))?;
-        // Reached only when the filter did not kill the payload: stop and reap the child before reporting the failure.
-        child.kill()?;
-        child.wait()?;
-        Ok(ExitCode::from(4))
+        say(&format!("descendant-refusal returned {result:?}"))
     }
 
     /// Lowers the soft descriptor limit within the hard limit, then restores it. Under the filter the lowering is refused by a kill, since rustix's `setrlimit` makes a `prlimit64` call (syscall 302). This is the setter guard's lower-and-restore case. A returned call is a failure and the status is 4.

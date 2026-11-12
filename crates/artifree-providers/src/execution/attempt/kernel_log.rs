@@ -171,7 +171,8 @@ fn collect_seccomp(log: &mut KernelLog, records: &mut Vec<SeccompRecord>) -> io:
 }
 
 /// Returns the seccomp refusals printed after `log` was opened, once `expected` of them arrived
-/// or `within` passed, followed by a settling window that catches extra records.
+/// (at least one when `expected` is 0) or `within` passed, followed by a settling window that
+/// catches extra records.
 ///
 /// Kernel lines that are not seccomp records are ignored. A record that arrives during the
 /// settling window is returned too, so the caller sees every seccomp record of the window.
@@ -189,7 +190,9 @@ pub(super) fn await_records(
     let started = Instant::now();
     loop {
         collect_seccomp(log, &mut records)?;
-        if records.len() >= expected || started.elapsed() >= within {
+        // With no record expected, the wait runs through the whole window unless one arrives: an
+        // early break would leave only the settling window to catch a late refusal.
+        if records.len() >= expected.max(1) || started.elapsed() >= within {
             break;
         }
         thread::sleep(POLL);

@@ -289,6 +289,15 @@ struct ProcessReading {
     tasks: Vec<(u32, StatusFacts)>,
 }
 
+/// The error number `ESRCH`, which a `/proc` read returns for a task that ended after it was listed.
+const ESRCH: i32 = 3;
+
+/// Whether a `/proc` read failed because the process or task ended: the file is gone
+/// (`ENOENT`) or the task was reaped between the listing and the read (`ESRCH`).
+fn process_ended(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::NotFound || error.raw_os_error() == Some(ESRCH)
+}
+
 /// The `Name` field of a `/proc/<pid>/status` text.
 fn status_name(text: &str) -> Option<&str> {
     text.lines()
@@ -301,7 +310,7 @@ fn status_name(text: &str) -> Option<&str> {
 fn read_process(pid: u32) -> Result<Option<ProcessReading>, Box<dyn Error>> {
     let entries = match fs::read_dir(format!("/proc/{pid}/task")) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if process_ended(&error) => return Ok(None),
         Err(error) => return Err(error.into()),
     };
     let mut tasks = Vec::new();
@@ -310,7 +319,7 @@ fn read_process(pid: u32) -> Result<Option<ProcessReading>, Box<dyn Error>> {
         let tid: u32 = entry.file_name().to_string_lossy().parse()?;
         let text = match fs::read_to_string(entry.path().join("status")) {
             Ok(text) => text,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) if process_ended(&error) => continue,
             Err(error) => return Err(error.into()),
         };
         if status_name(&text) == Some(LAUNCHER_NAME) {
@@ -326,7 +335,7 @@ fn read_process(pid: u32) -> Result<Option<ProcessReading>, Box<dyn Error>> {
     }
     let limits_text = match fs::read_to_string(format!("/proc/{pid}/limits")) {
         Ok(text) => text,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if process_ended(&error) => return Ok(None),
         Err(error) => return Err(error.into()),
     };
     let limits = parse_limits(&limits_text)
@@ -339,7 +348,7 @@ fn read_process(pid: u32) -> Result<Option<ProcessReading>, Box<dyn Error>> {
 fn read_group(group: &Path) -> Result<Option<Vec<ProcessReading>>, Box<dyn Error>> {
     let listing = match fs::read_to_string(group.join("cgroup.procs")) {
         Ok(listing) => listing,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if process_ended(&error) => return Ok(None),
         Err(error) => return Err(error.into()),
     };
     let mut processes = Vec::new();

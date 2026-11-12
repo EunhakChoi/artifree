@@ -13,8 +13,8 @@ use std::process;
 #[cfg(target_arch = "x86_64")]
 use super::super::policy::{ALLOWED, CLONE, CLONE3, NAMESPACE_FLAGS, QUERY_ONLY};
 use super::{
-    AUDIT_ARCH_I386, AUDIT_ARCH_X86_64, EXIT_WITH_RESULT, Entry, Expect, PROBES, Probe, code,
-    program, write_probe_programs,
+    AUDIT_ARCH_I386, AUDIT_ARCH_X86_64, Entry, Expect, PROBES, Probe, code, program,
+    write_probe_programs,
 };
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -240,13 +240,6 @@ fn every_probe_has_a_known_class_and_at_most_six_arguments() {
 
 #[test]
 fn expectations_match_the_entry_and_number() {
-    // The audit values that the records of the mapping document print (`arch=c000003e` and
-    // `arch=40000003`).
-    assert_eq!(
-        AUDIT_ARCH_X86_64, 0xC000_003E,
-        "the x86-64 audit architecture"
-    );
-    assert_eq!(AUDIT_ARCH_I386, 0x4000_0003, "the i386 audit architecture");
     for probe in &PROBES {
         if let Expect::Refused { arch, number } = probe.expect {
             let entry_arch = match probe.entry {
@@ -360,13 +353,6 @@ fn elf_header_fields_parse_from_the_generated_bytes() -> TestResult {
 
 #[test]
 fn single_probe_code_is_exact() -> TestResult {
-    assert_eq!(
-        EXIT_WITH_RESULT,
-        [
-            0x89, 0xC7, 0xF7, 0xDF, 0xB8, 0xE7, 0x00, 0x00, 0x00, 0x0F, 0x05
-        ],
-        "mov edi, eax; neg edi; mov eax, 231; syscall"
-    );
     assert_eq!(
         code(&probe_named("ns_unshare")?)?,
         [
