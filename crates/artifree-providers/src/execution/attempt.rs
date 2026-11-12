@@ -51,7 +51,7 @@ const LISTING_BYTES: u64 = 4096;
 /// How long the group may take to empty after the stub's exit. The launcher can exit before the
 /// kernel has ended the rest of its PID namespace: on the job's runner a process bomb's children
 /// were still listed when the stub's exit was observed (main, 2026-11-12). A process that is
-/// still listed after this wait is a survivor.
+/// still listed after this wait is a survivor. The wait never runs past the wall deadline.
 const TEARDOWN_GRACE: Duration = Duration::from_secs(2);
 /// The stub's arguments: the fixture's `stub` mode with the fixture identity.
 const FIXTURE_STUB: &[&str] = &["stub", FIXTURE.identity];
@@ -256,7 +256,8 @@ fn limit_word(value: Option<u64>) -> String {
 /// A reader thread's result: the bytes it kept, or the read error that ended it.
 type Capture = JoinHandle<io::Result<Vec<u8>>>;
 
-/// What the group's `cgroup.procs` listing held when the stub's normal exit was observed.
+/// What the group's `cgroup.procs` listing held at its last read after the stub's normal exit,
+/// within `TEARDOWN_GRACE` and the wall deadline.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum SurvivorListing {
     /// No exit was observed before a deadline or a failure, so no listing was read.
@@ -296,16 +297,19 @@ fn survivor_listing(listing: io::Result<Vec<u8>>) -> SurvivorListing {
 
 /// Reads the group's listing until it is empty, unreadable, or still occupied once `grace` has
 /// passed since the first read. The listing is read at least once, and once more after the last
-/// pause, so a group that empties within `grace` is never reported as occupied.
+/// pause, so a group that empties within `grace` is never reported as occupied. A listing that
+/// was occupied and then cannot be read stays occupied: the processes were seen.
 fn await_empty_listing(
     mut read: impl FnMut() -> io::Result<Vec<u8>>,
     grace: Duration,
 ) -> SurvivorListing {
     let started = Instant::now();
+    let mut seen_occupied = false;
     loop {
-        let listing = survivor_listing(read());
-        if listing != SurvivorListing::Occupied || started.elapsed() >= grace {
-            return listing;
+        match survivor_listing(read()) {
+            SurvivorListing::Occupied if started.elapsed() < grace => seen_occupied = true,
+            SurvivorListing::Unreadable if seen_occupied => return SurvivorListing::Occupied,
+            listing => return listing,
         }
         thread::sleep(POLL);
     }
@@ -318,7 +322,8 @@ struct Session {
     child: Option<Child>,
     /// The stub's exit status, once the poll observed it.
     exit: Option<ExitStatus>,
-    /// The group's listing at the stub's exit, read before the group is killed.
+    /// The group's last listing read after the stub's exit, within `TEARDOWN_GRACE`, before the
+    /// group is killed.
     survivors: SurvivorListing,
     /// The stdout reader, once it has been started.
     stdout: Option<Capture>,
@@ -476,9 +481,10 @@ fn run_group(
     // empty group. `populated` is not used: measured on 2026-11-12, it stays 1 for a few
     // milliseconds after ordinary exits while the listing is already empty. `settle` kills
     // survivors as it kills every group.
+    // The wait ends at the wall deadline too, so a group never runs past it (0042 rule 5).
     let listing = group_path.join("cgroup.procs");
-    session.survivors =
-        await_empty_listing(|| read_bounded(&listing, LISTING_BYTES), TEARDOWN_GRACE);
+    let grace = TEARDOWN_GRACE.min(plan.wall_deadline.saturating_sub(start.elapsed()));
+    session.survivors = await_empty_listing(|| read_bounded(&listing, LISTING_BYTES), grace);
     confirm_started(&mut control)?;
     Ok(Passed {
         limits,
@@ -712,7 +718,7 @@ struct Outcome {
     phase: Result<(), AttemptFailure>,
     /// The group's counters, when they were read.
     usage: Option<GroupUsage>,
-    /// What the group's listing held when the stub's exit was observed.
+    /// The group's last listing read after the stub's exit, within `TEARDOWN_GRACE`.
     survivors: SurvivorListing,
     /// Whether both captured streams were read to their end.
     captures_read: bool,

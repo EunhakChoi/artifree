@@ -306,7 +306,7 @@ fn a_group_that_stays_occupied_has_survivors() {
             reads += 1;
             Ok(b"4242\n".to_vec())
         },
-        Duration::from_millis(50),
+        Duration::from_millis(200),
     );
     assert_eq!(
         verdict,
@@ -320,6 +320,29 @@ fn a_group_that_stays_occupied_has_survivors() {
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "the wait must end soon after the grace"
+    );
+}
+
+/// A listing that was occupied and then cannot be read keeps its survivors.
+#[test]
+fn an_unreadable_listing_after_an_occupied_one_keeps_the_survivors() {
+    let mut listings = vec![
+        Ok(b"9\n".to_vec()),
+        Err(io::Error::other("cgroup.procs cannot be read")),
+    ]
+    .into_iter();
+    let verdict = await_empty_listing(
+        || {
+            listings
+                .next()
+                .unwrap_or_else(|| Err(io::Error::other("read past the listings")))
+        },
+        Duration::from_secs(5),
+    );
+    assert_eq!(
+        verdict,
+        SurvivorListing::Occupied,
+        "the processes were seen before the failed read"
     );
 }
 
@@ -662,7 +685,8 @@ fn job_cpu_spinners_share_one_cpu() -> Result<(), Box<dyn Error>> {
 }
 
 /// The survivors branch of the verdict is not reached here: the launcher's init takes its PID
-/// namespace with it, so the group's list was empty at the observed exit in every measured run.
+/// namespace with it, so the group's list is empty once that teardown has ended, which the
+/// provider waits for up to `TEARDOWN_GRACE` after the stub's exit (the launcher can exit first).
 /// That branch is covered by the verdict and listing tables above. What this test shows is that
 /// nothing outlives the attempt, through `settle`'s kill and the `/proc` scan of `timed_launch`.
 #[test]
