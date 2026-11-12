@@ -1,6 +1,7 @@
 //! Concrete outbound adapters. Local `SQLite` artifact and job storage and ZIP
-//! source archives are implemented. Execution has read-only inspection only;
-//! untrusted launch and the other families remain planned.
+//! source archives are implemented. Execution has routing inspection and a Linux
+//! host admission that runs no payload; untrusted launch and the other families
+//! remain planned.
 //! Worker processes may use a different language through a versioned contract.
 
 pub mod archive;

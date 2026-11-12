@@ -1,6 +1,7 @@
 # 0056: Delivering the Linux execution provider
 
-Date: 2026-11-12. Status: **accepted as a plan; nothing in it is implemented**.
+Date: 2026-11-12. Status: **accepted as a plan; R02aa (host admission and the
+enforcement job) is implemented, and nothing runs a payload**.
 Roadmap: R02a. Builds on
 [0042](0042-linux-untrusted-execution.md) and
 [0055](0055-operating-background-work.md).
@@ -40,6 +41,20 @@ how; where the two could be read differently, 0042 holds.
 >   launcher, tool or policy.
 >
 > The row is reworded below to say so.
+
+> **Note, 2026-11-12 (R02aa).** The provider's admission and the job
+> `Linux enforcement` exist. On the runner the provider's own code did what
+> the second measurement did with shell commands, which settles the first
+> assumption of rule 17. The job withholds the memory controller for rule 10
+> by starting the unit in a transient slice with `DisableControllers=memory`;
+> the provider then refused naming that controller, which settles the second.
+> The tool root is `/opt/artifree/tools/v1`. The admission's fixed order of
+> refusals is documented in the module `execution`. The deadlines and
+> bounds of the trusted namespace check (10 seconds, 4,096 bytes, a 1 MiB
+> scratch) are that slice's choices and bind no attempt. The job pins the
+> Bubblewrap package to one revision, so a superseded revision fails the job
+> until the pin is moved. Rules 2 to 7 and the
+> slices R02ab to R02ah are not implemented.
 
 ## Context
 
