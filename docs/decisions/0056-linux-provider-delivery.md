@@ -7,8 +7,9 @@ and R02ad (the syscall mapping, as amended on 2026-11-13; its x32 class
 fails acceptance on the reviewed kernel), R02ae (files, descriptors and
 network, as planned in the second and third amendments of 2026-11-13)
 R02af (input and output, as planned in the amendment of 2026-11-13 on
-input and output) and R02ag (crashes, as planned in the amendment of
-2026-11-13 on crashes) are implemented**.
+input and output), R02ag (crashes, as planned in the amendment of
+2026-11-13 on crashes) and R02ah (the guardian, as planned in the amendment
+of 2026-11-13 on the guardian) are implemented**.
 Roadmap: R02a. Builds on
 [0042](0042-linux-untrusted-execution.md) and
 [0055](0055-operating-background-work.md).
@@ -1351,6 +1352,46 @@ how; where the two could be read differently, 0042 holds.
 > its collector received two dumps of about 8.9 MB; without the watch the
 > `linger` attempt exited 0; without the quarantine the second launch ran;
 > and with `prlimit64` allowed as a setter the setter child was not killed.
+>
+> **Note, 2026-11-14 (R02ah).** The guardian of the amendment exists,
+> compiled only into the test build, with the provider's side, the stand-in
+> store, the five phases and the test-only switches. Its deadline argument
+> is milliseconds from the guardian's own start, read with a monotonic clock
+> in the guardian, rather than absolute milliseconds of `CLOCK_MONOTONIC`:
+> both name the same instant, and the relative form needs no clock
+> conversion. The guardian reads at most one chunk of records before it
+> decides by the time, so a peer that keeps writing cannot starve the
+> deadline, and it reads a `cgroup.events` that is gone as an empty group,
+> since the kernel removes only an empty group. The provider sends `S` once
+> it no longer polls the stub, before the teardown grace, and sends `D` only
+> when it removed the group; otherwise it closes its side of the socket, so
+> that the guardian ends the attempt itself, and waits for the line one
+> second past the cleanup observation deadline. In the job (run
+> 43456839758, `ubuntu-24.04` image `20261111.370`) the revoked fence, the
+> cancel, the changed generation and the lost authority were refused as
+> `LeaseLost` with their part; the unavailable store and the stalled
+> supervisor as `Guardian(RenewalExpired)`; the faulty supervisor and the
+> confirmed renewals as `Guardian(Deadline)` after 132.6 seconds from the
+> launch; and the fixture plan yielded its output. At each of the five
+> phases, and at `running` without the guardian, no payload, probe or
+> guardian process was left, and with the guardian its line named
+> `supervisor-gone` and `emptied=1`. No attempt group was left at any phase:
+> once its main process is gone the unit stops, and the service manager
+> trims the empty groups of its delegated subtree, which the first run of
+> the job showed at `guarded` (run 43454875474). So `run.sh` requires that
+> every group that is left is empty and accepts a removed one, rather than
+> one empty group. The six mutations ran as ten cases on the temporary
+> branch `mutation/r02ah` (run 43456891505, deleted afterwards and never
+> merged), with both unmutated baselines passing, and each failed its test:
+> without the guardian the stalled supervisor's `linger` attempt exited 0,
+> and both 120-second attempts were still running when their tests gave up
+> after 150 seconds; without the guardian's deadline check both 120-second
+> attempts were still running then too; without its window check the
+> unavailable store's and the stalled supervisor's attempts exited 0; with
+> end of file ignored a guardian outlived the supervisor's death at
+> `guarded`; with the refusal on a lost lease removed the revoked fence's
+> attempt exited 0; and without `--die-with-parent` and the guardian a
+> payload process outlived the supervisor's death at `running`.
 
 ## Context
 

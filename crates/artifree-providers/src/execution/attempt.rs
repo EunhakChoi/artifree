@@ -22,7 +22,15 @@
 //! each poll of the stub and once after the group is empty. A change or a failed read ends the
 //! group, quarantines the provider in its process and refuses the attempt as `Routing`. A
 //! test-only step of the plan lists the scratch through the keeper.
+//!
+//! R02ah (0056 rule 14, amendment of 2026-11-13, the guardian) starts the guardian after the
+//! limits and before the stub, and waits for its ready byte. The provider sends `L` at the
+//! release, `R` after each confirming heartbeat, `S` once it no longer polls the stub and `D` once
+//! the group is gone. A guardian that is not reaped without a kill leaves the cleanup unobserved.
+//! A reason that the guardian reports refuses the attempt as `Guardian`, after `Routing`. The
+//! plan's test-only switches and pauses serve the job tests of the enforcement job only.
 
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -42,6 +50,7 @@ use sha2::{Digest, Sha256};
 use super::admission::{self, AdmissionRoots, wait_within};
 use super::bootstrap::{EXEC_FAILED, LAUNCH, READY, RELEASE};
 use super::collection::{CollectedOutput, CollectionRefusal, ManifestBinding};
+use super::guardian::{self, GuardianReason};
 use super::lock::{AdmissionLock, LockRefusal};
 use super::probe_group::{self, ProbeGroup};
 use super::readiness::{self, GroupObservation};
@@ -49,6 +58,7 @@ use super::report::HostReport;
 use super::staging::{InputListing, InputRefusal, VerifiedInput};
 use super::usage::{self, GroupUsage};
 use super::{AdmissionRefusal, FIXTURE, InspectionProfile, launcher, policy, read_bounded};
+use guardian_link::GuardianLink;
 use keeper::Keeper;
 
 /// The combined stdout and stderr budget of one attempt, in bytes (decision 0042 rule 5).
@@ -59,6 +69,11 @@ const WALL_DEADLINE: Duration = Duration::from_secs(120);
 const READINESS_DEADLINE: Duration = Duration::from_secs(10);
 /// The pause between two polls of the stub and of the readers.
 const POLL: Duration = Duration::from_millis(10);
+
+/// How much longer than the cleanup observation deadline the provider waits for the guardian's line
+/// when it closed the socket without `D`: the guardian then kills the group and waits up to that
+/// deadline itself before it writes the line.
+const GUARDIAN_REPORT_MARGIN: Duration = Duration::from_secs(1);
 /// How long the provider waits on the control socket once the stub has exited.
 const CONTROL_GRACE: Duration = Duration::from_secs(1);
 /// The largest read that one pipe reader makes at a time.
@@ -75,6 +90,13 @@ const TEARDOWN_GRACE: Duration = Duration::from_secs(2);
 const FIXTURE_STUB: &[&str] = &["stub", FIXTURE.identity];
 /// The bytes of the fixture input's one page, `index.html`.
 const FIXTURE_PAGE: &[u8] = b"<!doctype html><title>fixture</title>";
+/// The fixture plan's job lease. Its renewal window is a third of it (0042 rule 6).
+const FIXTURE_LEASE: Duration = Duration::from_secs(30);
+/// The margin of the guardian's deadline after the readiness and wall deadlines (0056, amendment of
+/// 2026-11-13, the guardian).
+const GUARDIAN_MARGIN: Duration = Duration::from_secs(2);
+/// The sleep step of a held pause.
+const HOLD_STEP: Duration = Duration::from_secs(1);
 
 /// Set once a cleanup was not observed, or once the routing changed or could not be read during an
 /// attempt (0056 rule 5, as reworded). The group of a failed cleanup stays in place; launches in
@@ -83,8 +105,14 @@ static QUARANTINED: AtomicBool = AtomicBool::new(false);
 /// Numbers the attempt groups of this process, so that no two attempts share a name.
 static ATTEMPT_COUNTER: AtomicU32 = AtomicU32::new(0);
 
-/// The inputs of one launch: the stub's arguments and its two deadlines.
-#[derive(Clone, Copy, Debug)]
+/// The inputs of one launch: the stub's arguments and its two deadlines. After `list_scratch` come
+/// the job's lease, the stand-in store and the guardian's test-only switches (decision 0056,
+/// amendment of 2026-11-13, the guardian).
+#[derive(Clone, Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the plan's test-only switches are independent and named by decision 0056, amendment of 2026-11-13 (the guardian)"
+)]
 pub(super) struct AttemptPlan {
     /// The arguments after the fixture path.
     pub(super) stub_arguments: &'static [&'static str],
@@ -103,9 +131,34 @@ pub(super) struct AttemptPlan {
     /// scratch through the keeper into `AttemptEvidence::scratch` (0056,
     /// amendment of 2026-11-13, crashes). `false` in `fixture()`.
     pub(super) list_scratch: bool,
+    /// The job's lease, from which the renewal window is a third (0042 rule 6; 0056, amendment of
+    /// 2026-11-13, the guardian). `FIXTURE_LEASE` in `fixture()`.
+    pub(super) lease: Duration,
+    /// The stand-in store: the answer to the heartbeat with this number, counted from 0, given at
+    /// once. `always_confirms` in `fixture()`.
+    pub(super) store: fn(u32) -> Heartbeat,
+    /// Whether the guardian is started. `false` leaves it out, so that the launcher's parent-death
+    /// signal is shown alone. `true` in `fixture()`.
+    pub(super) guardian: bool,
+    /// Whether `running_verdict` checks the wall deadline. `false` switches off that part only,
+    /// never the output budget. `true` in `fixture()`.
+    pub(super) provider_deadline: bool,
+    /// The faulty supervisor of 0042's acceptance: it sends `R` after every heartbeat whatever its
+    /// answer, and never ends the group on it. `false` in `fixture()`.
+    pub(super) renew_regardless: bool,
+    /// A test-only pause at one phase (0056, amendment of 2026-11-13, the guardian). `None` in
+    /// `fixture()`.
+    pub(super) pause: Option<Pause>,
 }
 
 impl AttemptPlan {
+    /// The renewal window: a third of the lease (0042 rule 6). The provider's heartbeat schedule and
+    /// the guardian's window both use this value.
+    #[must_use]
+    pub(super) fn renewal_window(&self) -> Duration {
+        self.lease / 3
+    }
+
     /// The one plan that the fixture uses: the fixture stub and the decision 0042 deadlines.
     #[must_use]
     pub(super) fn fixture() -> Self {
@@ -116,8 +169,96 @@ impl AttemptPlan {
             release_record: &RELEASE,
             plant: None,
             list_scratch: false,
+            lease: FIXTURE_LEASE,
+            store: always_confirms,
+            guardian: true,
+            provider_deadline: true,
+            renew_regardless: false,
+            pause: None,
         }
     }
+}
+
+/// The fixture plan's stand-in store: it confirms every heartbeat.
+fn always_confirms(_heartbeat: u32) -> Heartbeat {
+    Heartbeat::Confirmed
+}
+
+/// A test-only pause of the provider at one phase. At the phase the provider creates the empty
+/// file `<markers>/<word>` and then holds or stalls, as `mode` says (0056, amendment of
+/// 2026-11-13, the guardian).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct Pause {
+    /// The phase at which the pause takes place.
+    pub(super) phase: Phase,
+    /// What the provider does once the marker file exists.
+    pub(super) mode: PauseMode,
+    /// The directory that receives the marker file, named by the phase's word.
+    pub(super) markers: PathBuf,
+}
+
+/// The phases of one launch at which a test may pause the provider (0056, amendment of
+/// 2026-11-13, the guardian).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Phase {
+    /// `guarded`: the group and the guardian exist, the stub does not.
+    Guarded,
+    /// `started`: the stub runs, before the readiness report is read.
+    Started,
+    /// `ready`: the report was read, before the release.
+    Ready,
+    /// `running`: after the release.
+    Running,
+    /// `collecting`: after a passing verdict and `D`, before collection.
+    Collecting,
+}
+
+impl Phase {
+    /// The word that names this phase in its marker file.
+    #[must_use]
+    pub(super) fn word(self) -> &'static str {
+        match self {
+            Self::Guarded => "guarded",
+            Self::Started => "started",
+            Self::Ready => "ready",
+            Self::Running => "running",
+            Self::Collecting => "collecting",
+        }
+    }
+}
+
+/// What a paused provider does once its marker file exists.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PauseMode {
+    /// Waits, in a loop, until the process is killed.
+    Hold,
+    /// Waits for the duration and then goes on.
+    Stall(Duration),
+}
+
+/// The stand-in store's answer to one heartbeat (0056, amendment of 2026-11-13, the guardian).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Heartbeat {
+    /// The current fence is confirmed, with no cancel, the pinned actor generation and continuing
+    /// authority.
+    Confirmed,
+    /// The store did not answer.
+    Unavailable,
+    /// The lease was lost, with the part that failed.
+    Lost(LeaseLoss),
+}
+
+/// The part of a lease that a heartbeat found lost (0056, amendment of 2026-11-13, the guardian).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LeaseLoss {
+    /// The fence was revoked.
+    Fence,
+    /// A cancel was requested.
+    Cancelled,
+    /// The actor generation changed.
+    Generation,
+    /// The authority was lost.
+    Authority,
 }
 
 /// Why the stub did not reach a run, with the step that failed (decision 0056 rule 5).
@@ -142,6 +283,9 @@ pub(super) enum NotStartedReason {
     ExecFailed,
     /// The control socket gave neither end of stream nor `EXEC_FAILED`.
     ExecUnconfirmed,
+    /// The guardian could not be started, or it did not write its ready byte within the readiness
+    /// deadline (0056, amendment of 2026-11-13, the guardian).
+    GuardianNotStarted,
 }
 
 /// Why a launch produced no evidence of a run.
@@ -178,8 +322,14 @@ pub(super) enum AttemptFailure {
     /// `kernel.core_pattern` changed or could not be read during the attempt, at a poll of the
     /// stub or after the group was empty (0056 rule 5, as reworded by the amendment of
     /// 2026-11-13, crashes). The group was ended as at the wall deadline, and the provider is
-    /// quarantined in its process; the persisted quarantine is R02ah's.
+    /// quarantined in its process; the persisted quarantine is R02ai's.
     Routing(AdmissionRefusal),
+    /// A heartbeat did not confirm the lease, with the part that failed. The renewals stopped, and
+    /// the group was ended as at the wall deadline (0056, amendment of 2026-11-13, the guardian).
+    LeaseLost(LeaseLoss),
+    /// The guardian ended the attempt, with its reason, even when the stub's exit was also seen
+    /// (0056, amendment of 2026-11-13, the guardian).
+    Guardian(GuardianReason),
 }
 
 /// Why a launch produced no evidence of a run, with the group's counters when they were read.
@@ -423,6 +573,8 @@ struct Session {
     keeper: Option<Keeper>,
     /// The routing that every poll and the last check compare against.
     routing: RoutingWatch,
+    /// The guardian, once it reported ready. Every path ends it in `conclude`.
+    guardian: Option<GuardianLink>,
 }
 
 /// What the group phase measured before the group was ended.
@@ -472,8 +624,8 @@ fn fixture_input() -> Result<VerifiedInput, InputRefusal> {
 
 /// Runs one attempt: the admission lock, the quarantine check, the whole host admission, the
 /// staging of the input, then the attempt group. The group is always ended and removed, or the
-/// attempt is quarantined (decision 0042 rule 6). A refusal carries the group's counters whenever
-/// the group was created, emptied and read.
+/// attempt is quarantined (decision 0042 rule 6); `conclude` ends the guardian with it. A refusal
+/// carries the group's counters whenever the group was created, emptied and read.
 ///
 /// `execution_dir` holds the admission lock and the staging directory `input`. The group is
 /// created beside the admission's `supervisor` child, not in `execution_dir`.
@@ -535,7 +687,7 @@ pub(super) fn launch_with(
         &own_pid_namespace,
         &mut session,
     );
-    let settled = settle(group, &group_path, &mut session);
+    let (settled, guardian_reason) = conclude(group, &group_path, &mut session);
     // Removed after the group is gone, on every path that staged it.
     let removed = staged.remove();
     let keeper = session.keeper.take();
@@ -543,11 +695,16 @@ pub(super) fn launch_with(
     let refused = |failure: AttemptFailure| AttemptRefusal { failure, usage };
     let scratch = scratch_listing(plan, keeper.as_ref());
     // The last routing check runs once the group is empty, before the verdict (0056 rule 5, as
-    // reworded by the amendment of 2026-11-13, crashes). A refusal ends the attempt here. A group
-    // that was not observed gone is not empty: `settle` has quarantined the provider already, and
-    // the verdict names `CleanupNotObserved` first, whatever a poll saw.
+    // reworded by the amendment of 2026-11-13, crashes). A refusal ends the attempt here, and so
+    // does a reason that the guardian reported, even when the stub's exit was seen (0056, amendment
+    // of 2026-11-13, the guardian). A group that was not observed gone is not empty: `conclude` has
+    // quarantined the provider already, and the verdict names `CleanupNotObserved` first, whatever
+    // a poll saw or the guardian reported.
     if settled.cleanup_observed {
         routing_after(&phase, &session.routing).map_err(refused)?;
+        if let Some(reason) = guardian_reason {
+            return Err(refused(AttemptFailure::Guardian(reason)));
+        }
     }
     let outcome = Outcome {
         cleanup_observed: settled.cleanup_observed,
@@ -566,6 +723,7 @@ pub(super) fn launch_with(
     else {
         return Err(refused(AttemptFailure::Unobserved));
     };
+    pause_at(plan, Phase::Collecting);
     removed.map_err(|failure| refused(AttemptFailure::Input(failure)))?;
     let binding = manifest_binding(&report, &filter_sha256, input_digest);
     let output = collect_output(keeper, passed.exit, &binding);
@@ -661,7 +819,7 @@ fn lock_failure(refusal: LockRefusal) -> AttemptFailure {
 /// Records that a cleanup was not observed, so that later launches in this process are refused
 /// (decision 0042 rule 6), or that the routing changed during an attempt (0056 rule 5, as reworded
 /// by the amendment of 2026-11-13, crashes). The attempt's verdict then names `CleanupNotObserved`
-/// or `Routing`. It lives in this process only; the persisted quarantine is R02ah's.
+/// or `Routing`. It lives in this process only; the persisted quarantine is R02ai's.
 fn quarantine() {
     QUARANTINED.store(true, Ordering::SeqCst);
 }
@@ -679,8 +837,12 @@ fn run_group(
     session: &mut Session,
 ) -> Result<Passed, AttemptFailure> {
     let limits = probe_group::apply_limits(group).map_err(AttemptFailure::Refused)?;
+    // The guardian holds the group before the stub exists (0042 rule 6, amendment of 2026-11-13).
+    start_guardian(plan, roots, group_path, session)?;
+    pause_at(plan, Phase::Guarded);
     let mut control = start_stub(plan, roots, input, session)?;
     place_stub(group, group_path, session)?;
+    pause_at(plan, Phase::Started);
     let (readiness, start) = release(
         plan,
         roots,
@@ -690,7 +852,11 @@ fn run_group(
         session,
     )?;
     // `await_exit` records the exit in the session itself, on every path that reaped the stub.
-    let (exit, wall_time) = await_exit(plan, session, start)?;
+    let awaited = await_exit(plan, session, start);
+    // The stub is no longer polled and no renewal follows, so the guardian's window stops here,
+    // not after the teardown grace below (0056, amendment of 2026-11-13, the guardian: `S`).
+    send_to_guardian(session.guardian.as_mut(), guardian::STOP);
+    let (exit, wall_time) = awaited?;
     // Decision 0042 rule 6: after the launcher and init teardown a normal exit also requires an
     // empty group. `populated` is not used: measured on 2026-11-12, it stays 1 for a few
     // milliseconds after ordinary exits while the listing is already empty. `settle` kills
@@ -812,8 +978,9 @@ fn lists_pid(listing: &[u8], pid: u32) -> bool {
 
 /// Sends LAUNCH, reads READY before the readiness deadline, observes the group independently and
 /// only then sends RELEASE. Between the observation and RELEASE the keeper is opened, checked and
-/// held in `session`, and the plan's plant step runs (0056 rule 5, as reworded). Returns the
-/// observation and the instant of LAUNCH.
+/// held in `session`, and the plan's plant step runs (0056 rule 5, as reworded). After RELEASE the
+/// guardian receives `L` (0056, amendment of 2026-11-13, the guardian). Returns the observation and
+/// the instant of LAUNCH.
 fn release(
     plan: &AttemptPlan,
     roots: &AdmissionRoots<'_>,
@@ -827,6 +994,7 @@ fn release(
         .write_all(&LAUNCH)
         .map_err(|_| AttemptFailure::NotStarted(NotStartedReason::StubNotStarted))?;
     read_ready(control, start, plan.readiness_deadline)?;
+    pause_at(plan, Phase::Ready);
     // Only a group confirmed by the provider's own reads may be released (0042 rule 6).
     let observation = readiness::observe_group(
         group_path,
@@ -848,6 +1016,7 @@ fn release(
     control
         .write_all(plan.release_record)
         .map_err(|_| AttemptFailure::NotStarted(NotStartedReason::ReleaseNotSent))?;
+    send_to_guardian(session.guardian.as_mut(), guardian::LEASE);
     Ok((observation, start))
 }
 
@@ -888,11 +1057,22 @@ fn read_ready(
 /// Polls the stub until it exits, the wall deadline passes, the output budget is exceeded or the
 /// routing is no longer the admitted one. Returns the exit and the time from `start` to the
 /// observed exit.
+///
+/// At each poll that sees the stub running, a heartbeat is asked when one is due, after the
+/// deadline check (`heartbeat`). The plan's `provider_deadline` switch removes the wall-deadline
+/// part of the check and nothing else, and the plan's pause at `Running` comes first.
 fn await_exit(
     plan: &AttemptPlan,
     session: &mut Session,
     start: Instant,
 ) -> Result<(ExitStatus, Duration), AttemptFailure> {
+    pause_at(plan, Phase::Running);
+    let mut renewals = Renewals::default();
+    let deadline = if plan.provider_deadline {
+        plan.wall_deadline
+    } else {
+        Duration::MAX
+    };
     let child = session.child.as_mut().ok_or(AttemptFailure::Unobserved)?;
     loop {
         let polled = child.try_wait();
@@ -910,20 +1090,18 @@ fn await_exit(
             Ok(Some(status)) => {
                 // An exit that is first seen at or after the deadline is past it too: the
                 // deadline is absolute, whatever the polling interval.
-                running_verdict(
-                    elapsed,
-                    plan.wall_deadline,
-                    session.exceeded.load(Ordering::SeqCst),
-                )?;
+                running_verdict(elapsed, deadline, session.exceeded.load(Ordering::SeqCst))?;
                 return Ok((status, elapsed));
             }
             Ok(None) => {}
             Err(_) => return Err(AttemptFailure::Unobserved),
         }
-        running_verdict(
-            elapsed,
-            plan.wall_deadline,
-            session.exceeded.load(Ordering::SeqCst),
+        running_verdict(elapsed, deadline, session.exceeded.load(Ordering::SeqCst))?;
+        heartbeat(
+            plan,
+            &mut renewals,
+            session.guardian.as_mut(),
+            Instant::now(),
         )?;
         thread::sleep(POLL);
     }
@@ -1101,8 +1279,157 @@ fn join_reader(reader: Option<Capture>, within: Duration) -> Option<io::Result<V
     reader.join().ok()
 }
 
+/// Whether a heartbeat is due at `now`: at the first poll after the release, when no heartbeat has
+/// been asked, and then at the first poll after half a window has passed since the last heartbeat
+/// that was asked. An unavailable store is asked again on the same schedule (0056, amendment of
+/// 2026-11-13, the guardian).
+#[must_use]
+fn heartbeat_due(last_asked: Option<Instant>, now: Instant, window: Duration) -> bool {
+    last_asked.is_none_or(|last| now.saturating_duration_since(last) >= window / 2)
+}
+
+/// The provider's decision on one heartbeat's answer. `Ok(true)` sends `R`, `Ok(false)` sends
+/// nothing (an unavailable store is asked again half a window later), and `Err` stops the renewals
+/// with the part that failed. With `renew_regardless` every answer sends `R`, as the faulty
+/// supervisor of 0042's acceptance does.
+fn on_answer(answer: Heartbeat, renew_regardless: bool) -> Result<bool, LeaseLoss> {
+    match answer {
+        Heartbeat::Confirmed => Ok(true),
+        _ if renew_regardless => Ok(true),
+        Heartbeat::Unavailable => Ok(false),
+        Heartbeat::Lost(part) => Err(part),
+    }
+}
+
+/// The heartbeats that one launch has asked for (0056, amendment of 2026-11-13, the guardian).
+/// Starts with none asked.
+#[derive(Debug, Default)]
+struct Renewals {
+    /// The number of heartbeats asked so far. The store receives it, counted from 0.
+    asked: u32,
+    /// The instant at which the last heartbeat was asked, whatever its answer.
+    last_asked: Option<Instant>,
+}
+
+/// Starts the guardian of the attempt group, when the plan asks for one, and waits for its ready
+/// byte. Its name is the group's last path component. Its deadline is the readiness deadline plus
+/// the wall deadline plus `GUARDIAN_MARGIN`, and its window is a third of the lease (0056,
+/// amendment of 2026-11-13, the guardian). The guardian is stored in `session`, so that every
+/// later path ends it.
+fn start_guardian(
+    plan: &AttemptPlan,
+    roots: &AdmissionRoots<'_>,
+    group_path: &Path,
+    session: &mut Session,
+) -> Result<(), AttemptFailure> {
+    if !plan.guardian {
+        return Ok(());
+    }
+    let not_started = AttemptFailure::NotStarted(NotStartedReason::GuardianNotStarted);
+    let name = group_path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or(not_started)?;
+    let deadline = plan
+        .readiness_deadline
+        .saturating_add(plan.wall_deadline)
+        .saturating_add(GUARDIAN_MARGIN);
+    session.guardian = Some(GuardianLink::start(
+        roots.tool_root,
+        name,
+        deadline,
+        plan.renewal_window(),
+        plan.readiness_deadline,
+    )?);
+    Ok(())
+}
+
+/// Pauses the provider at `phase`, when the plan pauses there. The empty marker file named after
+/// the phase is created first, so that a test can wait for it. Then the pause holds in a loop
+/// until the process is killed, or stalls for its duration and goes on. A marker that cannot be
+/// created is ignored: the waiting test then fails for want of it.
+fn pause_at(plan: &AttemptPlan, phase: Phase) {
+    let Some(pause) = plan.pause.as_ref().filter(|pause| pause.phase == phase) else {
+        return;
+    };
+    fs::File::create(pause.markers.join(phase.word())).ok();
+    match pause.mode {
+        PauseMode::Hold => loop {
+            thread::sleep(HOLD_STEP);
+        },
+        PauseMode::Stall(duration) => thread::sleep(duration),
+    }
+}
+
+/// Asks the store for a heartbeat when one is due (see `heartbeat_due`) and applies its answer.
+/// A confirmation sends `R` to the guardian. An unavailable store sends nothing. A lost lease
+/// returns its part as `LeaseLost`, unless the plan renews regardless (0042 rule 6; 0056,
+/// amendment of 2026-11-13, the guardian).
+fn heartbeat(
+    plan: &AttemptPlan,
+    renewals: &mut Renewals,
+    guardian: Option<&mut GuardianLink>,
+    now: Instant,
+) -> Result<(), AttemptFailure> {
+    if !heartbeat_due(renewals.last_asked, now, plan.renewal_window()) {
+        return Ok(());
+    }
+    let answer = (plan.store)(renewals.asked);
+    renewals.asked = renewals.asked.saturating_add(1);
+    renewals.last_asked = Some(now);
+    if on_answer(answer, plan.renew_regardless).map_err(AttemptFailure::LeaseLost)? {
+        send_to_guardian(guardian, guardian::RENEW);
+    }
+    Ok(())
+}
+
+/// Writes one record to the guardian, when there is one. A failed write is ignored: a guardian
+/// that can no longer read is judged by the report it wrote and by `finish` (0056, amendment of
+/// 2026-11-13, the guardian).
+fn send_to_guardian(guardian: Option<&mut GuardianLink>, record: u8) {
+    if let Some(link) = guardian {
+        link.send(record).ok();
+    }
+}
+
+/// Ends the group phase's part of the attempt and the guardian's part, in this order: sends `S`,
+/// settles the group (`settle`), sends `D` when the group was removed and otherwise closes the
+/// provider's side of the socket, then reads the guardian's report and reaps it. A
+/// guardian that is not reaped without a kill leaves the cleanup unobserved, and the provider is
+/// quarantined. Returns the settled group and the reason that the guardian reported, if any.
+fn conclude(
+    group: ProbeGroup,
+    group_path: &Path,
+    session: &mut Session,
+) -> (Settled, Option<GuardianReason>) {
+    send_to_guardian(session.guardian.as_mut(), guardian::STOP);
+    let mut settled = settle(group, group_path, session);
+    let Some(mut link) = session.guardian.take() else {
+        return (settled, None);
+    };
+    let within = if settled.cleanup_observed {
+        link.send(guardian::DONE).ok();
+        probe_group::CLEANUP_DEADLINE
+    } else {
+        // The group may still exist, so the guardian gets no `D`. It reads end of file instead and
+        // ends the attempt itself, which takes up to its own cleanup deadline after its kill, so
+        // its line is awaited for that and `GUARDIAN_REPORT_MARGIN` more.
+        link.close_records();
+        probe_group::CLEANUP_DEADLINE.saturating_add(GUARDIAN_REPORT_MARGIN)
+    };
+    let (report, reaped) = link.finish(within);
+    if !reaped {
+        settled.cleanup_observed = false;
+        quarantine();
+    }
+    (settled, report.map(|(reason, _emptied)| reason))
+}
+
 #[cfg(test)]
 mod crash_tests;
+mod guardian_link;
+#[cfg(test)]
+mod guardian_tests;
 #[cfg(test)]
 mod io_tests;
 #[cfg(test)]
@@ -1112,6 +1439,8 @@ mod keeper;
 mod kernel_log;
 #[cfg(test)]
 mod mapping_tests;
+#[cfg(test)]
+mod renewal_tests;
 #[cfg(test)]
 mod resource_tests;
 #[cfg(test)]
