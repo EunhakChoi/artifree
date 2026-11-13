@@ -76,6 +76,11 @@ mod probe_group;
 mod probes;
 #[cfg(target_os = "linux")]
 mod readiness;
+// The attempt registry, its reconciliation and the persisted quarantine serve only the launch,
+// which exists only in the test build (0056 rule 16; amendment of 2026-11-14, the attempt
+// registry).
+#[cfg(all(test, target_os = "linux"))]
+mod registry;
 mod report;
 // The routing check during an attempt serves only the launch, which exists only in the test
 // build (0056 rule 16, amendment of 2026-11-13, crashes); its tests sit beside it.

@@ -17,6 +17,8 @@ use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fs::DirBuilder;
 use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::MetadataExt;
+use std::process;
 
 /// The attempt's argument list for the root `/opt/t` and the staged input `/opt/i`, exactly as the launch passes it. The launcher binds the input read-only at `/input` right after the sandbox arguments, makes the scratch's mount point and remounts `/` and `/dev` read-only; the bootstrap mounts the scratch.
 const ATTEMPT_ARGUMENTS: &[&str] = &[
@@ -316,10 +318,19 @@ fn evidence_renders_its_keys_and_never_the_captured_bytes() {
     }
 }
 
+/// The registry directory and the quarantine file of an execution directory (0056, amendment of
+/// 2026-11-14). The test spells them out, so that it does not read the names of the code under
+/// test.
+const REGISTRY_DIRECTORY: &str = "attempts";
+/// The file that a quarantining launch writes into the execution directory.
+const QUARANTINE_FILE_NAME: &str = "quarantine";
+
 /// A directory that a job test passes to `launch` as its execution directory. It is created
-/// with mode 0o700 and removed when the test ends.
+/// with mode 0o700 and removed when the test ends, unless it is kept. A kept directory is run.sh's
+/// to remove.
 pub(super) struct ExecutionDir {
     path: PathBuf,
+    keep: bool,
 }
 
 impl ExecutionDir {
@@ -337,7 +348,18 @@ impl ExecutionDir {
         });
         cleared?;
         DirBuilder::new().mode(0o700).create(&path)?;
-        Ok(Self { path })
+        Ok(Self { path, keep: false })
+    }
+
+    /// Adopts a directory that run.sh made for a job test that spans two units (0056, amendment of
+    /// 2026-11-14). It must be a directory, not a link, with mode 0700. It is kept when the test
+    /// ends.
+    pub(super) fn existing(path: PathBuf) -> Result<Self, Box<dyn Error>> {
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_dir() || (metadata.mode() & 0o777) != 0o700 {
+            return Err(format!("{} is not a directory with mode 0700", path.display()).into());
+        }
+        Ok(Self { path, keep: true })
     }
 
     pub(super) fn path(&self) -> &Path {
@@ -345,13 +367,44 @@ impl ExecutionDir {
     }
 }
 
+/// The names in the registry directory of an execution directory. A directory that was never made
+/// has no names; any other failure to read it is an error.
+fn registry_names(execution_dir: &Path) -> io::Result<Vec<OsString>> {
+    let entries = match fs::read_dir(execution_dir.join(REGISTRY_DIRECTORY)) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut names = Vec::new();
+    for entry in entries {
+        names.push(entry?.file_name());
+    }
+    Ok(names)
+}
+
 impl Drop for ExecutionDir {
     fn drop(&mut self) {
+        if self.keep {
+            return;
+        }
+        // A launch that quarantined keeps its record, and its quarantine file says so. Any other
+        // launch must leave no registry entry (0056, amendment of 2026-11-14).
+        let quarantined = fs::symlink_metadata(self.path.join(QUARANTINE_FILE_NAME)).is_ok();
+        let leftovers = if quarantined {
+            Ok(Vec::new())
+        } else {
+            registry_names(&self.path)
+        };
         let removed = fs::remove_dir_all(&self.path);
         // A failed removal fails the test, unless the test is already unwinding.
         assert!(
             removed.is_ok() || thread::panicking(),
             "could not remove the execution directory {}: {removed:?}",
+            self.path.display()
+        );
+        assert!(
+            thread::panicking() || matches!(&leftovers, Ok(names) if names.is_empty()),
+            "without a quarantine file, no registry entry may remain in {}: {leftovers:?}",
             self.path.display()
         );
     }
