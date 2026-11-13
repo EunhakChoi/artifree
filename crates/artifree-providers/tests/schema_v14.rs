@@ -842,7 +842,7 @@ fn the_schema_refuses_impossible_job_and_attempt_rows() -> TestResult {
 /// as it was, when a table that refers to `jobs` holds a reference that no longer
 /// resolves. The check runs per table, and the refusal names the table.
 #[test]
-fn a_version_13_file_with_an_orphaned_job_request_is_refused_and_left_untouched() -> TestResult {
+fn an_orphaned_job_request_already_in_a_version_13_file_does_not_block_the_upgrade() -> TestResult {
     let dir = TempDir::new();
     let path = database_in(dir.path());
     version_13_with_every_state(&path)?;
@@ -853,21 +853,15 @@ fn a_version_13_file_with_an_orphaned_job_request_is_refused_and_left_untouched(
                  'job_99999999999999999999999999999999', 630);",
         orphan = "0c".repeat(32)
     ))?;
-    let before = files_of(dir.path());
-    let error = SqliteStore::open(&path)
-        .err()
-        .ok_or("the open of a file with an orphaned request was accepted")?;
-    assert!(
-        error
-            .to_string()
-            .contains("would break a foreign key of job_requests"),
-        "the refusal must name the table: {error}"
-    );
-    assert_eq!(
-        files_of(dir.path()),
-        before,
-        "the refused open changed a file"
-    );
-    assert_eq!(user_version(&path)?, 13);
+    // The orphan was there before any step ran, so no step broke it: the
+    // upgrade passes and keeps the row, as it would with foreign keys on.
+    let _store = SqliteStore::open(&path)?;
+    assert_eq!(user_version(&path)?, 14);
+    let orphans: i64 = Connection::open(&path)?.query_row(
+        "SELECT count(*) FROM job_requests WHERE request_key = 'test-key-orphan'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(orphans, 1, "the orphaned request is kept as it was");
     Ok(())
 }

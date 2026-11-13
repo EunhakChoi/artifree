@@ -61,8 +61,12 @@ pub struct JobRecord {
     pub worker: Option<WorkerId>,
     /// Why it failed, once it failed.
     pub failure: Option<JobFailure>,
-    /// The result, once it succeeded and the artifact was not purged.
+    /// The result of a `verify_revision` job, once it succeeded and the
+    /// artifact was not purged.
     pub report: Option<VerifyReport>,
+    /// The result of a `run_profile` job, once it succeeded and the artifact
+    /// was not purged: the two counts and nothing else (decision 0057 rule 12).
+    pub counts: Option<ProfileCounts>,
     /// When it was enqueued.
     pub created_at: UnixMillis,
     /// When a worker first claimed it.

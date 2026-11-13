@@ -102,6 +102,14 @@ impl RawJob {
             }),
             _ => None,
         };
+        // A run_profile result stores no mismatch count (decision 0057 rule 12).
+        let counts = match (self.files_checked, self.bytes_checked, self.mismatch_count) {
+            (Some(files), Some(bytes), None) => Some(ProfileCounts {
+                files: count(files)?,
+                bytes: count(bytes)?,
+            }),
+            _ => None,
+        };
         Ok(JobRecord {
             id: self.id.parse().map_err(corrupt)?,
             actor: self.actor.parse().map_err(corrupt)?,
@@ -123,6 +131,7 @@ impl RawJob {
                 .map(|failure| failure.parse::<JobFailure>().map_err(corrupt))
                 .transpose()?,
             report,
+            counts,
             created_at: UnixMillis(self.created_at),
             started_at: self.started_at.map(UnixMillis),
             finished_at: self.finished_at.map(UnixMillis),
@@ -819,13 +828,17 @@ fn release(
 /// reason that cancels, and its running job gets a cancel request and a raised
 /// fence. A `lease` or `shutdown` revocation (a restore, or the worker's own
 /// stop) is replaced by `trash`: those reasons retry the job at settlement, and a
-/// trashed job must end cancelled, so that its recovery needs a fresh request. Queued and retry-scheduled
-/// jobs are not changed: the trash hides them, and recovery makes them due again.
+/// trashed job must end cancelled, so that its recovery needs a fresh request. A
+/// running job whose newest attempt is already settled but not published is
+/// revoked and ends cancelled at once, since its cleanup is done. Queued and
+/// retry-scheduled jobs are not changed: the trash hides them, and recovery
+/// makes them due again.
 /// It does not wait for the process. `verify_revision` jobs are untouched (0030's
 /// continue-and-hide).
 pub(super) fn revoke_for_trash(
     transaction: &Transaction<'_>,
     artifact: &ArtifactId,
+    now: UnixMillis,
 ) -> Result<(), StoreError> {
     transaction
         .execute(
@@ -844,6 +857,36 @@ pub(super) fn revoke_for_trash(
                AND job_id IN (SELECT id FROM jobs
                               WHERE artifact_id = ?1 AND kind = 'run_profile')",
             [artifact.as_str()],
+        )
+        .map_err(unavailable)?;
+    // A running job whose newest attempt is settled and not revoked has had its
+    // cleanup but not its publication: it is revoked as `trash` and ends
+    // cancelled now, so that neither its publication nor a reclaim after the
+    // recovery can run it (rule 8).
+    transaction
+        .execute(
+            "UPDATE execution_attempts SET revoked = 'trash'
+             WHERE state = 'settled' AND revoked IS NULL
+               AND fence = (SELECT max(e.fence) FROM execution_attempts e
+                            WHERE e.job_id = execution_attempts.job_id)
+               AND job_id IN (SELECT id FROM jobs
+                              WHERE artifact_id = ?1 AND kind = 'run_profile'
+                                AND state = 'running')",
+            [artifact.as_str()],
+        )
+        .map_err(unavailable)?;
+    transaction
+        .execute(
+            "UPDATE jobs SET state = 'cancelled', fence = fence + 1, worker = NULL,
+                 lease_expires_at = NULL, finished_at = ?2
+             WHERE artifact_id = ?1 AND kind = 'run_profile' AND state = 'running'
+               AND NOT EXISTS (SELECT 1 FROM execution_attempts e
+                               WHERE e.job_id = jobs.id AND e.state <> 'settled')
+               AND EXISTS (SELECT 1 FROM execution_attempts e
+                           WHERE e.job_id = jobs.id AND e.revoked = 'trash'
+                             AND e.fence = (SELECT max(f.fence) FROM execution_attempts f
+                                            WHERE f.job_id = jobs.id))",
+            params![artifact.as_str(), now.0],
         )
         .map_err(unavailable)?;
     Ok(())

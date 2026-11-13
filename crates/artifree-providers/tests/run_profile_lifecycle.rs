@@ -725,7 +725,7 @@ fn a_purge_records_purge_on_an_attempt_that_was_not_revoked() -> TestResult {
 }
 
 #[test]
-fn a_purge_with_a_settled_attempt_cancels_the_running_job() -> TestResult {
+fn a_purge_after_the_trash_ended_a_settled_attempt_changes_nothing() -> TestResult {
     let fixture = Fixture::new()?;
     let running = fixture.enqueue("running", 0)?;
     claim_one(&fixture.store, 0, 1)?;
@@ -737,19 +737,24 @@ fn a_purge_with_a_settled_attempt_cancels_the_running_job() -> TestResult {
     );
     fixture.trash()?;
     let before = row_of(&fixture.store, attempt_id(1))?;
+    assert_eq!(
+        fixture.stored(&running.id)?.state,
+        JobState::Cancelled.as_str(),
+        "the trash ended the job of the settled attempt"
+    );
 
     fixture.purge()?;
 
     let ended = fixture.stored(&running.id)?;
     assert_eq!(ended.state, JobState::Cancelled.as_str());
-    assert_eq!(ended.fence, 2, "the claim gave 1 and the purge raised it");
+    assert_eq!(ended.fence, 2, "the claim gave 1 and the trash raised it");
     assert_eq!(
         row_of(&fixture.store, attempt_id(1))?,
         before,
         "the settled attempt is not touched by the purge"
     );
     assert_eq!(before.state, AttemptState::Settled);
-    assert_eq!(before.revoked, None);
+    assert_eq!(before.revoked, Some(Revocation::Trash));
     Ok(())
 }
 
@@ -888,6 +893,56 @@ fn trash_and_purge_replace_a_lease_revocation_so_the_job_ends_cancelled() -> Tes
         settled.state,
         JobState::Cancelled,
         "the purged job ends cancelled, not scheduled again"
+    );
+    Ok(())
+}
+
+/// An attempt that settled but has not published yet is revoked by the trash,
+/// and its job ends cancelled at once: neither its publication nor a reclaim
+/// after the recovery runs it (decision 0057 rule 8).
+#[test]
+fn trash_ends_a_job_whose_attempt_settled_before_its_publication() -> TestResult {
+    let fixture = Fixture::new()?;
+    let running = fixture.enqueue("running", 0)?;
+    let claimed = claim_one(&fixture.store, 1, 1)?;
+    assert_eq!(claimed.job.id, running.id);
+    let settled = settled_job(fixture.store.settle_attempt(&attempt_id(1), at(2))?)?;
+    assert_eq!(settled.state, JobState::Running);
+
+    fixture.trash()?;
+    assert_eq!(
+        row_of(&fixture.store, attempt_id(1))?.revoked,
+        Some(Revocation::Trash),
+        "trash revokes the settled attempt"
+    );
+    assert_eq!(
+        fixture.stored(&running.id)?.state,
+        JobState::Cancelled.as_str(),
+        "the job ends cancelled at once"
+    );
+    let refused = fixture.store.complete_profile_job(
+        &claimed.lease,
+        &attempt_id(1),
+        ProfileBinding {
+            profile: &review(),
+            tool_digest: TOOL_DIGEST,
+        },
+        counts(),
+        at(3),
+    );
+    assert!(
+        refused.is_err(),
+        "the trashed attempt cannot publish: {refused:?}"
+    );
+
+    fixture.recover()?;
+    assert!(
+        claim_as(&fixture.store, 5_000, 2)?.claimed.is_none(),
+        "the recovered artifact's cancelled job is not claimed again"
+    );
+    assert_eq!(
+        fixture.stored(&running.id)?.state,
+        JobState::Cancelled.as_str()
     );
     Ok(())
 }

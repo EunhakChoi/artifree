@@ -646,6 +646,9 @@ fn upgrade_steps(connection: &mut Connection) -> Result<(), StoreError> {
     if version == SCHEMA_VERSION {
         return Ok(());
     }
+    // The foreign keys that do not resolve before any step runs. An older file
+    // may hold some that the steps never touch; a step must add none.
+    let unresolved = foreign_key_violations(&transaction)?;
     if version < 1 {
         let objects: i64 = transaction
             .query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get(0))
@@ -724,6 +727,15 @@ fn upgrade_steps(connection: &mut Connection) -> Result<(), StoreError> {
     }
     if version < 14 {
         rebuild_jobs(&transaction)?;
+    }
+    // Foreign keys are off for these steps (decision 0057 rule 14), so they are
+    // checked here: no table may have more foreign keys that do not resolve
+    // than it had before.
+    if let Some((table, parent)) = newly_broken(&unresolved, &foreign_key_violations(&transaction)?)
+    {
+        return Err(StoreError::Unavailable(format!(
+            "the upgrade would break a foreign key of {table} to {parent}"
+        )));
     }
     transaction
         .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -1109,10 +1121,8 @@ fn job_rows(transaction: &Transaction<'_>) -> Result<i64, StoreError> {
 
 /// Rebuilds `jobs` for schema 14 (decision 0057 rule 14). Every row is copied
 /// with every old column. The step fails, and the caller's transaction rolls
-/// back, when the row count differs or a table that refers to `jobs` has a
-/// foreign key that no longer resolves. The check is per table and never over
-/// the whole database: an older file may hold orphaned rows that this rebuild
-/// does not touch.
+/// back, when the row count differs. [`upgrade`]'s closing check finds a
+/// foreign key that it broke.
 fn rebuild_jobs(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     transaction
         .pragma_update(None, "defer_foreign_keys", true)
@@ -1127,23 +1137,39 @@ fn rebuild_jobs(transaction: &Transaction<'_>) -> Result<(), StoreError> {
             "the upgrade to schema 14 would lose job rows ({before} before, {after} after)"
         )));
     }
-    for table in [
-        "job_requests",
-        "job_findings",
-        "changes",
-        "execution_attempts",
-    ] {
-        let mut check = transaction
-            .prepare(&format!("PRAGMA foreign_key_check({table})"))
-            .map_err(unavailable)?;
-        let mut violations = check.query([]).map_err(unavailable)?;
-        if violations.next().map_err(unavailable)?.is_some() {
-            return Err(StoreError::Unavailable(format!(
-                "the upgrade to schema 14 would break a foreign key of {table}"
-            )));
-        }
-    }
     Ok(())
+}
+
+/// The first table and parent whose count of foreign keys that do not resolve
+/// is higher in `after` than in `before`, or `None` when no step broke one.
+fn newly_broken<'a>(
+    before: &BTreeMap<(String, String), u64>,
+    after: &'a BTreeMap<(String, String), u64>,
+) -> Option<&'a (String, String)> {
+    after
+        .iter()
+        .find(|(key, count)| **count > before.get(*key).copied().unwrap_or_default())
+        .map(|(key, _)| key)
+}
+
+/// How many rows of each table have a foreign key to each parent table that
+/// does not resolve, by `PRAGMA foreign_key_check`. Counts are compared, not
+/// rows, because a step that rebuilds a table may give its rows new row ids.
+fn foreign_key_violations(
+    transaction: &Transaction<'_>,
+) -> Result<BTreeMap<(String, String), u64>, StoreError> {
+    let mut check = transaction
+        .prepare("PRAGMA foreign_key_check")
+        .map_err(unavailable)?;
+    let mut rows = check.query([]).map_err(unavailable)?;
+    let mut counts: BTreeMap<(String, String), u64> = BTreeMap::new();
+    while let Some(row) = rows.next().map_err(unavailable)? {
+        let table: String = row.get(0).map_err(unavailable)?;
+        let parent: String = row.get(2).map_err(unavailable)?;
+        let count = counts.entry((table, parent)).or_default();
+        *count = count.saturating_add(1);
+    }
+    Ok(counts)
 }
 
 /// Applies `schema`, which rebuilds the `changes` table, and keeps the change
@@ -1181,6 +1207,33 @@ fn keeping_feed_head(transaction: &Transaction<'_>, schema: &str) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn counts(entries: &[(&str, &str, u64)]) -> BTreeMap<(String, String), u64> {
+        entries
+            .iter()
+            .map(|(table, parent, count)| (((*table).to_owned(), (*parent).to_owned()), *count))
+            .collect()
+    }
+
+    /// Only a foreign key that an upgrade step broke refuses the upgrade: one
+    /// the file had before is kept, and a table rebuilt with its old orphans
+    /// counts the same.
+    #[test]
+    fn only_a_foreign_key_broken_by_a_step_refuses_the_upgrade() {
+        let before = counts(&[("job_requests", "jobs", 1)]);
+        assert_eq!(newly_broken(&before, &before), None);
+        assert_eq!(newly_broken(&before, &counts(&[])), None);
+        let more = counts(&[("job_requests", "jobs", 2)]);
+        assert_eq!(
+            newly_broken(&before, &more),
+            Some(&("job_requests".to_owned(), "jobs".to_owned()))
+        );
+        let other = counts(&[("job_requests", "jobs", 1), ("changes", "jobs", 1)]);
+        assert_eq!(
+            newly_broken(&before, &other),
+            Some(&("changes".to_owned(), "jobs".to_owned()))
+        );
+    }
 
     /// A rebuild that would drop a row fails and, rolled back with its
     /// transaction, leaves the table as it was; one that keeps every row does

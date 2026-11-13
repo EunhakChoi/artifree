@@ -395,7 +395,7 @@ impl ArtifactStore for SqliteStore {
             if kind == ChangeKind::Deleted {
                 // Decision 0057 rule 8: the trash revokes live run_profile attempts in the
                 // same transaction as the move.
-                jobs::revoke_for_trash(transaction, request.artifact)?;
+                jobs::revoke_for_trash(transaction, request.artifact, now)?;
             }
             let metadata = if kind == ChangeKind::MetadataUpdated
                 && *values.title == current.title

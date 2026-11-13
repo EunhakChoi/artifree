@@ -376,6 +376,7 @@ mod tests {
             worker: None,
             failure: None,
             report: None,
+            counts: None,
             created_at: UnixMillis(created),
             started_at: None,
             finished_at: None,

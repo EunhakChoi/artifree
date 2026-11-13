@@ -15,8 +15,11 @@ implemented; R02bb and R02bc are not**. Roadmap: R02b.
 > `execution_attempts`. A database of version 8 to 13 is upgraded with
 > foreign keys switched off before the transaction and back on after it,
 > since they cannot change inside it and deferring them is not enough: the
-> implicit delete of the old table leaves a deferred violation. A foreign key
-> check of the dependent tables and a row count run before the commit. A
+> implicit delete of the old table leaves a deferred violation. A row count
+> runs before the commit, and a full foreign key check runs before and after
+> the steps: the upgrade refuses only a violation the steps added, so a
+> dangling row an earlier version already left behind is kept, not a reason
+> to refuse the file. A
 > claim that knows no profile of a due `run_profile` job ends it as
 > `execution_unavailable` with no attempt; the worker of this build knows
 > none, so it ends every such job. The job reads, the change feed and the
@@ -29,13 +32,18 @@ implemented; R02bb and R02bc are not**. Roadmap: R02b.
 > `fence`, stores nothing and moves no job, and no job moves while one of its
 > attempts is unsettled; and trash and purge revoke every unsettled attempt,
 > not only a live one, replacing a `lease` or `shutdown` reason, which would
-> otherwise retry a trashed or purged job at settlement. Publication also
-> refuses a binding whose profile or tool digest differs from the attempt
-> row's. Real SQLite tests cover each transition and race of the R02ba row,
+> otherwise retry a trashed or purged job at settlement. Trash also revokes the
+> settled attempt of a job still waiting for publication and ends that job
+> cancelled with a raised fence, since no later settlement would end it and a
+> recovery must not let the old request publish. Publication refuses a binding
+> whose profile or tool digest differs from the attempt row's, and stores the
+> counts with no mismatch count: a `run_profile` result is the counts
+> `JobRecord.counts` carries, never a verify report. Real SQLite tests cover each transition and race of the R02ba row,
 > and mutations of the generation check, the trash revocation, the reason
 > order, the reclaim gate, the terminal gate, the purge tombstone, the
-> replaced-attempt check, the replaced `lease` reason and the binding check
-> each fail their case. 0030 rule 15 and 0042 rule 6 have the notes rule 14
+> replaced-attempt check, the replaced `lease` reason, the binding check, the
+> settled-attempt trash, the empty mismatch count and the before-and-after
+> foreign key comparison each fail their case. 0030 rule 15 and 0042 rule 6 have the notes rule 14
 > asks for. Nothing executes yet: R02bb adds the worker.
 
 ## Context

@@ -16,7 +16,7 @@ use artifree_domain::SourceRevision;
 use artifree_domain::identity::{ActorId, ArtifactId, UnixMillis};
 use artifree_domain::job::{
     AttemptIdentity, AttemptState, JobFailure, JobId, JobState, ProfileName, Revocation,
-    StopReason, VerifyReport, WorkerId,
+    StopReason, WorkerId,
 };
 use artifree_ports::artifact_store::{RequestFingerprint, RequestIdentity};
 use artifree_ports::job_store::{
@@ -338,15 +338,8 @@ fn settle_of_an_unrevoked_attempt_leaves_the_job_running_then_complete_stores_co
         at(300),
     )?;
     assert_eq!(done.state, JobState::Succeeded);
-    assert_eq!(
-        done.report,
-        Some(VerifyReport {
-            files_checked: 3,
-            bytes_checked: 42,
-            mismatch_count: 0,
-            findings: vec![],
-        })
-    );
+    assert_eq!(done.report, None, "a run_profile result is no verification");
+    assert_eq!(done.counts, Some(COUNTS), "the two counts are the result");
     assert_eq!(done.finished_at, Some(at(300)));
     assert_eq!(
         fixture.count("SELECT count(*) FROM job_findings")?,
@@ -545,15 +538,10 @@ fn no_terminal_transition_while_the_attempt_is_unsettled() -> TestResult {
             "{ending:?} once the attempt is settled"
         );
         match ending {
-            Ending::Complete => assert_eq!(
-                ended.report,
-                Some(VerifyReport {
-                    files_checked: 3,
-                    bytes_checked: 42,
-                    mismatch_count: 0,
-                    findings: vec![],
-                })
-            ),
+            Ending::Complete => {
+                assert_eq!(ended.report, None);
+                assert_eq!(ended.counts, Some(COUNTS));
+            }
             Ending::FailWithoutRetry => {
                 assert_eq!(ended.failure, Some(JobFailure::Internal));
             }

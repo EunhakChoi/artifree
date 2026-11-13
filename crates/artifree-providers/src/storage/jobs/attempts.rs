@@ -476,7 +476,7 @@ pub(super) fn complete(
     transaction
         .execute(
             "UPDATE jobs SET state = 'succeeded', worker = NULL, lease_expires_at = NULL,
-                 files_checked = ?2, bytes_checked = ?3, mismatch_count = 0, finished_at = ?4
+                 files_checked = ?2, bytes_checked = ?3, mismatch_count = NULL, finished_at = ?4
              WHERE id = ?1",
             params![
                 lease.job.as_str(),
