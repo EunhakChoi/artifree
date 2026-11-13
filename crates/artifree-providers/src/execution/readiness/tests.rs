@@ -21,9 +21,11 @@ const ROOT_LINE: &str =
 const DEV_LINE: &str = "1295 1290 0:112 / /dev ro,nosuid,nodev,relatime - tmpfs tmpfs rw,mode=755,uid=1001,gid=1001,inode64";
 const TMP_LINE: &str = "1299 1290 0:115 / /tmp rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,size=131072k,nr_inodes=4096,mode=700,uid=1001,gid=1001,inode64";
 /// The launcher's empty read-only tmpfs over `/dev/pts`, stacked on its devpts (0056, amendment of
-/// 2026-11-13, the launcher's `/dev/pts`). Illustrative ids, kernel options as measured on the
-/// runner.
-const PTS_LINE: &str = "1300 1296 0:116 / /dev/pts ro,nosuid,nodev,noexec,relatime - tmpfs tmpfs ro,size=4k,mode=555,uid=1001,gid=1001,inode64";
+/// 2026-11-13, the launcher's `/dev/pts`). Illustrative ids; the options of this line and of the
+/// devpts line under it are the kernel's, as the enforcement job recorded them inside an attempt
+/// (`canary.dev-pts.mount_in_attempt`, run 43373521166). The read-only flag is a mount option:
+/// the super options still say `rw`.
+const PTS_LINE: &str = "1300 1296 0:116 / /dev/pts ro,nosuid,nodev,relatime - tmpfs tmpfs rw,size=4k,mode=555,uid=1001,gid=1001,inode64";
 
 const MEASURED_MOUNTINFO: [&str; 9] = [
     ROOT_LINE,
@@ -32,7 +34,7 @@ const MEASURED_MOUNTINFO: [&str; 9] = [
     "1293 1290 8:1 /opt/artifree/tools/v1/lib64 /lib64 ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
     "1294 1290 0:111 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw",
     DEV_LINE,
-    "1296 1295 0:113 / /dev/pts rw,nosuid,noexec,relatime - devpts devpts rw,mode=600,ptmxmode=666",
+    "1296 1295 0:113 / /dev/pts rw,nosuid,noexec,relatime - devpts devpts rw,mode=620,ptmxmode=666",
     TMP_LINE,
     PTS_LINE,
 ];
@@ -357,8 +359,8 @@ fn dev_pts_must_be_the_read_only_tmpfs_over_mount() {
             edited_table("/dev/pts", |line| {
                 Some(replaced_in_over_mount(
                     line,
-                    " - tmpfs tmpfs ro,size=4k",
-                    " - devpts devpts ro,size=4k",
+                    " - tmpfs tmpfs rw,size=4k",
+                    " - devpts devpts rw,size=4k",
                 ))
             }),
             Err(ReadinessFailure::DevPts),

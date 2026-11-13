@@ -237,6 +237,10 @@ Run again on 2026-11-13 for R02ae, because the filter changed, on the temporary 
 - `job_probes_are_refused_with_their_records`: the socket rule's domain condition removed (`net_socket_netlink`), its type condition removed (`net_socket_inet_seqpacket`), its protocol condition removed (`net_socket_inet_sctp`), `socket` allowed without conditions (`net_socket_netlink`), the `setsockopt` rule's level condition removed (`net_setsockopt_ip_level`), its option condition removed (`net_setsockopt_sndbuf`), `setsockopt` allowed without conditions (`net_setsockopt_sndbuf`), and each of the eight refused network numbers allowed alone (the probe with that number). The test stops at the first missing record, so the probe named is the first of the class that the mutation admits.
 - `job_the_network_reaches_no_host_listener`: `--unshare-net` removed from the attempt's arguments only (the host listener `tcp-loopback4` counted a connection during the launch).
 - `job_host_files_and_processes_stay_intact`: the host's `/var/tmp` bound read-only into the attempt (the payload read the canary in `/var/tmp`).
-- `job_proc_and_dev_pts_stay_inside`: the bootstrap's mount over `/dev/pts` removed with its mount check (the payload opened `/dev/ptmx`).
+- `job_proc_and_dev_pts_stay_inside`: a mount over `/dev/pts` removed with its mount check (the payload opened `/dev/ptmx`).
 - `job_a_leaked_descriptor_is_refused`: the bootstrap's descriptor check removed (the attempt ran and exited with status 0).
 - `job_the_environment_reaches_the_payload_empty`: the provider's `env_clear` on the stub removed (the preload log gained an entry during the launch).
+
+After the amendment of 2026-11-13 (the launcher's `/dev/pts`), the launcher covers `/dev/pts` and the bootstrap only reads the cover back, so the isolation mutations were run once more on the head of R02ae, workflow run 43373647850, the same way. The unmutated baseline passed and these six failed their test: the five above other than `/dev/pts`, again, and two that replace the `/dev/pts` one:
+
+- `job_proc_and_dev_pts_stay_inside`: the launcher's cover removed, with the mount checks kept (the bootstrap refused the table, and the attempt was refused with `NotStarted(NoReadiness)`), and the cover removed with both mount checks bypassed as well (the payload opened `/dev/ptmx` and did not print `proc-dev ptmx error=2`).
