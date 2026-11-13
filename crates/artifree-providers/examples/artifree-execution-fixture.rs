@@ -16,6 +16,10 @@
 //!   `bootstrap <identity>` runs the bootstrap (decision 0056 rule 3). On success
 //!   each one replaces this process with the next program, so they return only
 //!   on failure.
+//! - `guardian <name> <deadline> <window>` runs the guardian of the attempt group
+//!   `<name>` (decision 0056, amendment of 2026-11-13, the guardian). The deadline
+//!   and the renewal window are in milliseconds, the deadline counted from the
+//!   guardian's start. It exits 0 after `D` or after its line.
 //! - `write-probes <directory>` writes the generated probe programs of decision
 //!   0056 (amendment of 2026-11-13) into the directory, one file per probe with
 //!   mode 0o755, and exits 0. The job's `prepare.sh` runs it while it assembles
@@ -32,14 +36,15 @@
 //!   `connection error=<kind>`. It runs until it is killed; the job's socket
 //!   routing names its socket.
 //!
-//! `false-ready`, `core-collector`, `core-listener`, `stub`, `bootstrap` and
-//! `write-probes` exist on Linux only. Elsewhere, and for any other argument list
-//! (including an identity that is not UTF-8), the exit status is 2. A failing
+//! `false-ready`, `core-collector`, `core-listener`, `stub`, `bootstrap`, `guardian`
+//! and `write-probes` exist on Linux only. Elsewhere, and for any other argument list
+//! (including an identity or a guardian name that is not UTF-8, or a guardian deadline
+//! or window that does not parse as `u64`), the exit status is 2. A failing
 //! `false-ready`, `core-collector` or `core-listener` writes its error to stderr
-//! and exits with status 1. A failing `stub`, `bootstrap` or `write-probes` writes
-//! its failure to stderr and exits with status 70. Status 3 means that a failing
-//! mode could not write its error to stderr at all. The two counter modes are
-//! test support, never part of a release.
+//! and exits with status 1. A failing `stub`, `bootstrap`, `guardian` or
+//! `write-probes` writes its failure to stderr and exits with status 70. Status 3
+//! means that a failing mode could not write its error to stderr at all. The two
+//! counter modes are test support, never part of a release.
 
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -51,7 +56,7 @@ use std::process::ExitCode;
 
 #[cfg(target_os = "linux")]
 use artifree_providers::execution::{
-    BootstrapFailure, run_bootstrap, run_stub, write_probe_programs,
+    BootstrapFailure, run_bootstrap, run_guardian, run_stub, write_probe_programs,
 };
 #[cfg(target_os = "linux")]
 use std::convert::Infallible;
@@ -81,6 +86,9 @@ fn main() -> ExitCode {
             Some(value) => run_stub_mode(value, Path::new(input)),
             None => ExitCode::from(2),
         },
+        [mode, name, deadline, window] if mode == "guardian" => {
+            guardian_mode(name, deadline, window)
+        }
         _ => ExitCode::from(2),
     }
 }
@@ -128,6 +136,31 @@ fn run_stub_mode(identity: &str, input: &Path) -> ExitCode {
 /// Other systems have no launch stub, so the mode exits with status 2.
 #[cfg(not(target_os = "linux"))]
 fn run_stub_mode(_identity: &str, _input: &Path) -> ExitCode {
+    ExitCode::from(2)
+}
+
+/// Runs the guardian of the attempt group `name` (decision 0056, amendment of 2026-11-13, the
+/// guardian), with its deadline and renewal window in milliseconds.
+///
+/// A name that is not UTF-8, or a deadline or window that does not parse as `u64`, exits with
+/// status 2. A failure is written to stderr and exits with status 70.
+#[cfg(target_os = "linux")]
+fn guardian_mode(name: &OsStr, deadline: &OsStr, window: &OsStr) -> ExitCode {
+    let number = |text: &OsStr| -> Option<u64> { text.to_str()?.parse().ok() };
+    let (Some(name), Some(deadline), Some(window)) =
+        (name.to_str(), number(deadline), number(window))
+    else {
+        return ExitCode::from(2);
+    };
+    match run_guardian(name, deadline, window) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(failure) => report_failure(&failure, ExitCode::from(70)),
+    }
+}
+
+/// Other systems have no guardian, so the mode exits with status 2.
+#[cfg(not(target_os = "linux"))]
+fn guardian_mode(_name: &OsStr, _deadline: &OsStr, _window: &OsStr) -> ExitCode {
     ExitCode::from(2)
 }
 

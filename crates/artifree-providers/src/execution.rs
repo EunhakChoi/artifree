@@ -5,8 +5,8 @@
 //! manifest, runs one trusted namespace check through the tool root's launcher and one
 //! trusted probe child in a probe cgroup. Every caller outside the tests receives a refusal,
 //! at best `IncompleteEnforcement` (0056 rule 16), and no host is called supported.
-//! `run_stub`, `run_bootstrap` and `write_probe_programs` exist for the test-support program only
-//! (0056 rule 4); the probe programs are of use only under the launch.
+//! `run_stub`, `run_bootstrap`, `run_guardian` and `write_probe_programs` exist for the
+//! test-support program only (0056 rule 4); the probe programs are of use only under the launch.
 //! The launch (0056 rule 14, R02ab and R02ac) is compiled only into this crate's tests, and its
 //! test payload runs the fixed resource and cleanup scenarios of R02ac and the syscall-mapping
 //! and descriptor scenarios of R02ad; no caller outside them can start an attempt.
@@ -56,6 +56,10 @@ mod cgroup;
 // amendment of 2026-11-13, input and output).
 #[cfg(all(test, target_os = "linux"))]
 mod collection;
+// The guardian of one attempt (decision 0056, amendment of 2026-11-13, the guardian). Its entry
+// point is the test-support program, like the stub's (0056 rule 4).
+#[cfg(target_os = "linux")]
+mod guardian;
 #[cfg(target_os = "linux")]
 mod launcher;
 // The admission lock serves only the launch, which exists only in the test build (0056 rule 16).
@@ -88,6 +92,8 @@ mod usage;
 
 #[cfg(target_os = "linux")]
 pub use bootstrap::{BootstrapFailure, run_bootstrap, run_stub};
+#[cfg(target_os = "linux")]
+pub use guardian::{GuardianFailure, run_guardian};
 #[cfg(target_os = "linux")]
 pub use probes::write_probe_programs;
 pub use report::HostReport;

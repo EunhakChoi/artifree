@@ -70,6 +70,8 @@ usage: prepare.sh VERB [ARGUMENT]
                       crash crash-setter linger)
   kernel-log          print the last 20 kernel log lines about seccomp (type=1326) or oom
   kernel-log-access   let the runner read the kernel log and lift its rate limit; refuse while an audit daemon runs
+  supervisor-clear UNIT  remove the empty attempt groups directly beneath the supervisor test unit UNIT
+                      (artifree-supervisor-<phase>-<0|1>); a group that is not empty stays and fails the verb
 EOF
   exit 2
 }
@@ -485,12 +487,37 @@ kernel_log_access() {
     "$dmesg_restrict" "$printk_ratelimit"
 }
 
+# R02ah (decision 0056, amendment of 2026-11-13, the guardian): a supervisor killed at a phase
+# leaves its empty attempt group, which only R02ai's reconciliation would remove. This removes the
+# groups named attempt-<digits>-<digits> directly beneath the named test unit's group and nothing
+# else. rmdir refuses a group that is not empty, and that refusal fails the verb.
+supervisor_clear() {
+  local unit=$1 group entry name
+  group="/sys/fs/cgroup/system.slice/$unit.service"
+  [[ -d "$group" ]] || return 0
+  for entry in "$group"/attempt-*; do
+    [[ -e "$entry" ]] || continue
+    name="${entry##*/}"
+    [[ $name =~ ^attempt-[0-9]+-[0-9]+$ && -d "$entry" && ! -L "$entry" ]] || continue
+    rmdir -- "$entry"
+  done
+}
+
+is_supervisor_unit() {
+  [[ $1 =~ ^artifree-supervisor-(guarded|started|ready|running|collecting)-[01]$ ]]
+}
+
 main() {
   local verb=${1:-}
   case "$verb" in
     install) (( $# == 3 )) || usage ;;
     scenario)
       if (( $# != 2 )) || ! is_scenario "$2"; then
+        usage
+      fi
+      ;;
+    supervisor-clear)
+      if (( $# != 2 )) || ! is_supervisor_unit "$2"; then
         usage
       fi
       ;;
@@ -540,6 +567,7 @@ main() {
     scenario) set_scenario "$2" ;;
     kernel-log) kernel_log ;;
     kernel-log-access) kernel_log_access ;;
+    supervisor-clear) supervisor_clear "$2" ;;
   esac
 }
 

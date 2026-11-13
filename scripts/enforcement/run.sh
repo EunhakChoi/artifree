@@ -116,6 +116,88 @@ run_scenario() {
   run_in_scenario "$1" resource_tests "$2" "$3" "$4"
 }
 
+# death_at PHASE GUARDIAN SCENARIO kills the supervisor of a guardian test at PHASE and checks what it
+# leaves (R02ah, decision 0056, amendment of 2026-11-13, the guardian). A test must run the supervisor
+# in a unit with `KillMode=process`, or the service manager does the guardian's work and the test
+# proves nothing. Within 10 s no payload, probe or guardian process may be left. Each attempt group
+# beneath the unit must be empty, and there must be exactly one unless the phase is collecting, where
+# there must be none. With GUARDIAN=1 and any phase but collecting, the guardian's line must name
+# supervisor-gone with emptied=1. Otherwise no guardian line may appear. The unit is then removed.
+death_at() {
+  local phase=$1 guardian=$2 scenario=$3
+  local unit="artifree-supervisor-$phase-$guardian"
+  local markers="$OUT/death-$phase-$guardian"
+  local log="$OUT/death-$phase-$guardian.log"
+  local group="/sys/fs/cgroup/system.slice/$unit.service"
+  local pattern='artifree-execution-payload|/tools/probes/|/tools/v1/probes/|artifree-execution-fixture guardian'
+  local unit_pid main tries status=0 populated left
+  local -a groups=()
+  sudo "$PREPARE" scenario "$scenario"
+  rm -rf -- "$markers"
+  mkdir -p -- "$markers"
+  # The subshell, which waits for sudo without exec, is the runner's own process, so `kill -0` can
+  # probe it; sudo's process is root's, where `kill -0` fails with EPERM whether it runs or not.
+  (
+    sudo systemd-run --quiet --wait --pipe --collect --service-type=exec --unit="$unit" \
+      -p Delegate=yes -p KillMode=process \
+      --uid="$(id -u)" --gid="$(id -g)" --working-directory="$PWD" \
+      --setenv="ARTIFREE_HOLD_PHASE=$phase" --setenv="ARTIFREE_HOLD_GUARDIAN=$guardian" \
+      --setenv="ARTIFREE_HOLD_MARKERS=$PWD/$markers" \
+      "$lib_binary" --ignored --exact execution::attempt::guardian_tests::job_supervisor_holds_at_its_phase \
+      --test-threads=1
+  ) > "$log" 2>&1 &
+  unit_pid=$!
+  for ((tries = 0; tries < 600; tries++)); do
+    [[ -e "$markers/$phase" ]] && break
+    kill -0 "$unit_pid" 2> /dev/null || break
+    sleep 0.1
+  done
+  [[ -e "$markers/$phase" ]] || fail "the supervisor wrote no $phase marker within 60 s (guardian=$guardian)"
+  main="$(systemctl show -p MainPID --value "$unit.service")"
+  [[ $main =~ ^[1-9][0-9]*$ ]] || fail "the unit $unit has no main process: $main"
+  sudo kill -KILL "$main"
+  for ((tries = 0; tries < 100; tries++)); do
+    status=0
+    pgrep -f "$pattern" > /dev/null || status=$?
+    ((status == 1)) && break
+    ((status == 0)) || fail "the process check after the death at $phase failed with status $status"
+    sleep 0.1
+  done
+  if ((status != 1)); then
+    pgrep -a -f "$pattern" >&2 || true
+    fail "a payload, probe or guardian process outlived the supervisor's death at $phase (guardian=$guardian)"
+  fi
+  # The guardian's line is matched without an anchor, because libtest's `test ... ` line may precede it
+  # on the same line.
+  # The provider places the attempt group beside `supervisor`, directly beneath the unit's group, and
+  # names it attempt-<digits>-<digits>. The cgroup file system is readable without privilege.
+  for left in "$group"/attempt-*; do
+    [[ -d "$left" && ${left##*/} =~ ^attempt-[0-9]+-[0-9]+$ ]] && groups+=("$left")
+  done
+  if [[ $phase == collecting ]]; then
+    ((${#groups[@]} == 0)) || fail "an attempt group is left after the death at collecting: ${groups[*]}"
+  else
+    ((${#groups[@]} == 1)) || fail "the death at $phase (guardian=$guardian) left ${#groups[@]} attempt groups, not 1"
+    # The kernel may report the last exit a moment after the processes are gone, so the check is
+    # retried for up to 2 s.
+    for ((tries = 0; tries < 20; tries++)); do
+      populated="$(grep '^populated ' "${groups[0]}/cgroup.events" || true)"
+      [[ $populated == 'populated 0' ]] && break
+      sleep 0.1
+    done
+    [[ $populated == 'populated 0' ]] || fail "the attempt group after the death at $phase is not empty: $populated"
+  fi
+  if [[ $guardian == 1 && $phase != collecting ]]; then
+    grep -q 'guardian supervisor-gone emptied=1' "$log" || fail "the guardian reported no supervisor-gone emptied=1 line after the death at $phase"
+  elif grep -Eq 'guardian (supervisor-gone|renewal-expired|deadline) emptied=' "$log"; then
+    fail "a guardian line appeared after the death at $phase (guardian=$guardian)"
+  fi
+  sudo "$PREPARE" supervisor-clear "$unit"
+  sudo systemctl stop "$unit.service" 2> /dev/null || true
+  sudo systemctl reset-failed "$unit.service" 2> /dev/null || true
+  wait "$unit_pid" || true
+}
+
 # This script changes the host's crash routing, its AppArmor profiles, /opt, and the kernel
 # log's access and rate limit (`kernel.dmesg_restrict`, `kernel.printk_ratelimit`). It is for
 # the job's disposable runner only (decision 0056 rule 12).
@@ -130,6 +212,7 @@ restore_host() {
   local status=$?
   if ((status != 0)); then
     sudo "$PREPARE" kernel-log || true
+    sudo systemctl stop 'artifree-supervisor-*' 2> /dev/null || true
     sudo "$PREPARE" launcher-back 2> /dev/null || true
     sudo "$PREPARE" fixture-back 2> /dev/null || true
     sudo "$PREPARE" nomem-slice-off 2> /dev/null || true
@@ -395,6 +478,24 @@ sudo "$PREPARE" listener-stop
 for key in core.pipe.before core.pipe.after core.socket.before core.socket.after; do
   grep -q "^${key}=" "$OUT/environment.txt" || fail "the environment record holds no $key"
 done
+sudo "$PREPARE" scenario exit
+
+say "part 11: the guardian"
+# R02ah (decision 0056, amendment of 2026-11-13, the guardian): renewals against the stand-in store, each test in one process.
+run_in_scenario "$lib_binary" guardian_tests linger guardian-lease job_lease_loss_ends_the_attempt
+run_in_scenario "$lib_binary" guardian_tests linger guardian-unavailable job_an_unavailable_store_lets_the_guardian_end_it
+run_in_scenario "$lib_binary" guardian_tests linger guardian-stall job_a_stalled_supervisor_is_ended_by_the_guardian
+run_in_scenario "$lib_binary" guardian_tests hang guardian-faulty job_a_faulty_supervisor_is_ended_at_the_deadline
+run_in_scenario "$lib_binary" guardian_tests hang guardian-confirmed job_confirmed_renewals_end_at_the_deadline
+run_in_scenario "$lib_binary" guardian_tests copy guardian-fixture job_the_fixture_plan_still_yields_its_output
+# The death of the supervisor at each phase, in a unit with KillMode=process (amendment rule 9).
+death_at guarded 1 exit
+death_at started 1 exit
+death_at ready 1 exit
+death_at running 1 linger
+death_at collecting 1 copy
+# Without the guardian, only the launcher's --die-with-parent ends the payload.
+death_at running 0 linger
 sudo "$PREPARE" scenario exit
 
 say "restore the routing and the profile"
