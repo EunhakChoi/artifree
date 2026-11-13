@@ -1,10 +1,12 @@
 # 0056: Delivering the Linux execution provider
 
 Date: 2026-11-12. Status: **accepted as a plan; R02aa (host admission and the
-enforcement job), R02ab (the first launch, only from the job's tests) and
-R02ac (resources and cleanup under that launch, with the scratch amended
-below) and R02ad (the syscall mapping, as amended on 2026-11-13; its x32
-class fails acceptance on the reviewed kernel) are implemented**.
+enforcement job), R02ab (the first launch, only from the job's tests), R02ac
+(resources and cleanup under that launch, with the scratch amended below)
+and R02ad (the syscall mapping, as amended on 2026-11-13; its x32 class
+fails acceptance on the reviewed kernel) are implemented; R02ae (files,
+descriptors and network) is planned in the second amendment of
+2026-11-13**.
 Roadmap: R02a. Builds on
 [0042](0042-linux-untrusted-execution.md) and
 [0055](0055-operating-background-work.md).
@@ -293,6 +295,187 @@ how; where the two could be read differently, 0042 holds.
 > entries; the launch; the ban on first-party `unsafe`; and rule 12, under
 > which no probe runs on a contributor's host.
 
+> **Amendment, 2026-11-13 (files, descriptors and network).** 0042 asks for
+> the rows "Host files and processes" and "Network" of its matrix: host
+> canaries, traversal, `/proc` descriptors, mount changes, tracing and
+> signals, leaked descriptors and executable configuration injection fail,
+> and IPv4, IPv6, DNS, host loopback, metadata addresses, pathname and
+> abstract Unix sockets and inherited sockets cannot reach host or external
+> listeners, proved with real listeners whose counters stay zero. The
+> amendment of 2026-11-12 also left to R02ae whether the private `/proc` and
+> the launcher's `/dev/pts` reach beyond the attempt. Temporary jobs
+> (deleted, never merged) measured on `ubuntu-24.04` (kernel 7.0) before
+> R02ae was written. They ran static programs of their own under the
+> launcher with the attempt's namespaces, binds and read-only remounts,
+> **without the bootstrap and without the seccomp filter**, against
+> listeners and canaries they had made on the runner. Without the bootstrap
+> there was no scratch: the sandbox's `/tmp` was the launcher's read-only
+> mount point, while in an attempt the bootstrap mounts the scratch there.
+>
+> - The filter refuses `socket`, so today every network attempt of a payload
+>   ends at the filter, and the network namespace is never what stops it:
+>   leaving out `--unshare-net` would pass every network test. That is the
+>   case 0042 rules out when it asks for real listeners rather than a failed
+>   call.
+> - Inside, the network namespace held `lo` alone and no IPv4 route.
+>   Connections to `127.0.0.1` and `::1` on the port of a host listener
+>   were refused by the attempt's own loopback; the runner's own address,
+>   the metadata address `169.254.169.254`, an external IPv4 and IPv6
+>   address and two resolvers off the host failed with `ENETUNREACH`;
+>   datagrams to a host listener's port on `127.0.0.1` and to the host's
+>   resolver at `127.0.0.53` were sent into the attempt's own loopback. A
+>   pathname socket in the host's `/tmp` did not exist inside, and a host
+>   listener on an abstract name refused the connection: abstract names
+>   belong to the network namespace. Raw and packet sockets failed with
+>   `EPERM`; a netlink socket was made, for the attempt's own namespace. A
+>   listener inside the attempt on `127.0.0.1` and on an abstract name
+>   accepted a connection from inside. Every host listener counted the one
+>   connection the job made to check it before the launch, and nothing
+>   between the start and the end of the launch.
+> - Canary files in the runner's home and in `/tmp` did not exist inside,
+>   also not through `/tools/..`, `/proc/1/root` or `/proc/self/cwd/..`; the
+>   root refused file creation (read-only); the canaries were unchanged
+>   afterwards.
+> - A host process of the same account was not visible: signalling its host
+>   PID failed with `ESRCH`, and `kill(-1, SIGKILL)` killed the program's own
+>   child and left the host process running.
+> - `/proc`: writes to `kernel.hostname`, `vm.drop_caches`,
+>   `kernel.core_pattern` and `/proc/sysrq-trigger` failed with `EACCES`, and
+>   `kernel.ns_last_pid` with `EPERM`; the host's values were unchanged. The
+>   per-process files of the attempt's own processes (`oom_score_adj` raised,
+>   `comm`) were writable, and the attempt's PID namespace shows no other
+>   process.
+> - `/dev/pts` is a devpts instance of its own (`ptmxmode=666`), and
+>   `/dev/ptmx` is a link to `pts/ptmx`: opening it made terminal 0 inside
+>   and none on the host. Every devpts instance draws on the host-wide
+>   `kernel.pty.max` budget, though, so a payload allowed to open terminals
+>   could exhaust the budget of every other instance on the host. In a
+>   process holding `CAP_SYS_ADMIN` in the sandbox's user namespace and a
+>   mount namespace of its own, as the bootstrap does: unmounting
+>   `/dev/pts` failed with `EINVAL` (the launcher's mounts are locked, since
+>   it enters a nested user namespace); a new devpts instance with `max=0`
+>   still let `/dev/ptmx` open; an empty read-only tmpfs mounted over
+>   `/dev/pts` made opening `/dev/ptmx` fail with `ENOENT` and file creation
+>   there with `EROFS`. `/dev/shm` is read-only.
+> - A descriptor the launcher's parent held without close-on-exec reached
+>   the program inside (number 9), with two more that the runner's agent had
+>   leaked (142 and 145).
+>
+> So R02ae works as follows. Rules 3, 13, 14 and 17 are reworded at the
+> end; the others stay as written.
+>
+> - **Local networking in the fixture profile.** As 0042, rule 4 permits,
+>   the profile allows communication entirely inside the attempt, so that
+>   the network namespace, not the filter, is what the network tests prove.
+>   `socket` is allowed only for these forms: `AF_UNIX` stream or datagram
+>   with protocol 0; `AF_INET` and `AF_INET6` stream with protocol 0 or TCP,
+>   and datagram with protocol 0 or UDP; the close-on-exec and non-blocking
+>   flags may be added to the type. `setsockopt` is allowed only at the
+>   socket level for `SO_REUSEADDR`. `bind`, `listen`, `accept4`,
+>   `connect`, `sendto`, `recvfrom`, `getsockname` and `shutdown` are
+>   allowed. Every other domain (netlink and packet among them), type (raw
+>   and sequenced packets among them) and protocol (SCTP, MPTCP and L2TP
+>   among them, whose modules the kernel would load on demand), every other
+>   socket option, and the calls that pass descriptors or messages with
+>   control data (`sendmsg`, `recvmsg`, `socketpair`) stay refused, and the
+>   i386 `socketcall` stays refused by the architecture check. The mapping
+>   gains a network class: a probe with its record for each refused form,
+>   and controls for the allowed ones. Its guard mutations, each alone: the
+>   domain condition removed, the type condition removed, the protocol
+>   condition removed, and the condition on `setsockopt` removed, each of
+>   which the probes test must fail. Because the filter changes, the whole
+>   mutation matrix of R02ad is run again.
+> - **What reaches the payload.** Nothing new at run time. The listeners'
+>   ports and the canaries' paths are constants that the test and the
+>   payload fixture share. The runner's own address is a fact of the
+>   prepared host: the preparation writes it into the tool root, under the
+>   manifest, as it writes the scenario. The canary process is not named to
+>   the payload: the payload signals every PID number up to the kernel's
+>   `pid_max` with signal 0, and then sends `SIGKILL` to `-1`.
+> - **Network.** The job test runs real listeners in its own process on the
+>   host, each with a counter, and checks each by one connection of its own
+>   before the launch: TCP on `127.0.0.1` and `::1`, TCP on the runner's own
+>   address, UDP on `127.0.0.1`, a pathname Unix socket in the host's `/tmp`
+>   and an abstract one. In one launch the payload tries every listener, the
+>   metadata address, an external IPv4 and IPv6 address and a resolver, and
+>   reports each result; as a positive control it listens on `127.0.0.1`
+>   and on an abstract name inside the attempt and connects to both.
+>   Passing means: no counter changes between the start and the end of the
+>   launch; the controls succeed; and, read from outside through `/proc`
+>   while the payload holds, its network namespace lists `lo` alone in
+>   `net/dev`, no route in `net/route`, and in `net/ipv6_route` only routes
+>   through `lo`. The payload's error numbers are reported but are not the
+>   evidence. Packets towards the metadata address, the external addresses
+>   or a resolver are not counted on the host: the runner's own agent uses
+>   them, and a packet that cannot leave the attempt's namespace never
+>   reaches the host's stack; the route tables read from outside are the
+>   evidence for them. Its mutation: `--unshare-net` removed from the
+>   attempt's argument list only (the admission's namespace check keeps
+>   it), and the test must fail on a counter or on the outside reading, not
+>   earlier.
+> - **Host files and processes.** The test makes canaries before the launch
+>   outside `/tmp`, which the scratch shadows in an attempt: a file in
+>   `/var/tmp` and one in the runner's home, a directory with mode 0777
+>   beside the first, and a process of the runner's account. The payload
+>   tries to read the files, also through `/tools/..`, `/proc/1/root` and
+>   `/proc/self/cwd/..`, to create files in the directory's path and in `/`,
+>   to signal every PID number and then `kill(-1, SIGKILL)`. Passing means:
+>   every read and every creation fails (`ENOENT`, or `EROFS` for `/`), and,
+>   read from outside, the files' bytes and modification times are
+>   unchanged, the directory is empty and the process is alive. Its
+>   mutation: the host's `/var/tmp` bound read-only into the attempt, which
+>   must fail the test on the reads alone. Mount changes and tracing are
+>   refused by the filter and stay proved by the mapping.
+> - **`/proc` and `/dev/pts`.** The bootstrap closes `/dev/pts` (rule 3,
+>   reworded): in its own mount namespace, after the scratch, it mounts an
+>   empty read-only tmpfs over it, and the provider's read of the mount
+>   table requires that mount. The payload tries the five writes to
+>   `/proc/sys` and `/proc/sysrq-trigger` measured above and opens
+>   `/dev/ptmx`; the test reads those values before and after the launch
+>   and requires them unchanged, every write refused and the open failing
+>   with `ENOENT`. Its mutation: the bootstrap without the over-mount, which
+>   must fail both the provider's mount check and, with that check removed
+>   too, the open. This closes the point of the amendment of 2026-11-12:
+>   `/proc` does not reach beyond the attempt, and `/dev/pts` is closed.
+> - **Leaked descriptors, with a real leak.** The test opens, without
+>   close-on-exec, a directory, a socket connected to one of its listeners,
+>   and a pipe, then launches. The bootstrap's check of the R02ab note must
+>   refuse: the attempt does not start, the payload prints nothing, and the
+>   listener receives nothing. Its mutation: the check removed, so the
+>   payload starts with the leaked descriptors and the test fails.
+> - **Executable configuration injection.** The job builds a preload canary,
+>   a small shared object of the repository's own whose initializer appends
+>   the name of the program that loaded it to a log file on the host, and
+>   runs the test's unit with `LD_PRELOAD` naming it, `LD_LIBRARY_PATH` and
+>   `BASH_ENV` set. The test requires its own entry in the log (so the
+>   injection is live) and no entry from any program the provider starts:
+>   the stub, the launcher, the bootstrap or the payload. The payload also
+>   reports its environment, which must hold no variable. Its mutation: the
+>   provider's clearing of the stub's environment removed, the first of the
+>   three clearings, which must leave an entry of the stub. A first attempt
+>   writes a marker into its scratch and tries `/dev/shm`; a second attempt
+>   must not find the marker. The payload cannot write the tool root, `/` or
+>   `/dev` (R02ac), so no file it writes outlives the attempt.
+>
+> The rules, reworded:
+>
+> - **Rule 3.** After it mounts the scratch, the bootstrap mounts an empty
+>   read-only tmpfs over `/dev/pts` in the same mount namespace and reads it
+>   back with the scratch; the provider's read of the mount table requires
+>   it.
+> - **Rule 13** also records the canaries' observations.
+> - **Rule 14.** The R02ae row names local networking in the fixture profile,
+>   the network test with its listeners and its mutation, the canaries, the
+>   `/proc` checks and the closed `/dev/pts`, the real leak and the
+>   injection checks.
+> - **Rule 17.** An R02ae point: whether `/proc` and `/dev/pts` reach beyond
+>   the attempt, settled by this amendment.
+>
+> What this does not change: 0042; the launch and its arguments; the other
+> steps of the bootstrap; rule 12. The listeners and the preload canary run
+> in the job's test unit on the disposable runner; nothing of this runs on
+> a contributor's host.
+
 > **Note, 2026-11-12 (R02aa).** The provider's admission and the job
 > `Linux enforcement` exist. On the runner the provider's own code did what
 > the second measurement did with shell commands, which settles the first
@@ -528,7 +711,9 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
    the launcher's direct child, under the launcher's init. In this order it:
    makes its own mount namespace, mounts the scratch there as one tmpfs with
    the flags of 0042, rule 4 and the size and the inode count of 0042, rule 5,
-   and reads them back from its mount table;
+   mounts an empty read-only tmpfs over `/dev/pts` there (the amendment of
+   2026-11-13, files, descriptors and network), and reads both back from its
+   mount table;
    sets the soft and hard resource limits of 0042, rule 5 (descriptors, core
    size) and reads them back; drops what the launcher left of capabilities,
    the two of rule 2 among them and the bounding set included, and
@@ -630,7 +815,9 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
 13. **Each run records its environment** as 0042 asks: kernel, architecture,
     the launcher's version and digest, the policy's digest, the delegated
     controllers, the effective limits, the peak memory, the cleanup
-    observation and the listener counters, as an artifact of the job.
+    observation, the listener counters and the canaries' observations (the
+    amendment of 2026-11-13, files, descriptors and network), as an artifact
+    of the job.
 
 ### Slices
 
@@ -640,16 +827,16 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
     proves and which stay open. No slice runs a payload without the limits,
     the privilege drop and a default-deny filter of rule 3.
 
-| Slice | What it adds                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | 0042                  |
-| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
-| R02aa | The enforcement job with its three parts; the provider's admission: namespaces actually made, controllers written and read back, a group killed and seen empty, the routing policy, the kernel; every refusal of rule 10, for the tool root only a launcher or test-support program that is missing or not a regular executable file (the manifest's refusal is R02ab's). No payload.                                                                                                                                                          | 1, 5 (routing), 8     |
-| R02ab | The first launch: the tool root and its manifest, the stub and the handshake, the group's limits, the bootstrap with limits, privilege drop and a default-deny filter, the wall deadline, kill and the empty group, one attempt at a time by a crash-released lock. The fixture only exits.                                                                                                                                                                                                                                                    | 3 (tools), 4, 5, 6, 8 |
-| R02ac | The launch as amended on 2026-11-12 (read-only root and `/dev`, the scratch mounted and bounded by the bootstrap and read back by the provider), with its checks: file creation outside the scratch fails, and a launch without a read-only remount, without the inode count or without the provider's read of the mount table fails its test. Resources and cleanup under that launch: fork and thread bomb, memory, scratch bytes and inodes, log flood, hang, CPU; double fork, `setsid`, ignored signals, held pipes, a background writer. | 4 (scratch), 5, 6, 8  |
-| R02ad | The public mapping from each system-call restriction to its filter entry, probe, independent observation and mutation, and the descriptor ceiling with its inheritance, setter and guard checks (the real-leak case of an inherited descriptor is R02ae's).                                                                                                                                                                                                                                                                                    | 4, 8                  |
-| R02ae | Files, descriptors and network: host canaries, leaked descriptors, real listeners with counters.                                                                                                                                                                                                                                                                                                                                                                                                                                               | 4, 8                  |
-| R02af | Input staging from a pinned revision's files, and output collection in memory through a directory handle, with the hostile trees.                                                                                                                                                                                                                                                                                                                                                                                                              | 3 (input), 7, 8       |
-| R02ag | The crash acceptance: cores under file routing after `fork` and `exec`, the weakened limit, the pipe and socket routes with counters, a routing change that stops admission.                                                                                                                                                                                                                                                                                                                                                                   | 5 (cores), 8          |
-| R02ah | The guardian with its own deadline, death of the supervisor at each phase, the attempt registry and quarantine. Renewals run against a stand-in for the store, including one that keeps renewing after its fence is revoked and one that renews for the whole 120 seconds.                                                                                                                                                                                                                                                                     | 6, 8                  |
+| Slice | What it adds                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | 0042                  |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
+| R02aa | The enforcement job with its three parts; the provider's admission: namespaces actually made, controllers written and read back, a group killed and seen empty, the routing policy, the kernel; every refusal of rule 10, for the tool root only a launcher or test-support program that is missing or not a regular executable file (the manifest's refusal is R02ab's). No payload.                                                                                                                                                                                        | 1, 5 (routing), 8     |
+| R02ab | The first launch: the tool root and its manifest, the stub and the handshake, the group's limits, the bootstrap with limits, privilege drop and a default-deny filter, the wall deadline, kill and the empty group, one attempt at a time by a crash-released lock. The fixture only exits.                                                                                                                                                                                                                                                                                  | 3 (tools), 4, 5, 6, 8 |
+| R02ac | The launch as amended on 2026-11-12 (read-only root and `/dev`, the scratch mounted and bounded by the bootstrap and read back by the provider), with its checks: file creation outside the scratch fails, and a launch without a read-only remount, without the inode count or without the provider's read of the mount table fails its test. Resources and cleanup under that launch: fork and thread bomb, memory, scratch bytes and inodes, log flood, hang, CPU; double fork, `setsid`, ignored signals, held pipes, a background writer.                               | 4 (scratch), 5, 6, 8  |
+| R02ad | The public mapping from each system-call restriction to its filter entry, probe, independent observation and mutation, and the descriptor ceiling with its inheritance, setter and guard checks (the real-leak case of an inherited descriptor is R02ae's).                                                                                                                                                                                                                                                                                                                  | 4, 8                  |
+| R02ae | Files, descriptors and network as amended on 2026-11-13: local networking in the fixture profile (with the mapping's network class, its guard mutations and the R02ad mutations run again), real host listeners whose counters do not change during the launch with the attempt's namespace read from outside and a mutation without the network namespace, host canaries and signals with a mutation exposing a host directory, `/proc` and the closed `/dev/pts`, a real descriptor leak refused by the bootstrap, and configuration injection with a live preload canary. | 4, 8                  |
+| R02af | Input staging from a pinned revision's files, and output collection in memory through a directory handle, with the hostile trees.                                                                                                                                                                                                                                                                                                                                                                                                                                            | 3 (input), 7, 8       |
+| R02ag | The crash acceptance: cores under file routing after `fork` and `exec`, the weakened limit, the pipe and socket routes with counters, a routing change that stops admission.                                                                                                                                                                                                                                                                                                                                                                                                 | 5 (cores), 8          |
+| R02ah | The guardian with its own deadline, death of the supervisor at each phase, the attempt registry and quarantine. Renewals run against a stand-in for the store, including one that keeps renewing after its fence is revoked and one that renews for the whole 120 seconds.                                                                                                                                                                                                                                                                                                   | 6, 8                  |
 
 15. **What R02a leaves to R02b.** R02ab to R02ag launch without the ownership
     record of 0042, rule 6; R02ah adds it. Everything that needs the job store
@@ -688,6 +875,9 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
       the bootstrap, in a mount namespace of its own.
     - R02ad: how a refusal is attributed to the filter rather than to the
       kernel. Settled by the amendment of 2026-11-13 (the syscall mapping).
+    - R02ae: whether the private `/proc` and the launcher's `/dev/pts` reach
+      beyond the attempt (the amendment of 2026-11-12). Settled by the
+      amendment of 2026-11-13 (files, descriptors and network).
     - R02af: how the keeper of 0042, rule 7 holds the scratch until
       collection ends, now that the mount is made inside the sandbox and
       lives in the bootstrap's mount namespace.
