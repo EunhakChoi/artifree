@@ -1,9 +1,11 @@
 //! Behavioral tests for the attempt's fixed argument list and the namespace
-//! check's list (decision 0056 rule 2 with its amendment of 2026-11-12, and
-//! decision 0042 rule 1): the scratch is only a mount point that the bootstrap
-//! fills, the attempt is granted exactly the two capabilities, the read-only
-//! remounts come after every mount option and before `--chdir`, and the
-//! namespace check keeps its own scratch and gets neither.
+//! check's list (decision 0056 rule 2 with its amendments of 2026-11-12 and
+//! 2026-11-13, and decision 0042 rule 1): the staged input is bound read-only
+//! at `/input` right after the sandbox arguments and before the capabilities,
+//! the scratch is only a mount point that the bootstrap fills, the attempt is
+//! granted exactly the two capabilities, the read-only remounts come after
+//! every mount option and before `--chdir`, and the namespace check keeps its
+//! own scratch and gets neither a capability nor a remount.
 
 use super::{attempt_arguments, launcher_arguments};
 
@@ -36,9 +38,25 @@ fn option_positions(arguments: &[String], option: &str) -> Vec<usize> {
         .collect()
 }
 
+/// The index of every `--ro-bind` whose source is `input` and whose target is `/input`, in order.
+fn input_bind_positions(arguments: &[String], input: &str) -> Vec<usize> {
+    arguments
+        .windows(3)
+        .enumerate()
+        .filter(|(_, triple)| {
+            matches!(
+                triple,
+                [flag, source, target]
+                    if flag == "--ro-bind" && source == input && target == "/input"
+            )
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
 #[test]
 fn remounts_follow_every_mount_option_and_precede_chdir() -> Result<(), Box<dyn Error>> {
-    let arguments = as_text(&attempt_arguments(Path::new("/opt/t")));
+    let arguments = as_text(&attempt_arguments(Path::new("/opt/t"), Path::new("/opt/i")));
     let Some(chdir) = pair_position(&arguments, "--chdir", "/") else {
         return Err(
             format!("the attempt must chdir to / before the fixture: {arguments:?}").into(),
@@ -74,7 +92,7 @@ fn remounts_follow_every_mount_option_and_precede_chdir() -> Result<(), Box<dyn 
 
 #[test]
 fn attempt_scratch_is_a_mount_point_only() {
-    let arguments = as_text(&attempt_arguments(Path::new("/opt/t")));
+    let arguments = as_text(&attempt_arguments(Path::new("/opt/t"), Path::new("/opt/i")));
     assert!(
         pair_position(&arguments, "--dir", "/tmp").is_some(),
         "the attempt must make the scratch's mount point with --dir /tmp: {arguments:?}"
@@ -95,7 +113,7 @@ fn attempt_scratch_is_a_mount_point_only() {
 /// launcher's `/dev/pts`): an empty tmpfs, read and search only, one page, then read-only.
 #[test]
 fn attempt_covers_the_launchers_dev_pts() -> Result<(), Box<dyn Error>> {
-    let arguments = as_text(&attempt_arguments(Path::new("/opt/t")));
+    let arguments = as_text(&attempt_arguments(Path::new("/opt/t"), Path::new("/opt/i")));
     let Some(tmpfs) = pair_position(&arguments, "--tmpfs", "/dev/pts") else {
         return Err(format!(
             "the attempt must mount a tmpfs over /dev/pts with --tmpfs /dev/pts: {arguments:?}"
@@ -125,7 +143,7 @@ fn attempt_covers_the_launchers_dev_pts() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn attempt_gets_exactly_the_two_capabilities() {
-    let arguments = as_text(&attempt_arguments(Path::new("/opt/t")));
+    let arguments = as_text(&attempt_arguments(Path::new("/opt/t"), Path::new("/opt/i")));
     for capability in ["CAP_SYS_ADMIN", "CAP_SETPCAP"] {
         assert!(
             pair_position(&arguments, "--cap-add", capability).is_some(),
@@ -141,7 +159,7 @@ fn attempt_gets_exactly_the_two_capabilities() {
 
 #[test]
 fn attempt_ends_with_the_fixture_bootstrap() {
-    let arguments = as_text(&attempt_arguments(Path::new("/opt/t")));
+    let arguments = as_text(&attempt_arguments(Path::new("/opt/t"), Path::new("/opt/i")));
     let tail: Vec<&str> = arguments
         .iter()
         .rev()
@@ -177,4 +195,42 @@ fn namespace_check_has_no_capability_and_no_remount() {
             "the namespace check must not carry {option}: {arguments:?}"
         );
     }
+}
+
+/// The staged input is bound read-only at `/input` directly after the sandbox arguments and before
+/// the capabilities (0056 rule 2, as reworded by the amendment of 2026-11-13, input and output).
+#[test]
+fn the_input_is_bound_read_only_after_the_sandbox_arguments() -> Result<(), Box<dyn Error>> {
+    for input in ["/opt/i", "/var/lib/x/input"] {
+        let arguments = as_text(&attempt_arguments(Path::new("/opt/t"), Path::new(input)));
+        let binds = input_bind_positions(&arguments, input);
+        let [bind] = binds.as_slice() else {
+            return Err(format!(
+                "the input {input} must be bound read-only at /input exactly once, found {binds:?}: {arguments:?}"
+            )
+            .into());
+        };
+        let Some(dev) = pair_position(&arguments, "--dev", "/dev") else {
+            return Err(
+                format!("the sandbox arguments must bind --dev /dev: {arguments:?}").into(),
+            );
+        };
+        assert_eq!(
+            *bind,
+            dev + 2,
+            "the input bind must directly follow --dev /dev at {dev}: {arguments:?}"
+        );
+        let Some(&capability) = option_positions(&arguments, "--cap-add").first() else {
+            return Err(format!("the attempt must add its capabilities: {arguments:?}").into());
+        };
+        assert!(
+            *bind < capability,
+            "the input bind at {bind} must precede the first --cap-add at {capability}: {arguments:?}"
+        );
+        assert!(
+            !arguments.iter().any(|argument| argument == "--bind"),
+            "the input must be bound read-only, so no --bind may appear: {arguments:?}"
+        );
+    }
+    Ok(())
 }

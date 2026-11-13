@@ -1,14 +1,16 @@
 //! The trusted stub and bootstrap of one attempt (decision 0056 rules 3 to 5). Their only entry
-//! point is the test-support program (0056 rule 4); each takes a profile identity and nothing
-//! else and runs no command it is given.
+//! point is the test-support program (0056 rule 4); each takes a profile identity (and the stub the
+//! provider's input path) and nothing else, and runs no command it is given.
 //!
 //! The bootstrap's steps run in this order, with the numbers of their step documents: 1, the
 //! identity; 2, the control channel; 3, the leaked descriptors; 4, the scratch in its own mount
-//! namespace (the amendment of 2026-11-12, rule 3); 5, the mount table read back, with the
-//! launcher's empty read-only tmpfs over `/dev/pts` (rule 3 as reworded on 2026-11-13); 6, the limits; 7, the
-//! privilege drop; 8, the two seccomp programs, the allowlist last; 9, the confirmation of its own
-//! setup. Then it writes the readiness record, waits for the release and replaces itself with the
-//! payload.
+//! namespace (the amendment of 2026-11-12, rule 3); 5, the mount tree made private and `/input`
+//! remounted read-only with `nosuid`, `nodev` and `noexec` (the amendment of 2026-11-13, input and
+//! output); 6, the mount table read back, with the launcher's empty read-only tmpfs over
+//! `/dev/pts` (rule 3 as reworded on 2026-11-13), `/input` and no propagation tag; 7, the limits;
+//! 8, the privilege drop; 9, the two seccomp programs, the allowlist last; 10, the confirmation of
+//! its own setup. Then it writes the readiness record, waits for the release and replaces itself
+//! with the payload.
 
 use std::convert::Infallible;
 use std::ffi::CString;
@@ -22,7 +24,7 @@ use std::process::Command;
 use std::{fmt, str};
 
 use nix::sched::{self, CloneFlags};
-use rustix::mount::{self, MountFlags};
+use rustix::mount::{self, MountFlags, MountPropagationFlags};
 use rustix::process::{Resource, Rlimit};
 use rustix::thread::{CapabilitySet, CapabilitySets};
 use rustix::{io, process, stdio, thread};
@@ -66,6 +68,10 @@ pub enum BootstrapFailure {
     /// The mount table did not show the launcher's empty read-only tmpfs as the last mount of
     /// `/dev/pts` (decision 0056 rules 2 and 3, as reworded by the amendments of 2026-11-13).
     Terminals,
+    /// The input path given to the stub is not absolute (decision 0056 rule 2, as reworded by the amendment of 2026-11-13, input and output).
+    InputPath,
+    /// The mount tree could not be made private or `/input` remounted read-only with `nosuid`, `nodev` and `noexec`, or the mount table did not show `/input` with these four flags and no propagation tag (decision 0056 rule 3, as reworded by the amendment of 2026-11-13).
+    Input,
     /// A resource limit could not be set, or did not read back as set.
     Limits,
     /// A capability or `no_new_privs` could not be dropped, or did not read back as dropped.
@@ -95,6 +101,10 @@ impl fmt::Display for BootstrapFailure {
                 formatter.write_str("the scratch could not be mounted with its bounds")
             }
             Self::Terminals => formatter.write_str("the terminal directory was not covered"),
+            Self::InputPath => formatter.write_str("the input path is not absolute"),
+            Self::Input => {
+                formatter.write_str("the input mount was not made read-only and private")
+            }
             Self::Limits => formatter.write_str("a resource limit did not read back as set"),
             Self::Privileges => formatter.write_str("a privilege did not read back as dropped"),
             Self::Filter => formatter.write_str("the seccomp filter could not be installed"),
@@ -114,37 +124,43 @@ impl std::error::Error for BootstrapFailure {}
 
 /// The trusted stub (0056 rule 3): reads the launch record from descriptor 0 and then replaces itself with the launcher.
 ///
-/// It returns only on failure. The launcher receives the fixed attempt arguments and an empty environment, and nothing the caller passes reaches either.
+/// The provider passes the staging directory's path, and the stub puts it in the launcher's fixed list as `--ro-bind <path> /input` (the amendment of 2026-11-13, input and output). The path is the provider's, never a request's.
+///
+/// It returns only on failure. The launcher receives the fixed attempt arguments, that one read-only bind and an empty environment, and nothing else the caller passes reaches either.
 ///
 /// # Errors
 ///
-/// Returns `UnknownProfile` for an identity other than the fixture profile's, `ControlChannel` when the next byte is not the launch record, and `LauncherNotExecuted` when `exec` returns.
-pub fn run_stub(identity: &str) -> Result<Infallible, BootstrapFailure> {
+/// Returns `UnknownProfile` for an identity other than the fixture profile's, `InputPath` for an input path that is not absolute (checked before the launch record is read), `ControlChannel` when the next byte is not the launch record, and `LauncherNotExecuted` when `exec` returns.
+pub fn run_stub(identity: &str, input: &Path) -> Result<Infallible, BootstrapFailure> {
     check_identity(identity)?;
+    if !input.is_absolute() {
+        return Err(BootstrapFailure::InputPath);
+    }
     if !next_record_is(stdio::stdin(), LAUNCH) {
         return Err(BootstrapFailure::ControlChannel);
     }
     let root = Path::new(launcher::TOOL_ROOT);
     // `exec` returns only when the launcher did not start. Its error text is not reported; the failure names this step.
     let _ = Command::new(root.join(launcher::LAUNCHER))
-        .args(launcher::attempt_arguments(root))
+        .args(launcher::attempt_arguments(root, input))
         .env_clear()
         .exec();
     Err(BootstrapFailure::LauncherNotExecuted)
 }
 
-/// The trusted bootstrap (0056 rule 3): mounts its scratch in its own mount namespace, sets its limits and privileges, installs the filter, reports readiness, waits for the release and then replaces itself with the payload.
+/// The trusted bootstrap (0056 rule 3): mounts its scratch in its own mount namespace, makes its mount tree private and remounts `/input` read-only, sets its limits and privileges, installs the filter, reports readiness, waits for the release and then replaces itself with the payload.
 ///
 /// It returns only on failure, and a failure before `READY` is written sends no record. The steps run in the order that the module documentation gives; the control channel is closed by the payload's `exec`, never by a drop after the filter.
 ///
 /// # Errors
 ///
-/// Returns the first failing step: `UnknownProfile`, `ControlChannel`, `LeakedDescriptor`, `Scratch`, `Terminals`, `Limits`, `Privileges`, `Filter`, `NotConfirmed` (the proc field), `NotReleased` or `PayloadNotExecuted`.
+/// Returns the first failing step: `UnknownProfile`, `ControlChannel`, `LeakedDescriptor`, `Scratch`, `Input`, `Terminals`, `Limits`, `Privileges`, `Filter`, `NotConfirmed` (the proc field), `NotReleased` or `PayloadNotExecuted`.
 pub fn run_bootstrap(identity: &str) -> Result<Infallible, BootstrapFailure> {
     check_identity(identity)?;
     let control = take_control()?;
     refuse_leaked_descriptors(control.as_raw_fd())?;
     mount_scratch()?;
+    isolate_mounts()?;
     confirm_terminals_and_scratch()?;
     set_limits()?;
     drop_privileges()?;
@@ -235,23 +251,42 @@ fn mount_scratch() -> Result<(), BootstrapFailure> {
     Ok(())
 }
 
-/// Step 5 (decision 0056 rule 3, as reworded by the amendments of 2026-11-13): reads the mount table back. It must show the scratch as required, a read-only root and `/dev`, and, as the last mount of `/dev/pts`, the launcher's empty read-only tmpfs (rule 2), which this mount namespace inherited from the launcher's. The bootstrap mounts nothing over `/dev/pts`: the launcher's cover is in both namespaces, and the launcher's init, the first process of the PID namespace, stays in the launcher's, which `/proc/1/root` shows. The provider checks the same table with the same parser before the release.
+/// Step 5 (decision 0056 rule 3, as reworded by the amendment of 2026-11-13, input and output; 0042 rule 4): makes the bootstrap's whole mount tree private and remounts `/input` as a read-only bind with `nosuid`, `nodev` and `noexec`. It runs after the scratch, in the same mount namespace. Measured on the runner: both calls succeed and the payload then sees `/input` as `ro,nosuid,nodev,noexec` with no propagation tag on any line.
+fn isolate_mounts() -> Result<(), BootstrapFailure> {
+    mount::mount_change(
+        "/",
+        MountPropagationFlags::REC | MountPropagationFlags::PRIVATE,
+    )
+    .map_err(|_| BootstrapFailure::Input)?;
+    mount::mount_remount(
+        readiness::INPUT_MOUNT,
+        MountFlags::BIND
+            | MountFlags::RDONLY
+            | MountFlags::NOSUID
+            | MountFlags::NODEV
+            | MountFlags::NOEXEC,
+        "",
+    )
+    .map_err(|_| BootstrapFailure::Input)
+}
+
+/// Step 6 (decision 0056 rule 3, as reworded by the amendments of 2026-11-13): reads the mount table back. It must show the scratch as required, a read-only root and `/dev`, and, as the last mount of `/dev/pts`, the launcher's empty read-only tmpfs (rule 2), which this mount namespace inherited from the launcher's. It must also show `/input` read-only with `nosuid`, `nodev` and `noexec`, and no propagation tag on any line; `readiness::confirm_mounts` requires these. The bootstrap mounts nothing over `/dev/pts`: the launcher's cover is in both namespaces, and the launcher's init, the first process of the PID namespace, stays in the launcher's, which `/proc/1/root` shows. The provider checks the same table with the same parser before the release.
 fn confirm_terminals_and_scratch() -> Result<(), BootstrapFailure> {
     let limit = u64::try_from(readiness::PROC_FILE_BYTES).map_err(|_| BootstrapFailure::Scratch)?;
     let bytes = super::read_bounded(Path::new(PROC_MOUNTINFO), limit)
         .map_err(|_| BootstrapFailure::Scratch)?;
     let text = str::from_utf8(&bytes).map_err(|_| BootstrapFailure::Scratch)?;
     let facts = readiness::parse_mounts(text).map_err(|_| BootstrapFailure::Scratch)?;
-    readiness::confirm_mounts(&facts).map_err(|failure| {
-        if failure == readiness::ReadinessFailure::DevPts {
-            BootstrapFailure::Terminals
-        } else {
-            BootstrapFailure::Scratch
+    readiness::confirm_mounts(&facts).map_err(|failure| match failure {
+        readiness::ReadinessFailure::DevPts => BootstrapFailure::Terminals,
+        readiness::ReadinessFailure::Input | readiness::ReadinessFailure::Propagation => {
+            BootstrapFailure::Input
         }
+        _ => BootstrapFailure::Scratch,
     })
 }
 
-/// Step 6: sets the open-file and core-size limits and reads both back.
+/// Step 7: sets the open-file and core-size limits and reads both back.
 fn set_limits() -> Result<(), BootstrapFailure> {
     let open_files = Rlimit {
         current: Some(readiness::OPEN_FILES_LIMIT),
@@ -271,7 +306,7 @@ fn set_limits() -> Result<(), BootstrapFailure> {
     Ok(())
 }
 
-/// Step 7: clears the ambient set, removes every named capability from the bounding set, empties the effective, permitted and inheritable sets, sets `no_new_privs`, and reads all of it back.
+/// Step 8: clears the ambient set, removes every named capability from the bounding set, empties the effective, permitted and inheritable sets, sets `no_new_privs`, and reads all of it back.
 ///
 /// The launcher grants `CAP_SYS_ADMIN` and `CAP_SETPCAP` inside the sandbox's own user namespace (the amendment of 2026-11-12, rule 2), and steps 4 and 5 have used the first. This step removes both from every set, the bounding set included. The bounding set is cleared first, one capability at a time, because removing a bounding capability needs `CAP_SETPCAP` in the effective set; the call after the loop empties the effective, permitted and inheritable sets.
 fn drop_privileges() -> Result<(), BootstrapFailure> {
@@ -327,7 +362,7 @@ fn confirm_privileges() -> Result<(), BootstrapFailure> {
     Ok(())
 }
 
-/// Step 8: installs the fixture profile's two seccomp programs in order (decision 0042 rule 4; 0056 rule 3).
+/// Step 9: installs the fixture profile's two seccomp programs in order (decision 0042 rule 4; 0056 rule 3).
 ///
 /// The clone3 refusal is installed first and the allowlist LAST. Each `apply_filter` call needs `prctl` and `seccomp`, which the allowlist does not admit, so an allowlist installed earlier would kill the process (MEASURED (f)). `confirm_setup` then requires two filters.
 fn install_filter() -> Result<(), BootstrapFailure> {
@@ -338,7 +373,7 @@ fn install_filter() -> Result<(), BootstrapFailure> {
     Ok(())
 }
 
-/// Step 9: confirms the bootstrap's own status and limits with the functions the provider uses (decision 0042 rule 6).
+/// Step 10: confirms the bootstrap's own status and limits with the functions the provider uses (decision 0042 rule 6).
 fn confirm_setup() -> Result<(), BootstrapFailure> {
     let mut status_buffer = [0_u8; readiness::PROC_FILE_BYTES];
     let status = readiness::parse_status(read_proc_text(PROC_STATUS, &mut status_buffer)?)

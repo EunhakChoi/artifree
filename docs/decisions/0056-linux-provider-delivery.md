@@ -4,9 +4,10 @@ Date: 2026-11-12. Status: **accepted as a plan; R02aa (host admission and the
 enforcement job), R02ab (the first launch, only from the job's tests), R02ac
 (resources and cleanup under that launch, with the scratch amended below)
 and R02ad (the syscall mapping, as amended on 2026-11-13; its x32 class
-fails acceptance on the reviewed kernel) and R02ae (files, descriptors and
+fails acceptance on the reviewed kernel), R02ae (files, descriptors and
 network, as planned in the second and third amendments of 2026-11-13)
-are implemented**.
+and R02af (input and output, as planned in the amendment of 2026-11-13 on
+input and output) are implemented**.
 Roadmap: R02a. Builds on
 [0042](0042-linux-untrusted-execution.md) and
 [0055](0055-operating-background-work.md).
@@ -671,118 +672,6 @@ how; where the two could be read differently, 0042 holds.
 >   - R02b adds the actor and its generation, the artifact, the revision, the
 >     job and the fence, which it has, under a new version tag. A digest
 >     under one tag is never compared with one under another.
-> - **Releasing the mount.** The payload had written 64 MiB into the
->   scratch. The host's `Shmem` rose by 65,472 KiB during the attempt.
->   After the provider closed its descriptors, it fell back to the value it
->   had before the attempt.
-> - **Resolution beneath the output root.** `openat2` with
->   `RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS`, `RESOLVE_NO_MAGICLINKS` and
->   `RESOLVE_NO_XDEV` refused `..`, an absolute path and a path through
->   `/proc` with `EXDEV`. With `O_NOFOLLOW` and `O_NONBLOCK` added:
->   - a symbolic link failed with `ELOOP`, and a socket failed with
->     `ENXIO`;
->   - a FIFO opened, so only the type of the opened descriptor tells it from
->     a file;
->   - a hard link opened, with a link count of 2.
-> - **What can be in the scratch.** From outside, the provider made a
->   symbolic link, a hard link and a FIFO in the scratch. A character device
->   failed with `EPERM`. The fixture filter refuses `symlink`, `link`,
->   `mknod`, `rename` and `mount`, and a refusal kills the process. So the
->   fixture payload itself can make only regular files, directories and
->   socket files.
-> - **The input bind.** A host directory bound with `--ro-bind` at `/input`
->   had the mount line `ro,nosuid,nodev` (ext4, propagation `master:1`). The
->   payload read a staged file. Opening it to append failed with `EACCES`
->   (mode `0444`), also through `/proc/1/root/input`. Creating, unlinking
->   and making a directory in it failed with `EROFS`.
-> - **Private propagation and `noexec`.** In its own mount namespace, after
->   the scratch, the bootstrap made the whole tree private (`MS_REC` with
->   `MS_PRIVATE`) and remounted `/input` as a read-only bind with `nosuid`,
->   `nodev` and `noexec`. Both calls succeeded. The bootstrap's mount table
->   (which the payload sees) then had no propagation tag on any line, and
->   `/input` read `ro,nosuid,nodev,noexec`. The launcher's mount namespace,
->   which `/proc/1/root` reaches, kept `ro,nosuid,nodev` and `master:1` for
->   `/input`, because the bootstrap cannot change it. Through that path the
->   input is still read-only, and its files have no execute permission. The
->   same holds for the tool root, which is executable by design.
-> - **No unsafe code.** Every call above has a safe interface in `rustix`
->   once its `fs` feature is on. That feature adds no crate.
->
-> Staging into the scratch through the keeper worked too: the payload read
-> the file and could not append to it. It is not chosen. The payload owns
-> what is in the scratch, so only a read-only mount keeps a later profile
-> from changing its own input. R02af works as follows.
->
-> - **The input.** The provider stages a pinned revision's files, given as
->   a `FilePackage` with a listing of each file's path, length and SHA-256.
->   It refuses the input when the listing and the files differ in a path, a
->   length or a digest. The input's bytes are dropped once they are written.
->   Only the listing and its digest stay with the attempt, so staging and
->   collection never hold more than one package's bytes at once (0042,
->   rule 5). Where the files come from (the store, access checks
->   and the pinned revision) is R02b's (rule 15).
->   - The staging directory is the provider's own, inside its execution
->     directory, made fresh for each attempt under the admission lock. A
->     leftover of an earlier attempt is removed before staging.
->   - Files are written once, without following links, beneath a handle on
->     that directory, with mode `0444`. The directories get mode `0555`
->     after they are filled.
->   - The provider passes the directory's path to the stub, which puts it in
->     the launcher's fixed argument list as `--ro-bind <path> /input`. The
->     path is the provider's, never a request's.
->   - The directory is removed when the attempt ends, on every path. Its
->     directories are made `0700` again first, without following links,
->     since an owner cannot unlink entries in a `0555` directory. The same
->     applies to a leftover of an earlier attempt. A leftover that cannot be
->     removed refuses the attempt under a reason of its own, before
->     anything is launched.
->   - The bootstrap, in its own mount namespace and after the scratch, makes
->     its whole mount tree private and remounts `/input` as a read-only bind
->     with `nosuid`, `nodev` and `noexec` (0042, rule 4). Its readback, and
->     the provider's read of the mount table, require these four flags on
->     `/input` and no propagation tag on any line.
-> - **The keeper.** Between its observation and the release, the provider
->   opens the scratch through `/proc/<bootstrap>/root/tmp`, close-on-exec.
->   - It requires the descriptor to be on a tmpfs, with the mount id of the
->     scratch line it has just checked. After opening it, the provider reads
->     the group's members again and requires the bootstrap's PID among them,
->     still in filter mode. A bootstrap that died, whose PID or mount id was
->     reused, fails one of these checks, since nothing outside the attempt
->     can join its group. Otherwise the attempt is not started.
->   - It makes the output root `/tmp/out` (mode `0700`) through that handle
->     and keeps a handle on it. The stub was started before either handle
->     was opened, so no process of the attempt can inherit one.
->   - Only the output root is collected; the rest of the scratch is ignored.
-> - **Collection.** Collection runs only after the attempt's verdict has
->   passed: exit status 0, cleanup observed, no limit exceeded. Any other
->   verdict, and every failure before it, drops the handles unread, and no
->   output exists. Collection traverses from the output root's handle.
->   - Each entry is first classified by `statat` without following links,
->     relative to its directory's handle. That type names the reason for a
->     refusal: a link, a socket, a FIFO or a device.
->   - Only a directory or a regular file is then opened, with the four
->     resolve flags above, `O_NOFOLLOW` and `O_NONBLOCK`. The type that
->     `fstat` gives on the opened descriptor must equal the first one;
->     otherwise the entry is refused as changed. An entry that cannot be
->     opened is refused as unreadable.
->   - A directory is entered through its descriptor.
->   - A regular file must have one link. It is read once, through its
->     descriptor, with a bound of one byte over the file limit, and the
->     bytes read must match the size `fstat` gave.
->   - The traversal reads at most 2,048 entries in all: 256 files, each
->     under up to seven directories of its own. It enters no directory
->     deeper than seven levels below the output root, since a package path
->     has at most eight segments. It stops at the first excess, so a
->     rejected tree is bounded too.
->   - The collected files must form a valid `FilePackage`: portable paths,
->     no case collision, at most 256 files, 5 MiB each and 25 MiB in all.
->   - The refusal names the first reason found, and the attempt yields
->     nothing.
-> - **The manifest.** A collected package has a manifest: each file's path,
->   length and SHA-256 in path order. It is bound to the SHA-256 of the
->   tool root's manifest, the filter's digest and the input listing's
->   digest. The actor and its generation, the artifact, the revision, the
->   job and the fence join the binding in R02b, which has them.
 > - **Releasing the mount.** The provider drops both handles when collection
 >   ends, which frees the tmpfs. No mount outlives the attempt (0042,
 >   rule 5).
@@ -1028,6 +917,33 @@ how; where the two could be read differently, 0042 holds.
 > The payload fixture's `kill(-1)` uses nix's `signal` feature, enabled
 > only for the provider's test targets. The mutations ran on a temporary
 > branch, never in the product; the mapping records their results.
+
+> **Note, 2026-11-13 (R02af).** The input and output of the amendment exist,
+> compiled only into the test build. The provider checks a `FilePackage`
+> against its listing, stages it read-only in its execution directory and
+> passes the path to the stub, which binds it at `/input`. The bootstrap
+> makes its mount tree private and remounts `/input` with `noexec`, and both
+> mount checks require that. Between the observation and the release the
+> provider opens the keeper through `/proc/<bootstrap>/root/tmp`, checks its
+> filesystem and mount id, reads the group's members again and makes
+> `/tmp/out`. After a passing verdict it collects beneath that handle and
+> computes the manifest under `artifree-output-manifest-v1`; on every other
+> path it drops the handles unread. An empty directory is checked as a
+> package path too, so a hidden or case-colliding directory name is refused
+> although it holds no file. Unit tests cover the listing, staging and its
+> removal, the mount-id comparison, the collector's bounds and refusals, a
+> device through `/dev/null` and the two races. Fifteen job tests run in the
+> job's part 9 with scenarios of the payload fixture: the copy with its
+> manifest and `Shmem` after 64 MiB, the input's `EROFS` and `EACCES` both
+> directly and through `/proc/1/root`, ten payload-made hostile trees, a
+> planted link, hard link and FIFO, a failed attempt and a fresh one after a
+> refusal. The amendment expected the `--bind` mutation with the mount
+> checks kept to be refused before the release. The bootstrap's remount
+> makes `/input` read-only in its own namespace whatever the launcher
+> binds, so both checks pass; the input test fails instead, because a
+> creation through `/proc/1/root/input` gives `EACCES` from the `0555`
+> directory rather than `EROFS`. The mutations ran on a temporary branch,
+> never in the product.
 
 ## Context
 

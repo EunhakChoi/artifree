@@ -1,21 +1,27 @@
-//! Tests of the mount checks in `readiness` (the amendment of 2026-11-12, rules 2 and 3, and the
-//! amendment of 2026-11-13, rule 3 as reworded): the measured mount table passes, each wrong mount
-//! is refused under its field name, the empty read-only tmpfs over `/dev/pts` is required and the
-//! later of two `/dev/pts` lines decides, the last line of a mount point decides, and malformed or
+//! Tests of the mount checks in `readiness` (the amendment of 2026-11-12, rules 2 and 3, the
+//! amendment of 2026-11-13, rule 3 as reworded, and the amendment of 2026-11-13, input and
+//! output): the measured mount table passes, each wrong mount is refused under its field name, the
+//! empty read-only tmpfs over `/dev/pts` is required and the later of two `/dev/pts` lines decides,
+//! `/input` must be read-only with `nosuid`, `nodev` and `noexec` and its last line decides, any
+//! propagation tag is refused, the scratch mount id is read, the keeper's membership re-check
+//! requires the bootstrap in filter mode, the last line of a mount point decides, and malformed or
 //! oversized text is refused.
 
+use std::{env, fs, io, process};
+
 use super::{
-    MountFacts, PROC_FILE_BYTES, PtsMount, ReadinessFailure, SCRATCH_INODES, SCRATCH_SIZE_BYTES,
-    ScratchMount, confirm_mounts, parse_mounts,
+    InputMount, MountFacts, ObservationFailure, PROC_FILE_BYTES, PtsMount, ReadinessFailure,
+    SCRATCH_INODES, SCRATCH_SIZE_BYTES, ScratchMount, confirm_member, confirm_mounts, parse_mounts,
 };
 
 /// A readiness verdict on one mount table text.
 type Verdict = Result<(), ReadinessFailure>;
 
-// The measured bootstrap's `/proc/<pid>/mountinfo` lines (the amendment of 2026-11-12). The ids
-// and the roots of the lines are illustrative; the mount points, options and filesystems are the
-// kernel's values from the runner, except `noexec` on `/tmp`: the probe mounted the scratch
-// without it, and the amended rule 3 adds it.
+// The measured bootstrap's `/proc/<pid>/mountinfo` lines (the amendment of 2026-11-12, and the
+// staged input's line of the amendment of 2026-11-13, input and output). The ids and the roots of
+// the lines are illustrative; the mount points, options and filesystems are the kernel's values
+// from the runner, except `noexec` on `/tmp`: the probe mounted the scratch without it, and the
+// amended rule 3 adds it.
 const ROOT_LINE: &str =
     "1290 1201 0:110 / / ro,nosuid,nodev,relatime - tmpfs tmpfs rw,uid=1001,gid=1001,inode64";
 const DEV_LINE: &str = "1295 1290 0:112 / /dev ro,nosuid,nodev,relatime - tmpfs tmpfs rw,mode=755,uid=1001,gid=1001,inode64";
@@ -26,8 +32,13 @@ const TMP_LINE: &str = "1299 1290 0:115 / /tmp rw,nosuid,nodev,noexec,relatime -
 /// (`canary.dev-pts.mount_in_attempt`, run 43373521166). The read-only flag is a mount option:
 /// the super options still say `rw`.
 const PTS_LINE: &str = "1300 1296 0:116 / /dev/pts ro,nosuid,nodev,relatime - tmpfs tmpfs rw,size=4k,mode=555,uid=1001,gid=1001,inode64";
+/// The staged input's line after the bootstrap's remount (the amendment of 2026-11-13, input and
+/// output): a bind of the probe's staging directory, read-only with `nosuid`, `nodev` and `noexec`.
+/// Its options, bind source and filesystem are the probe's measured values; its ids are
+/// illustrative.
+const INPUT_LINE: &str = "1297 1290 252:0 /tmp/artifree-probe-input /input ro,nosuid,nodev,noexec,relatime - ext4 /dev/mapper/cow-root rw,discard";
 
-const MEASURED_MOUNTINFO: [&str; 9] = [
+const MEASURED_MOUNTINFO: [&str; 10] = [
     ROOT_LINE,
     "1291 1290 8:1 /opt/artifree/tools/v1 /tools ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
     "1292 1290 8:1 /opt/artifree/tools/v1/lib /lib ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
@@ -35,6 +46,7 @@ const MEASURED_MOUNTINFO: [&str; 9] = [
     "1294 1290 0:111 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw",
     DEV_LINE,
     "1296 1295 0:113 / /dev/pts rw,nosuid,noexec,relatime - devpts devpts rw,mode=620,ptmxmode=666",
+    INPUT_LINE,
     TMP_LINE,
     PTS_LINE,
 ];
@@ -43,6 +55,7 @@ const MEASURED_MOUNTINFO: [&str; 9] = [
 /// and `noexec`, at 128 MiB
 /// (`131072k` in the kernel's form) and 4,096 inodes.
 const MEASURED_SCRATCH: ScratchMount = ScratchMount {
+    mount_id: 1299,
     is_tmpfs: true,
     read_only: false,
     no_suid_dev_exec: true,
@@ -126,7 +139,7 @@ fn outcome(text: &str) -> Verdict {
 }
 
 /// Checks every row and reports each one whose verdict differs, so one run shows all of them.
-fn assert_rows<const N: usize>(rows: [(&str, String, Verdict); N]) {
+fn assert_rows(rows: impl IntoIterator<Item = (&'static str, String, Verdict)>) {
     let mismatches: Vec<String> = rows
         .into_iter()
         .filter_map(|(name, text, expected)| {
@@ -157,6 +170,13 @@ fn measured_mount_table_passes() -> Verdict {
                 size_kib: Some(4),
                 mode: Some(0o555),
             }),
+            input: Some(InputMount {
+                read_only: true,
+                nosuid: true,
+                nodev: true,
+                noexec: true,
+            }),
+            propagation_tagged: false,
         },
         "the measured table must read as the measured scratch, root, /dev and /dev/pts"
     );
@@ -492,4 +512,217 @@ fn malformed_or_oversized_text_is_refused() {
             malformed,
         ),
     ]);
+}
+
+/// `/input` must be the staged input read-only with `nosuid`, `nodev` and `noexec`, and the last
+/// `/input` line decides (0056 rule 3, as reworded by the amendment of 2026-11-13, input and
+/// output; 0042 rule 4). Each edit below breaks one of the four flags or makes the line writable.
+#[test]
+fn input_must_be_read_only_without_suid_devices_or_exec() {
+    let input_refused = Err(ReadinessFailure::Input);
+    let writable_input = replaced(INPUT_LINE, "/input ro,", "/input rw,");
+    let mut rows: Vec<(&'static str, String, Verdict)> = vec![
+        ("the measured table", join_lines(MEASURED_MOUNTINFO), Ok(())),
+        (
+            "no /input line",
+            edited_table("/input", |_| None),
+            input_refused,
+        ),
+        (
+            "a writable /input after the measured table",
+            join_lines(
+                MEASURED_MOUNTINFO
+                    .into_iter()
+                    .chain([writable_input.as_str()]),
+            ),
+            input_refused,
+        ),
+        (
+            "a writable /input before the measured table",
+            join_lines(std::iter::once(writable_input.as_str()).chain(MEASURED_MOUNTINFO)),
+            Ok(()),
+        ),
+    ];
+    rows.extend(INPUT_EDITS.map(|(name, from, to)| {
+        let text = edited_table("/input", |line| Some(replaced(line, from, to)));
+        (name, text, input_refused)
+    }));
+    assert_rows(rows);
+}
+
+/// The edits of the staged input's line that each break one required flag, or make the line
+/// writable: the row's name, then the text to replace and its replacement.
+const INPUT_EDITS: [(&str, &str, &str); 4] = [
+    ("a writable /input", "/input ro,", "/input rw,"),
+    ("an /input without nosuid", "ro,nosuid,", "ro,"),
+    ("an /input without nodev", "nosuid,nodev,", "nosuid,"),
+    ("an /input without noexec", "nodev,noexec,", "nodev,"),
+];
+
+/// Any propagation tag on any line refuses the table as `Propagation` (the amendment of 2026-11-13,
+/// input and output): on a checked mount, on a mount that no check reads, and on a line that a
+/// later line of the same mount point covers.
+#[test]
+fn propagation_tags_are_refused() {
+    let propagation_refused = Err(ReadinessFailure::Propagation);
+    let tagged_scratch = replaced(TMP_LINE, " - tmpfs", " unbindable - tmpfs");
+    let measured = join_lines(MEASURED_MOUNTINFO);
+    assert_rows([
+        (
+            "master:1 on /tools",
+            edited_table("/tools", |line| {
+                Some(replaced(line, " - ext4", " master:1 - ext4"))
+            }),
+            propagation_refused,
+        ),
+        (
+            "shared:1 on /",
+            edited_table("/", |line| {
+                Some(replaced(line, " - tmpfs", " shared:1 - tmpfs"))
+            }),
+            propagation_refused,
+        ),
+        (
+            "unbindable on /tmp",
+            edited_table("/tmp", |line| {
+                Some(replaced(line, " - tmpfs", " unbindable - tmpfs"))
+            }),
+            propagation_refused,
+        ),
+        (
+            "shared:2 and master:1 on /input",
+            edited_table("/input", |line| {
+                Some(replaced(line, " - ext4", " shared:2 master:1 - ext4"))
+            }),
+            propagation_refused,
+        ),
+        (
+            "shared:1 on /proc, which no check reads",
+            edited_table("/proc", |line| {
+                Some(replaced(line, " - proc", " shared:1 - proc"))
+            }),
+            propagation_refused,
+        ),
+        (
+            "a tag on an earlier line that a later line covers",
+            format!("{tagged_scratch}\n{measured}"),
+            propagation_refused,
+        ),
+    ]);
+}
+
+/// The scratch mount id is the first field of its line, read as decimal, and a line whose id is
+/// not decimal is malformed (the amendment of 2026-11-13, input and output).
+#[test]
+fn the_scratch_mount_id_is_read() -> Verdict {
+    let facts = parse_mounts(&join_lines(MEASURED_MOUNTINFO))?;
+    assert_eq!(
+        facts.scratch.map(|scratch| scratch.mount_id),
+        Some(1299),
+        "the scratch line's first field is its mount id"
+    );
+    assert_eq!(
+        parse_mounts(&edited_table("/tmp", |line| {
+            Some(replaced(line, "1299 ", "x299 "))
+        })),
+        Err(ReadinessFailure::Malformed("mountinfo")),
+        "a scratch mount id that is not decimal is malformed"
+    );
+    Ok(())
+}
+
+/// The pid of the fake bootstrap that the member trees below hold.
+const BOOTSTRAP_PID: u32 = 42;
+
+/// A verdict of `confirm_member`.
+type MemberVerdict = Result<(), ObservationFailure>;
+
+/// A `/proc/<pid>/status` text with every key that `parse_status` reads. `seccomp` is the kernel's
+/// `Seccomp` mode (2 for filter mode); the other keys have the values of the measured bootstrap.
+fn status_text(seccomp: u32) -> String {
+    format!(
+        "Name:\tbootstrap\nNoNewPrivs:\t1\nSeccomp:\t{seccomp}\nSeccomp_filters:\t2\n\
+         CapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\n\
+         CapBnd:\t0000000000000000\nCapAmb:\t0000000000000000\n"
+    )
+}
+
+/// Runs `confirm_member` for `BOOTSTRAP_PID` on a fake group and `/proc` tree. The group's
+/// `cgroup.procs` holds `listing`, and the pid's `status` holds `status` when it is given. `index`
+/// keeps the directory of each case apart, and the tree is removed again.
+fn member_verdict(index: usize, listing: &str, status: Option<&str>) -> io::Result<MemberVerdict> {
+    let root = env::temp_dir().join(format!("artifree-confirm-member-{}-{index}", process::id()));
+    if root.exists() {
+        fs::remove_dir_all(&root)?;
+    }
+    let group = root.join("group");
+    let proc_root = root.join("proc");
+    let member = proc_root.join(BOOTSTRAP_PID.to_string());
+    fs::create_dir_all(&group)?;
+    fs::create_dir_all(&member)?;
+    fs::write(group.join("cgroup.procs"), listing)?;
+    if let Some(text) = status {
+        fs::write(member.join("status"), text)?;
+    }
+    let verdict = confirm_member(&group, &proc_root, BOOTSTRAP_PID);
+    fs::remove_dir_all(&root)?;
+    Ok(verdict)
+}
+
+/// `confirm_member` requires the pid in the group's listing and in seccomp filter mode, read from
+/// the pid's own status (decision 0042 rule 6; the amendment of 2026-11-13, input and output).
+#[test]
+fn confirm_member_requires_the_bootstrap_in_filter_mode() -> io::Result<()> {
+    let cases: [(&str, &str, Option<String>, MemberVerdict); 6] = [
+        (
+            "listed in filter mode",
+            "42\n",
+            Some(status_text(2)),
+            Ok(()),
+        ),
+        (
+            "listed among other members",
+            "7\n42\n",
+            Some(status_text(2)),
+            Ok(()),
+        ),
+        (
+            "not listed",
+            "7\n",
+            Some(status_text(2)),
+            Err(ObservationFailure::Membership),
+        ),
+        (
+            "listed, not in filter mode",
+            "42\n",
+            Some(status_text(0)),
+            Err(ObservationFailure::Membership),
+        ),
+        (
+            "a listing line that is not a pid",
+            "x\n",
+            Some(status_text(2)),
+            Err(ObservationFailure::Unreadable),
+        ),
+        (
+            "no status file",
+            "42\n",
+            None,
+            Err(ObservationFailure::Unreadable),
+        ),
+    ];
+    let mut mismatches: Vec<String> = Vec::new();
+    for (index, (name, listing, status, expected)) in cases.into_iter().enumerate() {
+        let actual = member_verdict(index, listing, status.as_deref())?;
+        if actual != expected {
+            mismatches.push(format!("{name}: expected {expected:?}, got {actual:?}"));
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "{} row(s) gave another verdict:\n{}",
+        mismatches.len(),
+        mismatches.join("\n")
+    );
+    Ok(())
 }

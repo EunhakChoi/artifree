@@ -11,6 +11,12 @@
 //! teardown has had `TEARDOWN_GRACE` to finish, and the verdict is typed:
 //! `OutOfMemory` and `Survivors` are decided in the order that `final_verdict` documents. The
 //! payload scenarios that exercise these limits run only in the enforcement job (`run.sh`).
+//!
+//! R02af (0056 rule 14, amendment of 2026-11-13) adds the staged input, the keeper and the
+//! collection of the output root after a passing verdict. The input is staged under the admission
+//! lock, before the group exists, and removed when the attempt ends. The keeper holds the output
+//! root from the observation to the release, and is dropped unread on every path but a collected
+//! one.
 
 use std::fmt;
 use std::fs;
@@ -25,14 +31,20 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use artifree_domain::package::{FilePackage, PackagePath};
+use sha2::{Digest, Sha256};
+
 use super::admission::{self, AdmissionRoots, wait_within};
 use super::bootstrap::{EXEC_FAILED, LAUNCH, READY, RELEASE};
+use super::collection::{CollectedOutput, CollectionRefusal, ManifestBinding};
 use super::lock::{AdmissionLock, LockRefusal};
 use super::probe_group::{self, ProbeGroup};
 use super::readiness::{self, GroupObservation};
 use super::report::HostReport;
+use super::staging::{InputListing, InputRefusal, VerifiedInput};
 use super::usage::{self, GroupUsage};
 use super::{AdmissionRefusal, FIXTURE, InspectionProfile, launcher, policy, read_bounded};
+use keeper::Keeper;
 
 /// The combined stdout and stderr budget of one attempt, in bytes (decision 0042 rule 5).
 const OUTPUT_BUDGET: u64 = 1_048_576;
@@ -53,8 +65,11 @@ const LISTING_BYTES: u64 = 4096;
 /// were still listed when the stub's exit was observed (main, 2026-11-12). A process that is
 /// still listed after this wait is a survivor. The wait never runs past the wall deadline.
 const TEARDOWN_GRACE: Duration = Duration::from_secs(2);
-/// The stub's arguments: the fixture's `stub` mode with the fixture identity.
+/// The stub's arguments before the staged input's path: the fixture's `stub` mode with the fixture
+/// identity. `start_stub` appends the path as the last argument.
 const FIXTURE_STUB: &[&str] = &["stub", FIXTURE.identity];
+/// The bytes of the fixture input's one page, `index.html`.
+const FIXTURE_PAGE: &[u8] = b"<!doctype html><title>fixture</title>";
 
 /// Set once a cleanup was not observed. The group then stays in place and launches are refused.
 static QUARANTINED: AtomicBool = AtomicBool::new(false);
@@ -73,6 +88,10 @@ pub(super) struct AttemptPlan {
     /// The bytes sent as the release. Only a test sends anything but RELEASE, to show that the
     /// bootstrap starts no payload on another byte.
     pub(super) release_record: &'static [u8],
+    /// A test-only step that adds entries to the output root through the keeper, after its
+    /// checks and before the release (0056, amendment of 2026-11-13: planted trees). `None` in
+    /// `fixture()`; a failure is `KeeperNotHeld`.
+    pub(super) plant: Option<fn(&OwnedFd) -> io::Result<()>>,
 }
 
 impl AttemptPlan {
@@ -84,6 +103,7 @@ impl AttemptPlan {
             wall_deadline: WALL_DEADLINE,
             readiness_deadline: READINESS_DEADLINE,
             release_record: &RELEASE,
+            plant: None,
         }
     }
 }
@@ -99,6 +119,11 @@ pub(super) enum NotStartedReason {
     NoReadiness,
     /// The provider's independent observation refused the group before release.
     ReadinessNotConfirmed,
+    /// The keeper could not open the scratch through `/proc/<bootstrap>/root/tmp`, the descriptor
+    /// was not the checked scratch tmpfs, the bootstrap was no longer a member in filter mode, the
+    /// output root could not be made, or the plan's plant step failed (0056 rule 5, as reworded by
+    /// the amendment of 2026-11-13).
+    KeeperNotHeld,
     /// The RELEASE record could not be sent.
     ReleaseNotSent,
     /// The bootstrap reported that the payload's `exec` returned.
@@ -122,6 +147,9 @@ pub(super) enum AttemptFailure {
     PolicyUnavailable,
     /// The stub did not reach a run.
     NotStarted(NotStartedReason),
+    /// The input was not verified, staged or removed (0056, amendment of 2026-11-13, input and
+    /// output).
+    Input(InputRefusal),
     /// The stub's state could not be read, or its output could not be read back.
     Unobserved,
     /// The stub was still running at the wall deadline.
@@ -145,6 +173,15 @@ pub(super) struct AttemptRefusal {
     /// The group's counters. Present whenever the group was created, emptied and read, so that a
     /// refused attempt still shows what it used.
     pub(super) usage: Option<GroupUsage>,
+}
+
+/// Why an attempt that ran yields no output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum OutputRefusal {
+    /// The stub's exit status was not 0, so the output root was dropped unread.
+    NotCollected,
+    /// Collection refused the output root with its first reason.
+    Refused(CollectionRefusal),
 }
 
 /// A refusal of a launch that has no group counters: the failure came before the group was
@@ -181,6 +218,9 @@ pub(super) struct AttemptEvidence {
     pub(super) filter_sha256: String,
     /// The host admission's evidence.
     pub(super) report: HostReport,
+    /// The collected output with its manifest, or why there is none. Collected only after a
+    /// passing verdict with exit status 0 (0042 rule 7).
+    pub(super) output: Result<CollectedOutput, OutputRefusal>,
 }
 
 impl fmt::Display for AttemptEvidence {
@@ -333,6 +373,8 @@ struct Session {
     counted: Arc<AtomicU64>,
     /// Set once the readers have taken in more than `OUTPUT_BUDGET` bytes.
     exceeded: Arc<AtomicBool>,
+    /// The keeper, once `release` opened it. Every path but a collected one drops it unread.
+    keeper: Option<Keeper>,
 }
 
 /// What the group phase measured before the group was ended.
@@ -363,15 +405,33 @@ struct Settled {
     stderr: Option<io::Result<Vec<u8>>>,
 }
 
-/// Runs one attempt: the admission lock, the quarantine check, the whole host admission, then
-/// the attempt group. The group is always ended and removed, or the attempt is quarantined
-/// (decision 0042 rule 6). A refusal carries the group's counters whenever the group was
-/// created, emptied and read.
-///
-/// `execution_dir` holds the admission lock only. The group is created beside the admission's
-/// `supervisor` child, never in `execution_dir`.
+/// Runs one attempt with the fixture input (see `launch_with`).
 pub(super) fn launch(
     plan: &AttemptPlan,
+    execution_dir: &Path,
+) -> Result<AttemptEvidence, AttemptRefusal> {
+    let input = fixture_input().map_err(|failure| without_usage(AttemptFailure::Input(failure)))?;
+    launch_with(plan, input, execution_dir)
+}
+
+/// The input of `launch`: one `index.html` with `FIXTURE_PAGE`, verified against its own listing.
+fn fixture_input() -> Result<VerifiedInput, InputRefusal> {
+    let package = FilePackage::new(vec![(PackagePath::entry(), FIXTURE_PAGE.to_vec())])
+        .map_err(|_| InputRefusal::NotStaged)?;
+    let listing = InputListing::of(&package);
+    VerifiedInput::verify(package, listing)
+}
+
+/// Runs one attempt: the admission lock, the quarantine check, the whole host admission, the
+/// staging of the input, then the attempt group. The group is always ended and removed, or the
+/// attempt is quarantined (decision 0042 rule 6). A refusal carries the group's counters whenever
+/// the group was created, emptied and read.
+///
+/// `execution_dir` holds the admission lock and the staging directory `input`. The group is
+/// created beside the admission's `supervisor` child, not in `execution_dir`.
+pub(super) fn launch_with(
+    plan: &AttemptPlan,
+    input: VerifiedInput,
     execution_dir: &Path,
 ) -> Result<AttemptEvidence, AttemptRefusal> {
     // The stub and the bootstrap use the fixed tool root, so the roots that are verified here
@@ -393,13 +453,24 @@ pub(super) fn launch(
                 AdmissionRefusal::NamespacesUnavailable,
             ))
         })?;
+    // Staged under the admission lock, before any group exists (0056, amendment of 2026-11-13).
+    let staged = input
+        .stage(execution_dir)
+        .map_err(|failure| without_usage(AttemptFailure::Input(failure)))?;
+    let input_digest = staged.digest();
     let name = format!(
         "attempt-{}-{}",
         process::id(),
         ATTEMPT_COUNTER.fetch_add(1, Ordering::Relaxed)
     );
-    let group = probe_group::create_probe(&delegated, &name)
-        .map_err(|failure| without_usage(AttemptFailure::Refused(failure)))?;
+    let group = match probe_group::create_probe(&delegated, &name) {
+        Ok(group) => group,
+        Err(failure) => {
+            // The attempt is refused already; the removal is best effort.
+            staged.remove().ok();
+            return Err(without_usage(AttemptFailure::Refused(failure)));
+        }
+    };
     let group_path = delegated.join(&name);
 
     // From here on every path ends the group in `settle`, whatever the group phase returned.
@@ -407,12 +478,16 @@ pub(super) fn launch(
     let phase = run_group(
         plan,
         roots,
+        staged.path(),
         &group,
         &group_path,
         &own_pid_namespace,
         &mut session,
     );
     let settled = settle(group, &group_path, &mut session);
+    // Removed after the group is gone, on every path that staged it.
+    let removed = staged.remove();
+    let keeper = session.keeper.take();
     let usage = settled.usage;
     let refused = |failure: AttemptFailure| AttemptRefusal { failure, usage };
     let outcome = Outcome {
@@ -432,6 +507,9 @@ pub(super) fn launch(
     else {
         return Err(refused(AttemptFailure::Unobserved));
     };
+    removed.map_err(|failure| refused(AttemptFailure::Input(failure)))?;
+    let binding = manifest_binding(&report, &filter_sha256, input_digest);
+    let output = collect_output(keeper, passed.exit, &binding);
     Ok(AttemptEvidence {
         group: group_path,
         limits: passed.limits,
@@ -444,7 +522,38 @@ pub(super) fn launch(
         readiness: passed.readiness,
         filter_sha256,
         report,
+        output,
     })
+}
+
+/// The binding of the output manifest: the profile identity, the SHA-256 of the profile's
+/// manifest, the tool root's manifest digest, the filter's digest and the input listing's digest
+/// (0056, amendment of 2026-11-13).
+fn manifest_binding(
+    report: &HostReport,
+    filter_sha256: &str,
+    input_digest: [u8; 32],
+) -> ManifestBinding {
+    ManifestBinding {
+        profile: FIXTURE.identity,
+        profile_manifest_sha256: Sha256::digest(FIXTURE.manifest()).into(),
+        tool_root_sha256: report.tool_manifest_sha256.clone(),
+        filter_sha256: filter_sha256.to_owned(),
+        input_digest,
+    }
+}
+
+/// Collects the output root after a passing verdict, when the stub exited with status 0 (0042
+/// rule 7; 0056 rule 5, as reworded). Any other exit drops the keeper unread.
+fn collect_output(
+    keeper: Option<Keeper>,
+    exit: ExitStatus,
+    binding: &ManifestBinding,
+) -> Result<CollectedOutput, OutputRefusal> {
+    let Some(keeper) = keeper.filter(|_| exit.code() == Some(0)) else {
+        return Err(OutputRefusal::NotCollected);
+    };
+    keeper.collect(binding).map_err(OutputRefusal::Refused)
 }
 
 /// Maps the lock's refusal: contention is `Busy`, and nothing else is then done.
@@ -462,19 +571,28 @@ fn quarantine() {
 }
 
 /// The group phase: limits, the stub, its placement, the readiness check and release, the wait
-/// for exit, and the exec confirmation. The caller ends the group whatever this returns.
+/// for exit, and the exec confirmation. `input` is the staged directory that the stub receives as
+/// its last argument. The caller ends the group whatever this returns.
 fn run_group(
     plan: &AttemptPlan,
     roots: &AdmissionRoots<'_>,
+    input: &Path,
     group: &ProbeGroup,
     group_path: &Path,
     own_pid_namespace: &Path,
     session: &mut Session,
 ) -> Result<Passed, AttemptFailure> {
     let limits = probe_group::apply_limits(group).map_err(AttemptFailure::Refused)?;
-    let mut control = start_stub(plan, roots, session)?;
+    let mut control = start_stub(plan, roots, input, session)?;
     place_stub(group, group_path, session)?;
-    let (readiness, start) = release(plan, roots, &mut control, group_path, own_pid_namespace)?;
+    let (readiness, start) = release(
+        plan,
+        roots,
+        &mut control,
+        group_path,
+        own_pid_namespace,
+        session,
+    )?;
     // `await_exit` records the exit in the session itself, on every path that reaped the stub.
     let (exit, wall_time) = await_exit(plan, session, start)?;
     // Decision 0042 rule 6: after the launcher and init teardown a normal exit also requires an
@@ -494,11 +612,13 @@ fn run_group(
     })
 }
 
-/// Starts the stub with its standard input on a control socket and its two pipes captured.
-/// Returns the provider's end of the socket.
+/// Starts the stub with its standard input on a control socket and its two pipes captured. The
+/// staged input's path is the stub's last argument (0056, amendment of 2026-11-13). Returns the
+/// provider's end of the socket.
 fn start_stub(
     plan: &AttemptPlan,
     roots: &AdmissionRoots<'_>,
+    input: &Path,
     session: &mut Session,
 ) -> Result<UnixStream, AttemptFailure> {
     let (control, child_end) = UnixStream::pair()
@@ -508,6 +628,7 @@ fn start_stub(
         let mut command = Command::new(roots.tool_root.join(launcher::FIXTURE_FILE));
         command
             .args(plan.stub_arguments)
+            .arg(input)
             .env_clear()
             .stdin(Stdio::from(OwnedFd::from(child_end)))
             .stdout(Stdio::piped())
@@ -594,13 +715,16 @@ fn lists_pid(listing: &[u8], pid: u32) -> bool {
 }
 
 /// Sends LAUNCH, reads READY before the readiness deadline, observes the group independently and
-/// only then sends RELEASE. Returns the observation and the instant of LAUNCH.
+/// only then sends RELEASE. Between the observation and RELEASE the keeper is opened, checked and
+/// held in `session`, and the plan's plant step runs (0056 rule 5, as reworded). Returns the
+/// observation and the instant of LAUNCH.
 fn release(
     plan: &AttemptPlan,
     roots: &AdmissionRoots<'_>,
     control: &mut UnixStream,
     group_path: &Path,
     own_pid_namespace: &Path,
+    session: &mut Session,
 ) -> Result<(GroupObservation, Instant), AttemptFailure> {
     let start = Instant::now();
     control
@@ -615,6 +739,16 @@ fn release(
         own_pid_namespace,
     )
     .map_err(|_| AttemptFailure::NotStarted(NotStartedReason::ReadinessNotConfirmed))?;
+    // Opened and checked from outside the group after the observation and before the release
+    // (0056 rule 5, as reworded).
+    let keeper = Keeper::open(Path::new("/proc"), group_path, &observation)
+        .map_err(AttemptFailure::NotStarted)?;
+    if let Some(plant) = plan.plant {
+        plant(keeper.output_root())
+            .map_err(|_| AttemptFailure::NotStarted(NotStartedReason::KeeperNotHeld))?;
+    }
+    // Held by the session, so that every later path drops it.
+    session.keeper = Some(keeper);
     control
         .write_all(plan.release_record)
         .map_err(|_| AttemptFailure::NotStarted(NotStartedReason::ReleaseNotSent))?;
@@ -864,7 +998,10 @@ fn join_reader(reader: Option<Capture>, within: Duration) -> Option<io::Result<V
 }
 
 #[cfg(test)]
+mod io_tests;
+#[cfg(test)]
 mod isolation_tests;
+mod keeper;
 #[cfg(test)]
 mod kernel_log;
 #[cfg(test)]

@@ -120,7 +120,9 @@ const TERMINALS_MODE: &str = "0555";
 /// The size bound of that tmpfs in bytes, the smallest the kernel rounds to: one page.
 const TERMINALS_BYTES: &str = "4096";
 
-/// The attempt's fixed argument list, in launch order (0056 rule 2 with its amendments of 2026-11-12 and 2026-11-13): the shared prefix, the two capabilities, the scratch's mount point, an empty tmpfs over the minimal `/dev`'s `/dev/pts`, the read-only remounts, then the fixture's `bootstrap` mode with the fixture profile's identity.
+/// The attempt's fixed argument list, in launch order (0056 rule 2 with its amendments of 2026-11-12 and 2026-11-13): the shared prefix, the staged input bound read-only at `/input`, the two capabilities, the scratch's mount point, an empty tmpfs over the minimal `/dev`'s `/dev/pts`, the read-only remounts, then the fixture's `bootstrap` mode with the fixture profile's identity.
+///
+/// The fixed argument list binds the attempt's staging directory read-only at `/input`. Its path comes from the provider (the amendment of 2026-11-13, input and output), and it is absolute, since the stub refuses any other path before this list is built. It is never a request's.
 ///
 /// The launcher's init is the first process of the attempt's PID namespace and stays in the launcher's mount namespace, so `/proc/1/root` shows that namespace to the payload. The bootstrap covers `/dev/pts` in its own namespace; this tmpfs covers the launcher's, so neither path opens a pseudo-terminal master (measured on the runner on 2026-11-13).
 ///
@@ -130,8 +132,14 @@ const TERMINALS_BYTES: &str = "4096";
 ///
 /// Nothing a request carries reaches this list, and the scratch's size and inode bounds are set by the bootstrap, not here.
 #[must_use]
-pub(super) fn attempt_arguments(root: &Path) -> Vec<OsString> {
+pub(super) fn attempt_arguments(root: &Path, input: &Path) -> Vec<OsString> {
     let mut arguments = sandbox_arguments(root);
+    // The staged input, read-only at `/input` (0056 rule 2, as reworded by the amendment of 2026-11-13, input and output).
+    arguments.extend([
+        OsString::from("--ro-bind"),
+        input.as_os_str().to_owned(),
+        OsString::from("/input"),
+    ]);
     arguments.extend(
         [
             "--cap-add",

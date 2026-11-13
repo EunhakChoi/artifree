@@ -5,13 +5,17 @@
 //!
 //! - `namespaces` prints one `name=target` line per namespace of this process
 //!   to stdout.
-//! - `wait` reads stdin to end of file and discards what it read.
-//! - `false-ready` writes the READY record on descriptor 0 without limits, a
-//!   privilege drop or a filter, then reads descriptor 0 to end of file. It is
-//!   a negative control for the provider's readiness check and execs nothing.
-//! - `stub <identity>` runs the launch stub and `bootstrap <identity>` runs the
-//!   bootstrap (decision 0056 rule 3). On success each one replaces this process
-//!   with the next program, so they return only on failure.
+//! - `wait <input>` reads stdin to end of file and discards what it read. The
+//!   trailing path is the provider's staged input, which this mode ignores.
+//! - `false-ready <input>` writes the READY record on descriptor 0 without
+//!   limits, a privilege drop or a filter, then reads descriptor 0 to end of
+//!   file. It is a negative control for the provider's readiness check and execs
+//!   nothing. Its trailing path is ignored as well.
+//! - `stub <identity> <input>` runs the launch stub with the provider's staged
+//!   input directory as `<input>` (decision 0056, amendment of 2026-11-13).
+//!   `bootstrap <identity>` runs the bootstrap (decision 0056 rule 3). On success
+//!   each one replaces this process with the next program, so they return only
+//!   on failure.
 //! - `write-probes <directory>` writes the generated probe programs of decision
 //!   0056 (amendment of 2026-11-13) into the directory, one file per probe with
 //!   mode 0o755, and exits 0. The job's `prepare.sh` runs it while it assembles
@@ -47,9 +51,16 @@ fn main() -> ExitCode {
     match arguments.as_slice() {
         [mode] => run_mode(mode),
         [mode, directory] if mode == "write-probes" => write_probes(Path::new(directory)),
+        // The provider appends the staged input's path to every stub argument list (0056,
+        // amendment of 2026-11-13, input and output); the two negative controls ignore it.
+        [mode, _input] if mode == "wait" || mode == "false-ready" => run_mode(mode),
         [mode, identity] => match (mode.to_str(), identity.to_str()) {
             (Some(name), Some(value)) => run_identity_mode(name, value),
             _ => ExitCode::from(2),
+        },
+        [mode, identity, input] if mode == "stub" => match identity.to_str() {
+            Some(value) => run_stub_mode(value, Path::new(input)),
+            None => ExitCode::from(2),
         },
         _ => ExitCode::from(2),
     }
@@ -66,19 +77,38 @@ fn run_mode(mode: &OsStr) -> ExitCode {
     }
 }
 
-/// Runs the stub or the bootstrap with its identity.
+/// Runs the bootstrap with its identity. The `stub` mode takes the staged input as well, so it
+/// is handled by `run_stub_mode`.
 #[cfg(target_os = "linux")]
 fn run_identity_mode(mode: &str, identity: &str) -> ExitCode {
-    match mode {
-        "stub" => run_child(run_stub, identity),
-        "bootstrap" => run_child(run_bootstrap, identity),
-        _ => ExitCode::from(2),
+    if mode == "bootstrap" {
+        run_child(run_bootstrap, identity)
+    } else {
+        ExitCode::from(2)
     }
 }
 
-/// Other systems have no launch stub or bootstrap, so both modes exit with status 2.
+/// Other systems have no bootstrap, so the mode exits with status 2.
 #[cfg(not(target_os = "linux"))]
 fn run_identity_mode(_mode: &str, _identity: &str) -> ExitCode {
+    ExitCode::from(2)
+}
+
+/// Runs the launch stub with its identity and the provider's staged input, which the stub
+/// receives as its last argument.
+///
+/// A failure is written to stderr and exits with status 70.
+#[cfg(target_os = "linux")]
+fn run_stub_mode(identity: &str, input: &Path) -> ExitCode {
+    match run_stub(identity, input) {
+        Ok(never) => match never {},
+        Err(failure) => report_failure(&failure, ExitCode::from(70)),
+    }
+}
+
+/// Other systems have no launch stub, so the mode exits with status 2.
+#[cfg(not(target_os = "linux"))]
+fn run_stub_mode(_identity: &str, _input: &Path) -> ExitCode {
     ExitCode::from(2)
 }
 
@@ -99,7 +129,7 @@ fn write_probes(_directory: &Path) -> ExitCode {
     ExitCode::from(2)
 }
 
-/// Runs a launch stub or bootstrap entry point, which returns only on failure.
+/// Runs the bootstrap entry point, which returns only on failure.
 ///
 /// A failure is written to stderr and exits with status 70.
 #[cfg(target_os = "linux")]
