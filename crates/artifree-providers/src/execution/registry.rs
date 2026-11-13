@@ -41,7 +41,7 @@ pub(super) const QUARANTINE_TAG: &str = "artifree-quarantine-v1";
 /// The largest record, in bytes; a longer file is refused before it is parsed.
 pub(super) const RECORD_LIMIT: usize = 1024;
 /// The text that every quarantine refusal shows the operator.
-pub(super) const OPERATOR_TEXT: &str = "operator action is required: settle the host (a record of another machine means its remote cleanup cannot be proved), then remove the quarantine file of the execution directory";
+pub(super) const OPERATOR_TEXT: &str = "operator action is required: settle the host (a record of another machine means its remote cleanup cannot be proved), remove each record in the execution directory's attempts directory that the host no longer needs, then remove the quarantine file of the execution directory";
 /// The machine identity file, whose 32 digits identify the machine.
 pub(super) const MACHINE_ID: &str = "/etc/machine-id";
 /// The kernel's boot identity file, which changes at every boot.
@@ -604,9 +604,9 @@ fn record_name(identity: Identity) -> String {
 /// exclusively with mode `0600`, holding the tag line and the reason, then syncs the file and the
 /// directory. A file that exists already is left as it is.
 ///
-/// A write or a sync that fails removes the new file again, so that a quarantine which was not
-/// persisted is not remembered after a restart. If that removal fails too, the partial file stays
-/// and refuses the launch of a restart, which fails closed.
+/// A write or a sync that fails leaves whatever reached the disk: the launch looks only for the
+/// file's presence, so a partial file still refuses a restart, which fails closed. The caller still
+/// reports that the quarantine may not be persisted.
 ///
 /// # Errors
 /// Returns the I/O error of a step that fails.
@@ -624,11 +624,7 @@ pub(super) fn persist_quarantine(execution_dir: &Path, reason: QuarantineReason)
         .and_then(|()| file.sync_all())
         .and_then(|()| rustix::fs::fsync(&execution).map_err(io::Error::from));
     drop(file);
-    if let Err(error) = staged {
-        rustix::fs::unlinkat(&execution, QUARANTINE_FILE, AtFlags::empty()).ok();
-        return Err(error);
-    }
-    Ok(())
+    staged
 }
 
 /// Whether the execution directory holds a quarantine file, whatever the file holds. A lookup that
@@ -705,6 +701,9 @@ pub(super) fn reconcile(
     host: &HostIdentity,
 ) -> Result<Vec<Reconciled>, RegistryRefusal> {
     let registry = Registry::open(execution_dir).map_err(|_| RegistryRefusal::Unusable)?;
+    // One handle on the mount, opened right after admission checked it, serves every record.
+    let mount = rustix::fs::open(cgroup_mount, CGROUP_DIRECTORY, Mode::empty())
+        .map_err(|_| RegistryRefusal::Cleanup)?;
     let mut reconciled = Vec::new();
     for entry in registry.entries().map_err(|_| RegistryRefusal::Unusable)? {
         let (identity, bytes) = match entry {
@@ -724,7 +723,7 @@ pub(super) fn reconcile(
             Decision::OtherMachine => return Err(RegistryRefusal::OtherMachine),
             Decision::OtherNamespace => return Err(RegistryRefusal::OtherNamespace),
             Decision::ChangedBoot => ReconcileOutcome::ChangedBoot,
-            Decision::SameBoot => end_group(cgroup_mount, &record, own_uid)?,
+            Decision::SameBoot => end_group(&mount, &record, own_uid)?,
         };
         remove_tree(&execution_dir.join(INPUT_DIR)).map_err(|_| RegistryRefusal::Input)?;
         registry
@@ -742,14 +741,12 @@ pub(super) fn reconcile(
 /// # Errors
 /// Returns `Owner` for a parent of another account, and `Cleanup` for any other failure.
 fn end_group(
-    cgroup_mount: &Path,
+    mount: &OwnedFd,
     record: &Record,
     own_uid: u32,
 ) -> Result<ReconcileOutcome, RegistryRefusal> {
-    let mount = rustix::fs::open(cgroup_mount, CGROUP_DIRECTORY, Mode::empty())
-        .map_err(|_| RegistryRefusal::Cleanup)?;
     let parent = match rustix::fs::openat2(
-        &mount,
+        mount,
         record.parent.as_str(),
         CGROUP_DIRECTORY,
         Mode::empty(),
@@ -829,14 +826,21 @@ fn kill_and_await_empty(
             Mode::empty(),
         ) {
             Ok(events) => events,
-            Err(Errno::NOENT) => return Ok(ReconcileOutcome::Killed),
+            Err(error) if group_vanished(error) => return Ok(ReconcileOutcome::Killed),
             Err(_) => return Err(RegistryRefusal::Cleanup),
         };
         let mut bytes = Vec::new();
-        File::from(events)
+        // The group can be removed between the open and the read, which then fails with `ENODEV`:
+        // a removed group holds no process.
+        if let Err(error) = File::from(events)
             .take(EVENTS_BYTES)
             .read_to_end(&mut bytes)
-            .map_err(|_| RegistryRefusal::Cleanup)?;
+        {
+            return match Errno::from_io_error(&error) {
+                Some(errno) if group_vanished(errno) => Ok(ReconcileOutcome::Killed),
+                _ => Err(RegistryRefusal::Cleanup),
+            };
+        }
         match probe_group::parse_populated(&bytes) {
             Some(false) => return Ok(ReconcileOutcome::Killed),
             Some(true) => {}
