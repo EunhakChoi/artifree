@@ -1,9 +1,11 @@
-//! Tests of the mount checks in `readiness` (the amendment of 2026-11-12, rules 2 and 3): the
-//! measured mount table passes, each wrong mount is refused under its field name, the last line of
-//! a mount point decides, and malformed or oversized text is refused.
+//! Tests of the mount checks in `readiness` (the amendment of 2026-11-12, rules 2 and 3, and the
+//! amendment of 2026-11-13, rule 3 as reworded): the measured mount table passes, each wrong mount
+//! is refused under its field name, the empty read-only tmpfs over `/dev/pts` is required and the
+//! later of two `/dev/pts` lines decides, the last line of a mount point decides, and malformed or
+//! oversized text is refused.
 
 use super::{
-    MountFacts, PROC_FILE_BYTES, ReadinessFailure, SCRATCH_INODES, SCRATCH_SIZE_BYTES,
+    MountFacts, PROC_FILE_BYTES, PtsMount, ReadinessFailure, SCRATCH_INODES, SCRATCH_SIZE_BYTES,
     ScratchMount, confirm_mounts, parse_mounts,
 };
 
@@ -18,16 +20,23 @@ const ROOT_LINE: &str =
     "1290 1201 0:110 / / ro,nosuid,nodev,relatime - tmpfs tmpfs rw,uid=1001,gid=1001,inode64";
 const DEV_LINE: &str = "1295 1290 0:112 / /dev ro,nosuid,nodev,relatime - tmpfs tmpfs rw,mode=755,uid=1001,gid=1001,inode64";
 const TMP_LINE: &str = "1299 1290 0:115 / /tmp rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,size=131072k,nr_inodes=4096,mode=700,uid=1001,gid=1001,inode64";
+/// The launcher's empty read-only tmpfs over `/dev/pts`, stacked on its devpts (0056, amendment of
+/// 2026-11-13, the launcher's `/dev/pts`). Illustrative ids; the options of this line and of the
+/// devpts line under it are the kernel's, as the enforcement job recorded them inside an attempt
+/// (`canary.dev-pts.mount_in_attempt`, run 43373521166). The read-only flag is a mount option:
+/// the super options still say `rw`.
+const PTS_LINE: &str = "1300 1296 0:116 / /dev/pts ro,nosuid,nodev,relatime - tmpfs tmpfs rw,size=4k,mode=555,uid=1001,gid=1001,inode64";
 
-const MEASURED_MOUNTINFO: [&str; 8] = [
+const MEASURED_MOUNTINFO: [&str; 9] = [
     ROOT_LINE,
     "1291 1290 8:1 /opt/artifree/tools/v1 /tools ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
     "1292 1290 8:1 /opt/artifree/tools/v1/lib /lib ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
     "1293 1290 8:1 /opt/artifree/tools/v1/lib64 /lib64 ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
     "1294 1290 0:111 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw",
     DEV_LINE,
-    "1296 1295 0:113 / /dev/pts rw,nosuid,noexec,relatime - devpts devpts rw,mode=600,ptmxmode=666",
+    "1296 1295 0:113 / /dev/pts rw,nosuid,noexec,relatime - devpts devpts rw,mode=620,ptmxmode=666",
     TMP_LINE,
+    PTS_LINE,
 ];
 
 /// The scratch facts of the measured table: a writable, owner-only tmpfs with `nosuid`, `nodev`
@@ -87,6 +96,16 @@ fn replaced(line: &str, from: &str, to: &str) -> String {
     line.replace(from, to)
 }
 
+/// The line with `from` replaced by `to` when it is the over-mount's tmpfs line, and kept as
+/// measured otherwise, so that an edit of `/dev/pts` leaves the launcher's devpts line alone.
+fn replaced_in_over_mount(line: &str, from: &str, to: &str) -> String {
+    if line.contains(" - tmpfs ") {
+        replaced(line, from, to)
+    } else {
+        line.to_owned()
+    }
+}
+
 /// Pads `text` with blank lines to exactly `length` bytes.
 fn padded_to(text: &str, length: usize) -> String {
     assert!(
@@ -132,8 +151,14 @@ fn measured_mount_table_passes() -> Verdict {
             scratch: Some(MEASURED_SCRATCH),
             root_read_only: Some(true),
             dev_read_only: Some(true),
+            dev_pts: Some(PtsMount {
+                is_tmpfs: true,
+                read_only: true,
+                size_kib: Some(4),
+                mode: Some(0o555),
+            }),
         },
-        "the measured table must read as the measured scratch, root and /dev"
+        "the measured table must read as the measured scratch, root, /dev and /dev/pts"
     );
     confirm_mounts(&facts)?;
     assert_eq!(
@@ -299,6 +324,139 @@ fn last_line_of_a_mount_point_wins() {
             "an earlier writable / is covered by the measured one",
             format!("{bad_root}\n{measured}"),
             Ok(()),
+        ),
+    ]);
+}
+
+/// The launcher's cover must be the last `/dev/pts` line and a read-only tmpfs. Each other
+/// table is refused as `DevPts`, whichever line is wrong (the amendment of 2026-11-13, rule 3 as
+/// reworded).
+#[test]
+fn dev_pts_must_be_the_read_only_tmpfs_over_mount() {
+    assert_rows([
+        ("the measured table", join_lines(MEASURED_MOUNTINFO), Ok(())),
+        (
+            "only the launcher's devpts",
+            edited_table("/dev/pts", |line| {
+                (!line.contains(" - tmpfs ")).then(|| line.to_owned())
+            }),
+            Err(ReadinessFailure::DevPts),
+        ),
+        (
+            "no /dev/pts line",
+            edited_table("/dev/pts", |_| None),
+            Err(ReadinessFailure::DevPts),
+        ),
+        (
+            "a writable tmpfs over /dev/pts",
+            edited_table("/dev/pts", |line| {
+                Some(replaced_in_over_mount(line, "/dev/pts ro,", "/dev/pts rw,"))
+            }),
+            Err(ReadinessFailure::DevPts),
+        ),
+        (
+            "a devpts over-mount",
+            edited_table("/dev/pts", |line| {
+                Some(replaced_in_over_mount(
+                    line,
+                    " - tmpfs tmpfs rw,size=4k",
+                    " - devpts devpts rw,size=4k",
+                ))
+            }),
+            Err(ReadinessFailure::DevPts),
+        ),
+    ]);
+}
+
+/// The cover must be the launcher's empty tmpfs: 4 KiB and mode 555 (0056 rules 2 and 3, as
+/// reworded by the amendments of 2026-11-13). A read-only tmpfs with other bounds is refused as
+/// `DevPts`, including one with the scratch's bounds, which the same mount table would otherwise
+/// accept (the read-only tmpfs `/dev/shm` is not empty).
+#[test]
+fn dev_pts_over_mount_must_be_empty() {
+    assert_rows([
+        (
+            "a read-only tmpfs of 128 MiB and 4,096 inodes",
+            edited_table("/dev/pts", |line| {
+                Some(replaced_in_over_mount(
+                    line,
+                    "size=4k,",
+                    "size=131072k,nr_inodes=4096,",
+                ))
+            }),
+            Err(ReadinessFailure::DevPts),
+        ),
+        (
+            "an 8 KiB size",
+            edited_table("/dev/pts", |line| {
+                Some(replaced_in_over_mount(line, "size=4k,", "size=8k,"))
+            }),
+            Err(ReadinessFailure::DevPts),
+        ),
+        (
+            "no size bound",
+            edited_table("/dev/pts", |line| {
+                Some(replaced_in_over_mount(line, "size=4k,", ""))
+            }),
+            Err(ReadinessFailure::DevPts),
+        ),
+        (
+            "mode 755",
+            edited_table("/dev/pts", |line| {
+                Some(replaced_in_over_mount(line, "mode=555", "mode=755"))
+            }),
+            Err(ReadinessFailure::DevPts),
+        ),
+        (
+            "no mode",
+            edited_table("/dev/pts", |line| {
+                Some(replaced_in_over_mount(line, "mode=555,", ""))
+            }),
+            Err(ReadinessFailure::DevPts),
+        ),
+    ]);
+}
+
+/// With stacked mounts the later `/dev/pts` line decides. A launcher's devpts that comes after the
+/// over-mount is refused, and a writable tmpfs that comes after a read-only over-mount is refused.
+#[test]
+fn the_later_dev_pts_line_decides() {
+    // The over-mount goes in front of the launcher's devpts line, which is then the later line.
+    let mut over_mount_first: Vec<&str> = Vec::new();
+    for line in MEASURED_MOUNTINFO {
+        if line == PTS_LINE {
+            continue;
+        }
+        if mount_point_of(line) == Some("/dev/pts") {
+            over_mount_first.push(PTS_LINE);
+        }
+        over_mount_first.push(line);
+    }
+    assert_eq!(
+        over_mount_first.len(),
+        MEASURED_MOUNTINFO.len(),
+        "the reordering must keep every line"
+    );
+    let writable_over_mount = replaced(PTS_LINE, "/dev/pts ro,", "/dev/pts rw,");
+    assert_rows([
+        (
+            "the devpts line after the over-mount",
+            join_lines(over_mount_first),
+            Err(ReadinessFailure::DevPts),
+        ),
+        (
+            "the over-mount once more after the measured table",
+            join_lines(MEASURED_MOUNTINFO.into_iter().chain([PTS_LINE])),
+            Ok(()),
+        ),
+        (
+            "a writable tmpfs after the measured table",
+            join_lines(
+                MEASURED_MOUNTINFO
+                    .into_iter()
+                    .chain([writable_over_mount.as_str()]),
+            ),
+            Err(ReadinessFailure::DevPts),
         ),
     ]);
 }

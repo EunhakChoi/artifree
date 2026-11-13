@@ -52,6 +52,15 @@ implemented; no untrusted execution outside the enforcement job's tests**. Roadm
 > or this decision is amended. The real-leak case of an inherited
 > descriptor stays R02ae's.
 
+> **Note, 2026-11-13 (R02ae).** 0056's fifth slice proves the matrix rows
+> "Host files and processes" and "Network" in the enforcement job: host
+> listeners, canary files and a canary process are untouched by a payload
+> that tries them, the payload's network namespace has only `lo`, a real
+> leaked descriptor is refused before READY, and a preloaded library and
+> the caller's environment reach no program the provider starts. Rule 4's
+> fixture profile allows local networking inside the attempt, as 0056's
+> amendment of 2026-11-13 says; the network namespace keeps it inside.
+
 ## Context and evidence
 
 The existing worker runs only trusted `verify_revision` code and opens SQLite

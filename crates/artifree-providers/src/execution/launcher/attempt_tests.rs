@@ -44,14 +44,14 @@ fn remounts_follow_every_mount_option_and_precede_chdir() -> Result<(), Box<dyn 
             format!("the attempt must chdir to / before the fixture: {arguments:?}").into(),
         );
     };
-    for target in ["/", "/dev"] {
+    for target in ["/", "/dev", "/dev/pts"] {
         let Some(remount) = pair_position(&arguments, "--remount-ro", target) else {
             return Err(format!(
                 "the remount of {target} read-only must be present: {arguments:?}"
             )
             .into());
         };
-        for option in ["--ro-bind", "--proc", "--dev", "--dir"] {
+        for option in ["--ro-bind", "--proc", "--dev", "--dir", "--tmpfs"] {
             let occurrences = option_positions(&arguments, option);
             assert!(
                 !occurrences.is_empty(),
@@ -79,12 +79,48 @@ fn attempt_scratch_is_a_mount_point_only() {
         pair_position(&arguments, "--dir", "/tmp").is_some(),
         "the attempt must make the scratch's mount point with --dir /tmp: {arguments:?}"
     );
-    for option in ["--tmpfs", "--size"] {
-        assert!(
-            !arguments.iter().any(|argument| argument == option),
-            "the launcher must not mount the scratch, so {option} must be absent: {arguments:?}"
-        );
-    }
+    assert!(
+        pair_position(&arguments, "--tmpfs", "/tmp").is_none(),
+        "the launcher must not mount the scratch: {arguments:?}"
+    );
+    assert_eq!(
+        option_positions(&arguments, "--tmpfs").len(),
+        1,
+        "the launcher's only tmpfs must be the one over /dev/pts: {arguments:?}"
+    );
+}
+
+/// The launcher's init stays in the launcher's mount namespace, which `/proc/1/root` shows to the
+/// payload, so the launcher covers its `/dev/pts` too (0056, amendment of 2026-11-13, the
+/// launcher's `/dev/pts`): an empty tmpfs, read and search only, one page, then read-only.
+#[test]
+fn attempt_covers_the_launchers_dev_pts() -> Result<(), Box<dyn Error>> {
+    let arguments = as_text(&attempt_arguments(Path::new("/opt/t")));
+    let Some(tmpfs) = pair_position(&arguments, "--tmpfs", "/dev/pts") else {
+        return Err(format!(
+            "the attempt must mount a tmpfs over /dev/pts with --tmpfs /dev/pts: {arguments:?}"
+        )
+        .into());
+    };
+    let before: Vec<&str> = arguments
+        .iter()
+        .take(tmpfs)
+        .rev()
+        .take(4)
+        .rev()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        before,
+        ["--perms", "0555", "--size", "4096"],
+        "the tmpfs over /dev/pts must be read and search only and one page: {arguments:?}"
+    );
+    let dev = pair_position(&arguments, "--dev", "/dev");
+    assert!(
+        dev.is_some_and(|dev| dev < tmpfs),
+        "the tmpfs over /dev/pts must follow --dev /dev, which creates the devpts: {arguments:?}"
+    );
+    Ok(())
 }
 
 #[test]

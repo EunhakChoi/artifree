@@ -864,6 +864,8 @@ fn join_reader(reader: Option<Capture>, within: Duration) -> Option<io::Result<V
 }
 
 #[cfg(test)]
+mod isolation_tests;
+#[cfg(test)]
 mod kernel_log;
 #[cfg(test)]
 mod mapping_tests;

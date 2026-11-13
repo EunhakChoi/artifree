@@ -46,7 +46,8 @@ usage: prepare.sh VERB [ARGUMENT]
   scenario NAME       write NAME to etc/scenario and rewrite the manifest
                       (exit threads processes memory scratch-bytes scratch-inodes
                       flood hang cpu survivors survivors-hang probes clone3
-                      thread-refusal descendant-refusal lower descriptors watch)
+                      thread-refusal descendant-refusal lower descriptors watch
+                      network host proc-dev environment marker)
   kernel-log          print the last 20 kernel log lines about seccomp (type=1326) or oom
   kernel-log-access   let the runner read the kernel log and lift its rate limit; refuse while an audit daemon runs
 EOF
@@ -58,15 +59,31 @@ fail() {
   exit 1
 }
 
+# Writes the runner's primary IPv4 address to etc/host-address, one line, for the network
+# scenario. Decision 0056 (amendment of 2026-11-13, "files, descriptors and network"): "The
+# runner's own address is a fact of the prepared host: the preparation writes it into the tool
+# root, under the manifest, as it writes the scenario." The address is the source address of
+# the route to 1.1.1.1.
+write_host_address() {
+  local route address
+  route="$(ip -4 -o route get 1.1.1.1)" \
+    || fail "ip names no route to 1.1.1.1, so the runner's own IPv4 address is unknown"
+  address="$(printf '%s\n' "$route" |
+    awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+  [[ "$address" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] \
+    || fail "the route to 1.1.1.1 names no IPv4 source address: $route"
+  write_root_text 0644 "$ROOT/etc/host-address" "$address"
+}
+
 # Assembles the tool root: the bubblewrap launcher, the fixture and the payload, the shared
 # libraries each of them needs, the licence of each Debian package that owns a copied file,
-# the scenario file that starts as `exit`, and the manifest last (decision 0056 rule 6). The
-# sandbox binds the tool root's lib and lib64 as /lib and /lib64 and nothing else, so a
-# library that ldd reports under /usr/lib (usrmerged hosts such as ubuntu-24.04) is copied to
-# the path it has inside the sandbox. The fixture's write-probes mode writes the probe programs
-# under probes/ before the manifest, which covers them like every other file: "The fixture's
-# tool root also holds its generated probe programs, under the same manifest" (decision 0056
-# rule 6, as amended 2026-11-13).
+# the scenario file that starts as `exit`, the runner's IPv4 address in etc/host-address, and
+# the manifest last (decision 0056 rule 6). The sandbox binds the tool root's lib and lib64 as
+# /lib and /lib64 and nothing else, so a library that ldd reports under /usr/lib (usrmerged
+# hosts such as ubuntu-24.04) is copied to the path it has inside the sandbox. The fixture's
+# write-probes mode writes the probe programs under probes/ before the manifest, which covers
+# them like every other file: "The fixture's tool root also holds its generated probe programs,
+# under the same manifest" (decision 0056 rule 6, as amended 2026-11-13).
 install_tool_root() {
   local fixture=$1 payload=$2
   [[ -f "$fixture" && -x "$fixture" ]] || fail "the fixture is not an executable file: $fixture"
@@ -84,6 +101,7 @@ install_tool_root() {
   install -o root -g root -m 0755 "$payload" "$ROOT/bin/artifree-execution-payload"
   copy_libraries "$payload"
   write_root_text 0644 "$ROOT/etc/scenario" exit
+  write_host_address
   "$ROOT/bin/artifree-execution-fixture" write-probes "$ROOT/probes"
   chown -R root:root "$ROOT/probes"
   chmod -R 0755 "$ROOT/probes"
@@ -325,7 +343,7 @@ is_scenario() {
   case "$1" in
     exit | threads | processes | memory | scratch-bytes | scratch-inodes | flood | hang | \
       cpu | survivors | survivors-hang | probes | clone3 | thread-refusal | descendant-refusal | \
-      lower | descriptors | watch) return 0 ;;
+      lower | descriptors | watch | network | host | proc-dev | environment | marker) return 0 ;;
     *) return 1 ;;
   esac
 }

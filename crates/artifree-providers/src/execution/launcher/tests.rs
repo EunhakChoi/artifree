@@ -502,7 +502,6 @@ fn report_render_lists_every_key_once_in_order() {
             "limit.pids.max=64",
             "peak_memory_bytes=1048576",
             "cleanup_observation=killed, populated 0 within 5 s, child reaped, group removed",
-            "listener_counters=not measured in this slice",
         ],
         "the report must render each key once, in this order"
     );

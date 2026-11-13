@@ -18,8 +18,8 @@ use super::super::readiness::{
 };
 #[cfg(target_arch = "x86_64")]
 use super::{
-    ALLOWED, CLONE, PolicyError, QUERY_ONLY, allowlist, allowlist_rules, compile, fixture_filters,
-    policy_sha256,
+    ALLOWED, CLONE, PolicyError, QUERY_ONLY, SETSOCKOPT, SOCKET, allowlist, allowlist_rules,
+    compile, fixture_filters, policy_sha256,
 };
 
 /// The measured bootstrap's `/proc/<pid>/status`, as the kernel printed it in the probe (0056
@@ -65,7 +65,8 @@ const MEASURED_LIMITS: &[&str] = &[
 
 /// The measured bootstrap's `/proc/<pid>/mountinfo` lines (the amendment of 2026-11-12). The
 /// mount points, options and filesystems are the kernel's values from the runner; the ids and the
-/// root of each line are illustrative.
+/// root of each line are illustrative. The last line is the launcher's empty read-only tmpfs over
+/// `/dev/pts` (0056 rule 2, as reworded on 2026-11-13), which the `/dev/pts` mount check requires.
 const MEASURED_MOUNTINFO: &[&str] = &[
     "1290 1201 0:110 / / ro,nosuid,nodev,relatime - tmpfs tmpfs rw,uid=1001,gid=1001,inode64",
     "1291 1290 8:1 /opt/artifree/tools/v1 /tools ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
@@ -73,18 +74,19 @@ const MEASURED_MOUNTINFO: &[&str] = &[
     "1293 1290 8:1 /opt/artifree/tools/v1/lib64 /lib64 ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
     "1294 1290 0:111 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw",
     "1295 1290 0:112 / /dev ro,nosuid,nodev,relatime - tmpfs tmpfs rw,mode=755,uid=1001,gid=1001,inode64",
-    "1296 1295 0:113 / /dev/pts rw,nosuid,noexec,relatime - devpts devpts rw,mode=600,ptmxmode=666",
+    "1296 1295 0:113 / /dev/pts rw,nosuid,noexec,relatime - devpts devpts rw,mode=620,ptmxmode=666",
     "1299 1290 0:115 / /tmp rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,size=131072k,nr_inodes=4096,mode=700,uid=1001,gid=1001,inode64",
+    "1300 1296 0:116 / /dev/pts ro,nosuid,nodev,relatime - tmpfs tmpfs rw,size=4k,mode=555,uid=1001,gid=1001,inode64",
 ];
 
 /// The limits line keys, as the kernel prints them at the start of a line.
 const OPEN_FILES: &str = "Max open files";
 const CORE_FILE_SIZE: &str = "Max core file size";
 
-/// The measured filter table: the 39 unconditional entries, typed out from the probe's facts
-/// so that the test does not read the table back and agree with it by construction.
+/// The measured filter table: the unconditional entries and `clone3`, typed out from the probe's
+/// facts so that the test does not read the table back and agree with it by construction.
 #[cfg(target_arch = "x86_64")]
-const MEASURED: [(&str, i64); 40] = [
+const MEASURED: [(&str, i64); 48] = [
     ("read", 0),
     ("write", 1),
     ("close", 3),
@@ -100,6 +102,14 @@ const MEASURED: [(&str, i64); 40] = [
     ("pread64", 17),
     ("access", 21),
     ("madvise", 28),
+    // Local networking (0056, amendment of 2026-11-13): typed out from the amendment, not measured.
+    ("connect", 42),
+    ("sendto", 44),
+    ("recvfrom", 45),
+    ("shutdown", 48),
+    ("bind", 49),
+    ("listen", 50),
+    ("getsockname", 51),
     ("execve", 59),
     ("exit", 60),
     ("wait4", 61),
@@ -122,23 +132,24 @@ const MEASURED: [(&str, i64); 40] = [
     ("openat", 257),
     ("newfstatat", 262),
     ("set_robust_list", 273),
+    // Local networking, as above.
+    ("accept4", 288),
     ("getrandom", 318),
     ("statx", 332),
     ("rseq", 334),
     ("clone3", 435),
 ];
 
-/// Calls that the filter must never allow, with their `x86_64` numbers. `clone` is not here
-/// because the allowlist admits it without namespace flags (see `allowlist_rules`).
+/// Calls that the filter must never allow, with their `x86_64` numbers. `clone` and `socket` are
+/// not here because the allowlist admits them under conditions (see `allowlist_rules`).
 #[cfg(target_arch = "x86_64")]
-const DANGEROUS: [(&str, i64); 8] = [
+const DANGEROUS: [(&str, i64); 7] = [
     ("setrlimit", 160),
     ("ptrace", 101),
     ("unshare", 272),
     ("setns", 308),
     ("mount", 165),
     ("bpf", 321),
-    ("socket", 41),
     ("sync", 162),
 ];
 
@@ -158,7 +169,7 @@ fn table_is_sorted_unique_and_complete() {
         ALLOWED.len(),
         "every table name must be unique"
     );
-    // The array type fixes the length at 39; equality with the measured entries pins them.
+    // The array type fixes the length at 48; equality with the measured entries pins them.
     assert_eq!(
         ALLOWED, MEASURED,
         "the table must hold exactly the measured entries"
@@ -257,7 +268,7 @@ fn job_syscall_table_matches_the_kernel_headers() -> io::Result<()> {
     let expected: Vec<(&str, i64)> = ALLOWED
         .iter()
         .copied()
-        .chain([QUERY_ONLY, CLONE])
+        .chain([QUERY_ONLY, CLONE, SOCKET, SETSOCKOPT])
         .chain(DANGEROUS)
         .collect();
     let mut mismatches: Vec<String> = Vec::new();

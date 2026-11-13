@@ -3,8 +3,9 @@
 //! 0042 rule 6, 0056 rules 3 and 5).
 //!
 //! The checks cover the bootstrap's status, its limits, its seccomp filter count and its mount
-//! table. The mount table holds the scratch tmpfs with its bounds and the read-only root and
-//! `/dev` (the amendment of 2026-11-12, rule 3). The bootstrap reads its own table back, and the
+//! table. The mount table holds the scratch tmpfs with its bounds, the read-only root and `/dev`
+//! (the amendment of 2026-11-12, rule 3), and the empty read-only tmpfs over `/dev/pts` (the
+//! amendment of 2026-11-13, rule 3 as reworded). The bootstrap reads its own table back, and the
 //! provider reads the same table of the bootstrap's process independently.
 
 #[cfg(test)]
@@ -42,11 +43,23 @@ const ROOT_MOUNT: &str = "/";
 /// The mount point of the sandbox's device tree, which must be read-only (the amendment of
 /// 2026-11-12).
 const DEV_MOUNT: &str = "/dev";
+/// The mount point of the launcher's terminals, which the bootstrap covers with an empty
+/// read-only tmpfs (the amendment of 2026-11-13, rule 3 as reworded).
+const DEV_PTS_MOUNT: &str = "/dev/pts";
+/// The size bound of the launcher's empty tmpfs over `/dev/pts` in the kernel's `size=<n>k` form:
+/// one page, as the attempt's arguments set it with `--size 4096` (0056 rule 2, as reworded by the
+/// amendment of 2026-11-13, the launcher's `/dev/pts`). Bubblewrap cannot bound its inodes, and a
+/// read-only mount needs no inode bound.
+const TERMINALS_SIZE_KIB: u64 = 4;
+/// The permission bits of that tmpfs: read and search only, as the arguments set them with
+/// `--perms 0555`.
+const TERMINALS_MODE: u32 = 0o555;
 
 // Field names of the mount checks. `mountinfo` names a failure of the text itself.
 const FIELD_SCRATCH: &str = "scratch";
 const FIELD_ROOT: &str = "root";
 const FIELD_DEV: &str = "dev";
+const FIELD_DEV_PTS: &str = "dev_pts";
 const FIELD_MOUNTINFO: &str = "mountinfo";
 
 // Keys of `/proc/<pid>/status`, matched exactly.
@@ -65,7 +78,8 @@ const CORE_FILE_SIZE: &str = "Max core file size";
 
 /// Why proc text does not show the state that a check requires.
 ///
-/// The payload is the `/proc` key concerned, so a refusal names the field and never a value.
+/// The payload is the `/proc` key or mount name concerned, so a refusal names the field and never
+/// a value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ReadinessFailure {
     /// The key appears on no line.
@@ -76,10 +90,14 @@ pub(super) enum ReadinessFailure {
     Malformed(&'static str),
     /// The key's value is not the state that the attempt requires.
     Unexpected(&'static str),
+    /// `/dev/pts` has no line, or its last line is not the launcher's empty read-only tmpfs with
+    /// its bounds: the cover is missing (0056 rules 2 and 3, as reworded by the amendments of
+    /// 2026-11-13).
+    DevPts,
 }
 
 impl ReadinessFailure {
-    /// The `/proc` key whose check failed.
+    /// The `/proc` key or mount name whose check failed.
     #[must_use]
     pub(super) fn field(self) -> &'static str {
         match self {
@@ -87,6 +105,7 @@ impl ReadinessFailure {
             | Self::Repeated(key)
             | Self::Malformed(key)
             | Self::Unexpected(key) => key,
+            Self::DevPts => FIELD_DEV_PTS,
         }
     }
 }
@@ -195,8 +214,8 @@ pub(super) fn confirm_limits(facts: &LimitFacts) -> Result<(), ReadinessFailure>
     Ok(())
 }
 
-/// The facts that the mount checks read from one `mountinfo` line. The scratch fields are read
-/// for the scratch mount; for the root and `/dev`, only `read_only` is read.
+/// The facts that the mount checks read from one `mountinfo` line. The filesystem and bound
+/// fields are read for the scratch mount; for the root and `/dev`, only `read_only` is read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ScratchMount {
     /// Whether the filesystem type is `tmpfs`.
@@ -214,6 +233,21 @@ pub(super) struct ScratchMount {
     pub(super) mode: Option<u32>,
 }
 
+/// The facts that the mount checks read from the last `/dev/pts` line: the filesystem, the
+/// read-only flag, and the size and mode bounds of the launcher's cover.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PtsMount {
+    /// Whether the filesystem type is `tmpfs`.
+    pub(super) is_tmpfs: bool,
+    /// Whether the mount options include `ro`.
+    pub(super) read_only: bool,
+    /// The `size=` bound in KiB from the super options, or `None` when it has another form.
+    pub(super) size_kib: Option<u64>,
+    /// The `mode=` permission bits from the super options, read as octal, or `None` when they
+    /// are absent or not octal.
+    pub(super) mode: Option<u32>,
+}
+
 /// The facts of the last `mountinfo` line for each mount point that the checks read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct MountFacts {
@@ -223,6 +257,9 @@ pub(super) struct MountFacts {
     pub(super) root_read_only: Option<bool>,
     /// Whether `/dev` is read-only, or `None` when no line has its mount point.
     pub(super) dev_read_only: Option<bool>,
+    /// The last `/dev/pts` line's facts, or `None` when no line has its mount point. With stacked
+    /// mounts the cover is the later line, over the launcher's devpts, so the later one decides.
+    pub(super) dev_pts: Option<PtsMount>,
 }
 
 /// One `mountinfo` line: its mount point and the facts that the checks read from it.
@@ -254,17 +291,25 @@ pub(super) fn parse_mounts(text: &str) -> Result<MountFacts, ReadinessFailure> {
         scratch: last_mount(&lines, SCRATCH).map(|line| line.facts),
         root_read_only: last_mount(&lines, ROOT_MOUNT).map(|line| line.facts.read_only),
         dev_read_only: last_mount(&lines, DEV_MOUNT).map(|line| line.facts.read_only),
+        dev_pts: last_mount(&lines, DEV_PTS_MOUNT).map(|line| PtsMount {
+            is_tmpfs: line.facts.is_tmpfs,
+            read_only: line.facts.read_only,
+            size_kib: line.facts.size_kib,
+            mode: line.facts.mode,
+        }),
     })
 }
 
 /// Checks the mount table that the bootstrap set up (the amendment of 2026-11-12, rules 2 and
 /// 3): a scratch tmpfs with `nosuid`, `nodev` and `noexec` (decision 0042 rule 4) that is not
-/// read-only, owner-only, with the size and inode bounds of decision 0042 rule 5, and a read-only
-/// root and `/dev`.
+/// read-only, owner-only, with the size and inode bounds of decision 0042 rule 5, a read-only
+/// root and `/dev`, and `/dev/pts` covered by the launcher's empty read-only tmpfs of 4 KiB with mode
+/// 555 (rules 2 and 3, as reworded by the amendments of 2026-11-13).
 ///
 /// # Errors
-/// Returns `Missing` for a mount point without a line, and `Unexpected` for the first mount that
-/// differs, checked in the order scratch, root, `/dev`.
+/// Returns `Missing` for the scratch, root or `/dev` without a line, and `Unexpected` for the first
+/// of them that differs. `DevPts` refuses `/dev/pts` when its last line is not the launcher's empty
+/// read-only tmpfs with those bounds. The checks run in the order scratch, root, `/dev`, `/dev/pts`.
 pub(super) fn confirm_mounts(facts: &MountFacts) -> Result<(), ReadinessFailure> {
     let scratch = facts
         .scratch
@@ -279,7 +324,17 @@ pub(super) fn confirm_mounts(facts: &MountFacts) -> Result<(), ReadinessFailure>
         return Err(ReadinessFailure::Unexpected(FIELD_SCRATCH));
     }
     confirm_read_only(facts.root_read_only, FIELD_ROOT)?;
-    confirm_read_only(facts.dev_read_only, FIELD_DEV)
+    confirm_read_only(facts.dev_read_only, FIELD_DEV)?;
+    let terminals_as_required = facts.dev_pts.is_some_and(|pts| {
+        pts.is_tmpfs
+            && pts.read_only
+            && pts.size_kib == Some(TERMINALS_SIZE_KIB)
+            && pts.mode == Some(TERMINALS_MODE)
+    });
+    if !terminals_as_required {
+        return Err(ReadinessFailure::DevPts);
+    }
+    Ok(())
 }
 
 /// Requires a mount point's read-only flag to be set; a missing line and a writable mount are

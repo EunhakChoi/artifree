@@ -4,9 +4,9 @@ Date: 2026-11-12. Status: **accepted as a plan; R02aa (host admission and the
 enforcement job), R02ab (the first launch, only from the job's tests), R02ac
 (resources and cleanup under that launch, with the scratch amended below)
 and R02ad (the syscall mapping, as amended on 2026-11-13; its x32 class
-fails acceptance on the reviewed kernel) are implemented; R02ae (files,
-descriptors and network) is planned in the second amendment of
-2026-11-13, with the launcher's `/dev/pts` covered by the third**.
+fails acceptance on the reviewed kernel) and R02ae (files, descriptors and
+network, as planned in the second and third amendments of 2026-11-13)
+are implemented**.
 Roadmap: R02a. Builds on
 [0042](0042-linux-untrusted-execution.md) and
 [0055](0055-operating-background-work.md).
@@ -670,6 +670,36 @@ how; where the two could be read differently, 0042 holds.
 > kernel's acceptance and stays an owner decision. The mutations ran on a
 > temporary branch, never in the product; the mapping records their
 > results.
+
+> **Note, 2026-11-13 (R02ae).** The fixture profile's filter allows the
+> local networking of the amendment: `socket` only in ten forms (Unix
+> stream and datagram with protocol 0; IPv4 and IPv6 stream with protocol 0
+> or TCP and datagram with protocol 0 or UDP; the close-on-exec and
+> non-blocking flags allowed), `setsockopt` only for `SO_REUSEADDR` at the
+> socket level, and `bind`, `listen`, `accept4`, `connect`, `sendto`,
+> `recvfrom`, `getsockname` and `shutdown`. The mapping has a `network`
+> class of 19 refused probes and six allowed controls. The attempt's
+> arguments mount an empty read-only tmpfs over `/dev/pts` in the
+> launcher's mount namespace, which the bootstrap's inherits; the mount
+> checks of the bootstrap and of the provider require it as the last
+> `/dev/pts` mount, with its size and mode bounds. The preparation
+> writes the runner's IPv4 address into the tool root under the manifest.
+> Six job tests run in the job's part 8: real host listeners on TCP, UDP, a
+> Unix path and an abstract name keep their counters through a launch whose
+> payload tries them, and the host reads the payload's namespace from
+> outside; canary files in `/var/tmp` and the runner's home and a canary
+> process stay intact while the payload reads, creates, sweeps every PID
+> with signal 0 and sends `kill(-1)`; `/proc/sys` writes fail and
+> `/dev/ptmx` and both masters through `/proc/1/root` give `ENOENT`; a
+> real leak of a directory, a connection and a pipe is refused before READY; a live preload canary, built in the job,
+> logs the test binary and neither the stub nor the launcher, and the payload
+> sees no variable (inside the sandbox neither the canary nor the host's
+> `/tmp` is mounted, so the log cannot show the bootstrap or the payload); and a marker written in one attempt is absent in the
+> next. The tests append the listener counters and the canaries'
+> observations to the environment record, and the job fails without them.
+> The payload fixture's `kill(-1)` uses nix's `signal` feature, enabled
+> only for the provider's test targets. The mutations ran on a temporary
+> branch, never in the product; the mapping records their results.
 
 ## Context
 

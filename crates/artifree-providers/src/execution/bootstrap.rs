@@ -4,9 +4,11 @@
 //!
 //! The bootstrap's steps run in this order, with the numbers of their step documents: 1, the
 //! identity; 2, the control channel; 3, the leaked descriptors; 4, the scratch in its own mount
-//! namespace (the amendment of 2026-11-12, rule 3); 5, the limits; 6, the privilege drop; 7, the
-//! two seccomp programs, the allowlist last; 8, the confirmation of its own setup. Then it writes
-//! the readiness record, waits for the release and replaces itself with the payload.
+//! namespace (the amendment of 2026-11-12, rule 3); 5, the mount table read back, with the
+//! launcher's empty read-only tmpfs over `/dev/pts` (rule 3 as reworded on 2026-11-13); 6, the limits; 7, the
+//! privilege drop; 8, the two seccomp programs, the allowlist last; 9, the confirmation of its own
+//! setup. Then it writes the readiness record, waits for the release and replaces itself with the
+//! payload.
 
 use std::convert::Infallible;
 use std::ffi::CString;
@@ -61,6 +63,9 @@ pub enum BootstrapFailure {
     /// The scratch could not be mounted in the bootstrap's own mount namespace, or its mount table
     /// did not show both bounds and a read-only root and `/dev`.
     Scratch,
+    /// The mount table did not show the launcher's empty read-only tmpfs as the last mount of
+    /// `/dev/pts` (decision 0056 rules 2 and 3, as reworded by the amendments of 2026-11-13).
+    Terminals,
     /// A resource limit could not be set, or did not read back as set.
     Limits,
     /// A capability or `no_new_privs` could not be dropped, or did not read back as dropped.
@@ -89,6 +94,7 @@ impl fmt::Display for BootstrapFailure {
             Self::Scratch => {
                 formatter.write_str("the scratch could not be mounted with its bounds")
             }
+            Self::Terminals => formatter.write_str("the terminal directory was not covered"),
             Self::Limits => formatter.write_str("a resource limit did not read back as set"),
             Self::Privileges => formatter.write_str("a privilege did not read back as dropped"),
             Self::Filter => formatter.write_str("the seccomp filter could not be installed"),
@@ -133,12 +139,13 @@ pub fn run_stub(identity: &str) -> Result<Infallible, BootstrapFailure> {
 ///
 /// # Errors
 ///
-/// Returns the first failing step: `UnknownProfile`, `ControlChannel`, `LeakedDescriptor`, `Scratch`, `Limits`, `Privileges`, `Filter`, `NotConfirmed` (the proc field), `NotReleased` or `PayloadNotExecuted`.
+/// Returns the first failing step: `UnknownProfile`, `ControlChannel`, `LeakedDescriptor`, `Scratch`, `Terminals`, `Limits`, `Privileges`, `Filter`, `NotConfirmed` (the proc field), `NotReleased` or `PayloadNotExecuted`.
 pub fn run_bootstrap(identity: &str) -> Result<Infallible, BootstrapFailure> {
     check_identity(identity)?;
     let control = take_control()?;
     refuse_leaked_descriptors(control.as_raw_fd())?;
     mount_scratch()?;
+    confirm_terminals_and_scratch()?;
     set_limits()?;
     drop_privileges()?;
     // The control descriptor is close-on-exec, so the payload's exec closes it. Nothing is dropped
@@ -205,9 +212,9 @@ fn open_descriptor_numbers() -> Result<Vec<RawFd>, BootstrapFailure> {
     Ok(numbers)
 }
 
-/// Step 4 (decision 0056 rule 3, amended on 2026-11-12): makes the bootstrap's own mount namespace and mounts the scratch there as one tmpfs, `nosuid`, `nodev` and `noexec`, owner-only, with the size and the inode count of decision 0042 rule 5, then reads the mount table back. It comes after the identity, control and descriptor steps, which need no capability, and before the limits.
+/// Step 4 (decision 0056 rule 3, amended on 2026-11-12): makes the bootstrap's own mount namespace and mounts the scratch there as one tmpfs, `nosuid`, `nodev` and `noexec`, owner-only, with the size and the inode count of decision 0042 rule 5. It comes after the identity, control and descriptor steps, which need no capability, and before the limits.
 ///
-/// `unshare` is called with the mount-namespace flag alone, while the bootstrap is a single thread; that flag is not among those that make the call unsound (0056 rule 7). The capabilities it uses belong to the innermost user namespace and reach only this namespace. The table must show the scratch as required and a read-only root and `/dev`; the provider checks the same table with the same parser before the release. This runs before the filter, so ordinary std file reading is allowed.
+/// `unshare` is called with the mount-namespace flag alone, while the bootstrap is a single thread; that flag is not among those that make the call unsound (0056 rule 7). The capabilities it uses belong to the innermost user namespace and reach only this namespace. The table, which `confirm_terminals_and_scratch` reads back, must show the scratch as required and a read-only root and `/dev`; the provider checks the same table with the same parser before the release. This runs before the filter, so ordinary std file reading is allowed.
 fn mount_scratch() -> Result<(), BootstrapFailure> {
     sched::unshare(CloneFlags::CLONE_NEWNS).map_err(|_| BootstrapFailure::Scratch)?;
     let data = CString::new(format!(
@@ -225,15 +232,26 @@ fn mount_scratch() -> Result<(), BootstrapFailure> {
         data.as_c_str(),
     )
     .map_err(|_| BootstrapFailure::Scratch)?;
+    Ok(())
+}
+
+/// Step 5 (decision 0056 rule 3, as reworded by the amendments of 2026-11-13): reads the mount table back. It must show the scratch as required, a read-only root and `/dev`, and, as the last mount of `/dev/pts`, the launcher's empty read-only tmpfs (rule 2), which this mount namespace inherited from the launcher's. The bootstrap mounts nothing over `/dev/pts`: the launcher's cover is in both namespaces, and the launcher's init, the first process of the PID namespace, stays in the launcher's, which `/proc/1/root` shows. The provider checks the same table with the same parser before the release.
+fn confirm_terminals_and_scratch() -> Result<(), BootstrapFailure> {
     let limit = u64::try_from(readiness::PROC_FILE_BYTES).map_err(|_| BootstrapFailure::Scratch)?;
     let bytes = super::read_bounded(Path::new(PROC_MOUNTINFO), limit)
         .map_err(|_| BootstrapFailure::Scratch)?;
     let text = str::from_utf8(&bytes).map_err(|_| BootstrapFailure::Scratch)?;
     let facts = readiness::parse_mounts(text).map_err(|_| BootstrapFailure::Scratch)?;
-    readiness::confirm_mounts(&facts).map_err(|_| BootstrapFailure::Scratch)
+    readiness::confirm_mounts(&facts).map_err(|failure| {
+        if failure == readiness::ReadinessFailure::DevPts {
+            BootstrapFailure::Terminals
+        } else {
+            BootstrapFailure::Scratch
+        }
+    })
 }
 
-/// Step 5: sets the open-file and core-size limits and reads both back.
+/// Step 6: sets the open-file and core-size limits and reads both back.
 fn set_limits() -> Result<(), BootstrapFailure> {
     let open_files = Rlimit {
         current: Some(readiness::OPEN_FILES_LIMIT),
@@ -253,9 +271,9 @@ fn set_limits() -> Result<(), BootstrapFailure> {
     Ok(())
 }
 
-/// Step 6: clears the ambient set, removes every named capability from the bounding set, empties the effective, permitted and inheritable sets, sets `no_new_privs`, and reads all of it back.
+/// Step 7: clears the ambient set, removes every named capability from the bounding set, empties the effective, permitted and inheritable sets, sets `no_new_privs`, and reads all of it back.
 ///
-/// The launcher grants `CAP_SYS_ADMIN` and `CAP_SETPCAP` inside the sandbox's own user namespace (the amendment of 2026-11-12, rule 2), and step 4 has used the first. This step removes both from every set, the bounding set included. The bounding set is cleared first, one capability at a time, because removing a bounding capability needs `CAP_SETPCAP` in the effective set; the call after the loop empties the effective, permitted and inheritable sets.
+/// The launcher grants `CAP_SYS_ADMIN` and `CAP_SETPCAP` inside the sandbox's own user namespace (the amendment of 2026-11-12, rule 2), and steps 4 and 5 have used the first. This step removes both from every set, the bounding set included. The bounding set is cleared first, one capability at a time, because removing a bounding capability needs `CAP_SETPCAP` in the effective set; the call after the loop empties the effective, permitted and inheritable sets.
 fn drop_privileges() -> Result<(), BootstrapFailure> {
     thread::clear_ambient_capability_set().map_err(|_| BootstrapFailure::Privileges)?;
     for capability in named_capabilities() {
@@ -309,7 +327,7 @@ fn confirm_privileges() -> Result<(), BootstrapFailure> {
     Ok(())
 }
 
-/// Step 7: installs the fixture profile's two seccomp programs in order (decision 0042 rule 4; 0056 rule 3).
+/// Step 8: installs the fixture profile's two seccomp programs in order (decision 0042 rule 4; 0056 rule 3).
 ///
 /// The clone3 refusal is installed first and the allowlist LAST. Each `apply_filter` call needs `prctl` and `seccomp`, which the allowlist does not admit, so an allowlist installed earlier would kill the process (MEASURED (f)). `confirm_setup` then requires two filters.
 fn install_filter() -> Result<(), BootstrapFailure> {
@@ -320,7 +338,7 @@ fn install_filter() -> Result<(), BootstrapFailure> {
     Ok(())
 }
 
-/// Step 8: confirms the bootstrap's own status and limits with the functions the provider uses (decision 0042 rule 6).
+/// Step 9: confirms the bootstrap's own status and limits with the functions the provider uses (decision 0042 rule 6).
 fn confirm_setup() -> Result<(), BootstrapFailure> {
     let mut status_buffer = [0_u8; readiness::PROC_FILE_BYTES];
     let status = readiness::parse_status(read_proc_text(PROC_STATUS, &mut status_buffer)?)

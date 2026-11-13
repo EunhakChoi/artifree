@@ -1,4 +1,4 @@
-//! Test-only payload of R02ab and R02ac (decision 0056 rules 4, 12 and 14).
+//! Test-only payload of R02ab to R02ae (decision 0056 rules 4, 12 and 14).
 //!
 //! Built by the tests only and shipped in no release archive. The Linux
 //! enforcement job runs it inside the attempt's sandbox; no local run is
@@ -10,7 +10,8 @@
 //! On Linux the scenarios are `threads`, `processes`, `memory`,
 //! `scratch-bytes`, `scratch-inodes`, `flood`, `hang`, `cpu`, `survivors`,
 //! `survivors-hang`, `probes`, `clone3`, `thread-refusal`,
-//! `descendant-refusal`, `lower`, `descriptors` and `watch`. Each prints fixed
+//! `descendant-refusal`, `lower`, `descriptors`, `watch`, `network`, `host`,
+//! `proc-dev`, `environment` and `marker`. Each prints fixed
 //! lines to stdout, flushed, that the job tests parse. A scenario that cannot
 //! do its work prints the reason to stderr and exits with status 3. An unknown
 //! scenario word exits with status 2. Status 4 means that a call the filter
@@ -62,12 +63,16 @@ fn main() -> ExitCode {
 #[cfg(target_os = "linux")]
 mod linux {
     use nix::sched::{self, CloneFlags};
+    use nix::sys::signal::{self, Signal};
     use rustix::process;
     use std::ffi::{OsStr, OsString};
     use std::fmt::Display;
     use std::fs::{self, File, OpenOptions};
     use std::io::{self, Write};
+    use std::net::{Ipv4Addr, Ipv6Addr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
     use std::os::fd::AsRawFd;
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr as UnixSocketAddr, UnixListener, UnixStream};
     use std::os::unix::process::{CommandExt, ExitStatusExt};
     use std::path::Path;
     use std::process::{Child, Command, ExitCode};
@@ -117,6 +122,59 @@ mod linux {
     const DESCRIPTOR_LIMIT: usize = 4096;
     /// How long the `watch` scenario keeps its thread and its child alive.
     const BRIEF_HOLD: Duration = Duration::from_secs(2);
+    /// The file that holds the runner's IPv4 address, which the operator's `prepare.sh` writes into the tool root.
+    const HOST_ADDRESS_FILE: &str = "/tools/etc/host-address";
+    /// The TCP port of the loopback listener that the job test starts on IPv4 and IPv6 loopback.
+    const LOOPBACK_TCP_PORT: u16 = 47001;
+    /// The TCP port of the listener that the job test starts on the runner's address.
+    const HOST_TCP_PORT: u16 = 47002;
+    /// The UDP port of the loopback listener that the job test starts.
+    const LOOPBACK_UDP_PORT: u16 = 47053;
+    /// The Unix socket path of the listener that the job test starts in `/tmp`.
+    const HOST_SOCKET_PATH: &str = "/tmp/artifree-enforcement-host.sock";
+    /// The abstract Unix socket name of the listener that the job test starts outside the attempt.
+    const HOST_ABSTRACT_NAME: &str = "artifree-enforcement-host";
+    /// The abstract Unix socket name of the positive control, which the payload listens on inside the attempt.
+    const INSIDE_ABSTRACT_NAME: &str = "artifree-enforcement-inside";
+    /// How long the `network` scenario keeps its namespace in view after its last line, so that the job test can read it from outside.
+    const NETWORK_HOLD: Duration = Duration::from_secs(2);
+    /// The canary files that the `host` scenario reads, through the paths that the job test lists. `/tmp` is the scratch inside an attempt, so no canary lives there.
+    const HOST_READ_PATHS: [&str; 5] = [
+        "/var/tmp/artifree-enforcement-canary/secret",
+        "/home/runner/artifree-enforcement-canary/secret",
+        "/tools/../var/tmp/artifree-enforcement-canary/secret",
+        "/proc/1/root/var/tmp/artifree-enforcement-canary/secret",
+        "/proc/self/cwd/../var/tmp/artifree-enforcement-canary/secret",
+    ];
+    /// The paths that the `host` scenario tries to create files at: inside the canary's drop directory, in `/` and in `/tools`.
+    const HOST_CREATE_PATHS: [&str; 3] = [
+        "/var/tmp/artifree-enforcement-canary/drop/created",
+        "/created",
+        "/tools/created",
+    ];
+    /// The kernel's limit on process numbers, which the `host` scenario reads before it probes every number up to it.
+    const PID_MAX_FILE: &str = "/proc/sys/kernel/pid_max";
+    /// The kernel controls that the `proc-dev` scenario tries to write, as name, path and text.
+    const PROC_WRITES: [(&str, &str, &str); 5] = [
+        ("hostname", "/proc/sys/kernel/hostname", "artifree"),
+        ("drop-caches", "/proc/sys/vm/drop_caches", "1"),
+        ("core-pattern", "/proc/sys/kernel/core_pattern", "artifree"),
+        ("sysrq", "/proc/sysrq-trigger", "h"),
+        ("ns-last-pid", "/proc/sys/kernel/ns_last_pid", "500"),
+    ];
+    /// The pseudo-terminal master device that the `proc-dev` scenario opens.
+    const DEV_PTMX: &str = "/dev/ptmx";
+    /// The pseudo-terminal masters as the launcher's own mount namespace shows them, reached through the root of the PID namespace's first process, which runs in that namespace and not in the bootstrap's.
+    const INIT_PTMX: [(&str, &str); 2] = [
+        ("init-ptmx", "/proc/1/root/dev/ptmx"),
+        ("init-pts-ptmx", "/proc/1/root/dev/pts/ptmx"),
+    ];
+    /// The directory of the pseudo-terminal slaves, which the `proc-dev` scenario lists.
+    const DEV_PTS: &str = "/dev/pts";
+    /// The file that the `marker` scenario writes into its scratch, to see whether a previous attempt left it.
+    const MARKER: &str = "/tmp/artifree-marker";
+    /// The shared-memory file that the `marker` scenario tries to create. The attempt refuses the creation.
+    const SHM_MARKER: &str = "/dev/shm/artifree-marker";
 
     /// Runs the payload for its arguments. None selects the scenario, one selects a child role, and any other count exits with status 2.
     pub(super) fn run(arguments: &[OsString]) -> ExitCode {
@@ -165,6 +223,11 @@ mod linux {
             "lower" => finish_status(lower()),
             "descriptors" => finish(descriptors()),
             "watch" => finish(watch()),
+            "network" => finish(network()),
+            "host" => finish(host()),
+            "proc-dev" => finish(proc_dev()),
+            "environment" => finish(environment()),
+            "marker" => finish(marker()),
             other => report(&format!("unknown scenario {other}"), 2),
         }
     }
@@ -286,6 +349,19 @@ mod linux {
             },
             None => String::from("none"),
         }
+    }
+
+    /// Names the outcome of a call from its error: `ok` when there is none, else `error=<n>` with the raw OS error number (else the kind).
+    fn outcome_of_error(error: Option<&io::Error>) -> String {
+        match error {
+            Some(error) => format!("error={}", error_word(Some(error))),
+            None => String::from("ok"),
+        }
+    }
+
+    /// Names the outcome of a call: `ok`, or `error=<n>` with the raw OS error number (else the kind).
+    fn outcome_word(result: io::Result<()>) -> String {
+        outcome_of_error(result.err().as_ref())
     }
 
     /// Starts threads with small stacks that sleep until one is refused.
@@ -623,6 +699,233 @@ mod linux {
             .join()
             .map_err(|_| io::Error::other("the sleeping thread panicked"))?;
         say("watch done")
+    }
+
+    /// Prints one line that names the outcome of the try `name`.
+    fn network_line(name: &str, result: io::Result<()>) -> io::Result<()> {
+        say(&format!("network {name} {}", outcome_word(result)))
+    }
+
+    /// Opens a TCP connection to `address` with a plain blocking connect, then drops it. Returns the outcome of the connect.
+    fn connect_tcp(address: impl ToSocketAddrs) -> io::Result<()> {
+        TcpStream::connect(address).map(drop)
+    }
+
+    /// Sends one datagram from a socket bound to `local` to `destination`. Returns the outcome of the send.
+    fn send_datagram(local: (Ipv4Addr, u16), destination: (Ipv4Addr, u16)) -> io::Result<()> {
+        let socket = UdpSocket::bind(local)?;
+        socket.send_to(b"artifree", destination).map(drop)
+    }
+
+    /// Connects a Unix stream to the abstract socket `name`. Returns the outcome of the connect.
+    fn connect_abstract(name: &str) -> io::Result<()> {
+        let address = UnixSocketAddr::from_abstract_name(name)?;
+        UnixStream::connect_addr(&address).map(drop)
+    }
+
+    /// Makes each outside try, in the order that the job test reads them, and prints one line for each.
+    fn network_attempts(runner_address: Ipv4Addr) -> io::Result<()> {
+        let unspecified = (Ipv4Addr::UNSPECIFIED, 0);
+        network_line(
+            "tcp-loopback4",
+            connect_tcp((Ipv4Addr::LOCALHOST, LOOPBACK_TCP_PORT)),
+        )?;
+        network_line(
+            "tcp-loopback6",
+            connect_tcp((Ipv6Addr::LOCALHOST, LOOPBACK_TCP_PORT)),
+        )?;
+        network_line("tcp-host", connect_tcp((runner_address, HOST_TCP_PORT)))?;
+        network_line(
+            "udp-loopback",
+            send_datagram(
+                (Ipv4Addr::LOCALHOST, 0),
+                (Ipv4Addr::LOCALHOST, LOOPBACK_UDP_PORT),
+            ),
+        )?;
+        network_line(
+            "udp-resolver",
+            send_datagram(unspecified, (Ipv4Addr::new(127, 0, 0, 53), 53)),
+        )?;
+        network_line(
+            "udp-azure-dns",
+            send_datagram(unspecified, (Ipv4Addr::new(168, 63, 129, 16), 53)),
+        )?;
+        network_line(
+            "tcp-metadata",
+            connect_tcp((Ipv4Addr::new(169, 254, 169, 254), 80)),
+        )?;
+        network_line(
+            "tcp-external",
+            connect_tcp((Ipv4Addr::new(1, 1, 1, 1), 443)),
+        )?;
+        network_line(
+            "tcp6-external",
+            connect_tcp((
+                Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111),
+                443,
+            )),
+        )?;
+        network_line("unix-path", UnixStream::connect(HOST_SOCKET_PATH).map(drop))?;
+        network_line("unix-abstract", connect_abstract(HOST_ABSTRACT_NAME))
+    }
+
+    /// Listens on 127.0.0.1 at a port that the kernel picks, connects to it and accepts the connection.
+    fn local_tcp_round_trip() -> io::Result<()> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let address = listener.local_addr()?;
+        // The client stays open until the accept returns.
+        let _client = TcpStream::connect(address)?;
+        listener.accept().map(drop)
+    }
+
+    /// Listens on the abstract name inside the attempt, connects to it and accepts the connection.
+    fn local_abstract_round_trip() -> io::Result<()> {
+        let address = UnixSocketAddr::from_abstract_name(INSIDE_ABSTRACT_NAME)?;
+        let listener = UnixListener::bind_addr(&address)?;
+        // The client stays open until the accept returns.
+        let _client = UnixStream::connect_addr(&address)?;
+        listener.accept().map(drop)
+    }
+
+    /// Makes the two positive controls, which must succeed inside the attempt, and prints one line for each.
+    fn network_controls() -> io::Result<()> {
+        network_line("local-tcp", local_tcp_round_trip())?;
+        network_line("local-abstract", local_abstract_round_trip())
+    }
+
+    /// Runs the `network` scenario: makes the outside tries and the controls, then holds the namespace for `NETWORK_HOLD`.
+    fn network() -> io::Result<()> {
+        let text = fs::read_to_string(HOST_ADDRESS_FILE)?;
+        let runner_address: Ipv4Addr = text.trim().parse().map_err(io::Error::other)?;
+        network_attempts(runner_address)?;
+        network_controls()?;
+        say("network holding")?;
+        thread::sleep(NETWORK_HOLD);
+        say("network done")
+    }
+
+    /// Counts the process numbers from 1 to `pid_max` whose signal-0 probe succeeds, which is every existing process that the caller may signal.
+    fn count_answering_pids() -> io::Result<usize> {
+        let limit: i32 = fs::read_to_string(PID_MAX_FILE)?
+            .trim()
+            .parse()
+            .map_err(io::Error::other)?;
+        let mut answered = 0_usize;
+        for raw in 1..=limit {
+            if let Some(pid) = process::Pid::from_raw(raw)
+                && process::test_kill_process(pid).is_ok()
+            {
+                answered += 1;
+            }
+        }
+        Ok(answered)
+    }
+
+    /// Runs the `host` scenario: tries to read the canaries and to create files outside the scratch, probes every process number, then starts a `hold` child and kills every process it may signal.
+    fn host() -> io::Result<()> {
+        for path in HOST_READ_PATHS {
+            let read = File::open(path).map(drop);
+            say(&format!("host read {path} {}", outcome_word(read)))?;
+        }
+        for path in HOST_CREATE_PATHS {
+            let created = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .map(drop);
+            say(&format!("host create {path} {}", outcome_word(created)))?;
+        }
+        let answered = count_answering_pids()?;
+        say(&format!("host signal-probe answered={answered}"))?;
+        let mut child = Command::new(SELF).arg("hold").spawn()?;
+        let announced = say(&format!("host hold pid={}", child.id()));
+        let killed =
+            signal::kill(nix::unistd::Pid::from_raw(-1), Signal::SIGKILL).map_err(io::Error::from);
+        let kill_announced = say(&format!("host kill-all {}", outcome_word(killed)));
+        // The child is waited for before any announcement's error is reported, so no path leaves it unreaped.
+        let status = child.wait()?;
+        announced?;
+        kill_announced?;
+        say(&format!(
+            "host hold ended signal={}",
+            number_word(status.signal())
+        ))
+    }
+
+    /// Returns the names in `/dev/pts`, sorted and joined by one space. A name that is not text is shown lossily.
+    fn list_dev_pts() -> io::Result<String> {
+        let mut names: Vec<String> = Vec::new();
+        for entry in fs::read_dir(DEV_PTS)? {
+            names.push(entry?.file_name().to_string_lossy().into_owned());
+        }
+        names.sort();
+        Ok(names.join(" "))
+    }
+
+    /// Runs the `proc-dev` scenario: tries each kernel-control write, opens `/dev/ptmx` and the launcher's masters through `/proc/1/root`, and lists `/dev/pts`.
+    fn proc_dev() -> io::Result<()> {
+        for (name, path, text) in PROC_WRITES {
+            let written = OpenOptions::new()
+                .write(true)
+                .open(path)
+                .and_then(|mut file| file.write_all(text.as_bytes()));
+            say(&format!("proc-dev {name} {}", outcome_word(written)))?;
+        }
+        // If the open succeeds, the descriptor stays open until this function returns, so its terminal would show in the listing.
+        let ptmx = OpenOptions::new().read(true).write(true).open(DEV_PTMX);
+        say(&format!(
+            "proc-dev ptmx {}",
+            outcome_of_error(ptmx.as_ref().err())
+        ))?;
+        let mut through_init = Vec::new();
+        for (name, path) in INIT_PTMX {
+            let opened = OpenOptions::new().read(true).write(true).open(path);
+            say(&format!(
+                "proc-dev {name} {}",
+                outcome_of_error(opened.as_ref().err())
+            ))?;
+            through_init.push(opened);
+        }
+        // The mount table's `/dev/pts` lines, as evidence of the cover in the job's log.
+        if let Ok(table) = fs::read_to_string("/proc/self/mountinfo") {
+            for line in table.lines().filter(|line| line.contains(" /dev/pts ")) {
+                say(&format!("proc-dev mount {line}"))?;
+            }
+        }
+        match list_dev_pts() {
+            Ok(names) => say(&format!("proc-dev pts {names}")),
+            Err(error) => say(&format!("proc-dev pts error={}", error_word(Some(&error)))),
+        }
+    }
+
+    /// Runs the `environment` scenario: prints how many variables the payload has, then each name. No value is printed.
+    fn environment() -> io::Result<()> {
+        let names: Vec<OsString> = std::env::vars_os().map(|(name, _)| name).collect();
+        say(&format!("environment count={}", names.len()))?;
+        for name in &names {
+            say(&format!("environment var={}", name.to_string_lossy()))?;
+        }
+        Ok(())
+    }
+
+    /// Runs the `marker` scenario: reports whether a marker from an earlier attempt is in the scratch, writes one, and tries to create one in `/dev/shm`.
+    fn marker() -> io::Result<()> {
+        let found = if Path::new(MARKER).exists() {
+            "yes"
+        } else {
+            "no"
+        };
+        say(&format!("marker found={found}"))?;
+        say(&format!(
+            "marker wrote {}",
+            outcome_word(fs::write(MARKER, b"x"))
+        ))?;
+        let shared = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(SHM_MARKER)
+            .map(drop);
+        say(&format!("marker dev-shm {}", outcome_word(shared)))
     }
 
     /// Starts the `detached` role without waiting for it, so that the child outlives this role.

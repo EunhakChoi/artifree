@@ -16,6 +16,9 @@ use sha2::{Digest, Sha256};
 /// The report records what was measured and nothing more. It is never a
 /// launch permission, it records the digest of the tool root's manifest that
 /// the admission verified, and it does not claim that the host is supported.
+/// The listener counters and the canaries' observations are not part of it: the
+/// job's isolation tests append them to the environment record (decision 0056
+/// rule 13).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostReport {
     /// Kernel release the run was measured on.
@@ -74,8 +77,7 @@ impl fmt::Display for HostReport {
         writeln!(
             formatter,
             "cleanup_observation=killed, populated 0 within 5 s, child reaped, group removed"
-        )?;
-        writeln!(formatter, "listener_counters=not measured in this slice")
+        )
     }
 }
 

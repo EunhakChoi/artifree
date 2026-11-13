@@ -19,8 +19,9 @@ use super::{
 
 type TestResult = Result<(), Box<dyn Error>>;
 
-/// The mapping classes, which are the section headings of `docs/linux-syscall-mapping.md`.
-const CLASSES: [&str; 12] = [
+/// The mapping classes, which are the section headings of `docs/linux-syscall-mapping.md`, in the
+/// order that the probe table and the document both use.
+const CLASSES: [&str; 13] = [
     "controls",
     "default",
     "namespaces",
@@ -32,6 +33,7 @@ const CLASSES: [&str; 12] = [
     "keyrings",
     "async",
     "limits",
+    "network",
     "abi",
 ];
 
@@ -139,8 +141,73 @@ fn table_row_name(line: &str) -> Option<&str> {
     first.strip_prefix('`')?.strip_suffix('`')
 }
 
+/// The number of the `socket` system call on x86-64.
+#[cfg(target_arch = "x86_64")]
+const SOCKET_NUMBER: u32 = 41;
+
+/// The number of the `setsockopt` system call on x86-64.
+#[cfg(target_arch = "x86_64")]
+const SETSOCKOPT_NUMBER: u32 = 54;
+
+/// The mask of the socket type. The close-on-exec and non-blocking flags lie outside it.
+#[cfg(target_arch = "x86_64")]
+const SOCK_TYPE_MASK: u32 = 0xF;
+
+/// The socket level, which `setsockopt` takes as its second argument.
+#[cfg(target_arch = "x86_64")]
+const SOL_SOCKET: u32 = 1;
+
+/// `SO_REUSEADDR`, which std's `TcpListener::bind` sets at the socket level.
+#[cfg(target_arch = "x86_64")]
+const SO_REUSEADDR: u32 = 2;
+
+/// The socket forms that the filter allows, as (domain, type, protocol) with the type already
+/// masked: `AF_UNIX` (1), `AF_INET` (2) and `AF_INET6` (10), each with `SOCK_STREAM` (1) or
+/// `SOCK_DGRAM` (2). The protocol is zero, except TCP (6) for streams and UDP (17) for datagrams.
+#[cfg(target_arch = "x86_64")]
+const SOCKET_FORMS: [(u32, u32, u32); 10] = [
+    (1, 1, 0),
+    (1, 2, 0),
+    (2, 1, 0),
+    (2, 1, 6),
+    (2, 2, 0),
+    (2, 2, 17),
+    (10, 1, 0),
+    (10, 1, 6),
+    (10, 2, 0),
+    (10, 2, 17),
+];
+
+/// Whether the call is a `socket` of one of the forms in `SOCKET_FORMS`: its domain and protocol
+/// must match exactly, and its type must match once `SOCK_TYPE_MASK` leaves out the flags.
+#[cfg(target_arch = "x86_64")]
+fn is_socket_form(probe: &Probe) -> bool {
+    if probe.number != SOCKET_NUMBER {
+        return false;
+    }
+    let form = match (
+        probe.arguments.first(),
+        probe.arguments.get(1),
+        probe.arguments.get(2),
+    ) {
+        (Some(domain), Some(kind), Some(protocol)) => (*domain, *kind & SOCK_TYPE_MASK, *protocol),
+        _ => return false,
+    };
+    SOCKET_FORMS.contains(&form)
+}
+
+/// Whether the call is a `setsockopt` of `SO_REUSEADDR` at the socket level.
+#[cfg(target_arch = "x86_64")]
+fn is_reuse_option(probe: &Probe) -> bool {
+    probe.number == SETSOCKOPT_NUMBER
+        && probe.arguments.get(1) == Some(&SOL_SOCKET)
+        && probe.arguments.get(2) == Some(&SO_REUSEADDR)
+}
+
 /// Whether the allowlist allows the call of `probe` with its arguments: its number is listed, or
-/// it is `clone` without namespace flags, or it is `prlimit64` as a query (third argument zero).
+/// it is `clone` without namespace flags, or it is `prlimit64` as a query (third argument zero),
+/// or it is a `socket` of one of the forms in `SOCKET_FORMS`, or it is a `setsockopt` of
+/// `SO_REUSEADDR` at the socket level.
 #[cfg(target_arch = "x86_64")]
 fn allowlist_allows(probe: &Probe) -> bool {
     let number = i64::from(probe.number);
@@ -151,23 +218,30 @@ fn allowlist_allows(probe: &Probe) -> bool {
             .first()
             .is_some_and(|flags| u64::from(*flags) & NAMESPACE_FLAGS == 0);
     let query = number == QUERY_ONLY.1 && probe.arguments.get(2) == Some(&0);
-    listed || plain_clone || query
+    listed || plain_clone || query || is_socket_form(probe) || is_reuse_option(probe)
 }
 
-/// Whether the allowlist refuses the call of `probe` with its arguments: its number is not
-/// listed, or it is `clone` with a namespace flag, or it is `prlimit64` as a setter (third
-/// argument non-zero).
+/// Whether the allowlist refuses the call of `probe` with its arguments: its number is not listed
+/// and is not one whose allowance depends on its arguments, or it is `clone` with a namespace
+/// flag, or it is `prlimit64` as a setter (third argument non-zero), or it is a `socket` of a form
+/// outside `SOCKET_FORMS`, or it is a `setsockopt` other than `SO_REUSEADDR` at the socket level.
 #[cfg(target_arch = "x86_64")]
 fn allowlist_refuses(probe: &Probe) -> bool {
     let number = i64::from(probe.number);
-    let unlisted = !ALLOWED.iter().any(|(_, allowed)| *allowed == number);
+    let listed = ALLOWED.iter().any(|(_, allowed)| *allowed == number);
+    let conditional = [CLONE.1, QUERY_ONLY.1].contains(&number)
+        || probe.number == SOCKET_NUMBER
+        || probe.number == SETSOCKOPT_NUMBER;
+    let unlisted = !listed && !conditional;
     let namespace_clone = number == CLONE.1
         && probe
             .arguments
             .first()
             .is_some_and(|flags| u64::from(*flags) & NAMESPACE_FLAGS != 0);
     let setter = number == QUERY_ONLY.1 && probe.arguments.get(2).is_some_and(|value| *value != 0);
-    unlisted || namespace_clone || setter
+    let other_socket_form = probe.number == SOCKET_NUMBER && !is_socket_form(probe);
+    let other_option = probe.number == SETSOCKOPT_NUMBER && !is_reuse_option(probe);
+    unlisted || namespace_clone || setter || other_socket_form || other_option
 }
 
 /// Writes the probes into `directory` and checks the result: one regular file per probe with
@@ -236,6 +310,23 @@ fn every_probe_has_a_known_class_and_at_most_six_arguments() {
             probe.arguments.len()
         );
     }
+}
+
+/// Each class of `PROBES` is one contiguous block, and the blocks come in `CLASSES` order, so the
+/// `network` block sits between `limits` and `abi`, and `abi` stays last. The block names, with
+/// repeats of the same class in a row removed, must equal `CLASSES`.
+#[test]
+fn classes_appear_in_order_and_abi_is_last() {
+    let mut blocks: Vec<&str> = Vec::new();
+    for probe in &PROBES {
+        if blocks.last() != Some(&probe.class) {
+            blocks.push(probe.class);
+        }
+    }
+    assert_eq!(
+        blocks, CLASSES,
+        "each class must be one contiguous block, in CLASSES order with abi last"
+    );
 }
 
 #[test]
