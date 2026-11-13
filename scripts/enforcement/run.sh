@@ -366,6 +366,9 @@ sudo "$PREPARE" routing-file
 # A change during an attempt: the test's linger attempt runs while this script sets the pipe routing.
 markers="$OUT/routing-change"
 mkdir -p -- "$markers"
+# The wait below takes the first attempt group it finds, so none may be left from an earlier test.
+leftover="$(find /sys/fs/cgroup -maxdepth 8 -type d -name 'attempt-*' -print -quit 2> /dev/null || true)"
+[[ -z $leftover ]] || fail "an attempt group is left before the routing change: $leftover"
 run_in_scenario "$lib_binary" crash_tests linger crash-change job_a_routing_change_stops_the_attempt -p LimitCORE=1M \
   --setenv="ARTIFREE_ROUTING_MARKERS=$PWD/$markers" "${record_option[@]}" &
 change_pid=$!
@@ -373,6 +376,7 @@ seen=""
 for ((tries = 0; tries < 300; tries++)); do
   seen="$(find /sys/fs/cgroup -maxdepth 8 -type d -name 'attempt-*' -print -quit 2> /dev/null || true)"
   [[ -n $seen ]] && break
+  kill -0 "$change_pid" 2> /dev/null || break
   sleep 0.1
 done
 [[ -n $seen ]] || fail "no attempt group appeared within 30 s for the routing change"

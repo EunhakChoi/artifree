@@ -226,8 +226,7 @@ save_routing() {
 }
 
 routing_file() {
-  sysctl -w kernel.core_pattern=core
-  [[ "$(cat -- "$CORE_PATTERN")" == core ]] || fail "kernel.core_pattern does not read back as core"
+  set_routing core
 }
 
 routing_pipe() {

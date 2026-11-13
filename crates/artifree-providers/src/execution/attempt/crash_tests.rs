@@ -239,7 +239,30 @@ fn assert_refused_before_any_group(
         AttemptFailure::Refused(expected),
         "the {label} launch must be refused before any group exists"
     );
-    assert_no_attempt_groups()
+    assert_no_group_beside_self()
+}
+
+/// Asserts that no attempt group exists in the test process's own group. A launch refused at
+/// admission does not move the process into its `supervisor` child, so its own group is still the
+/// delegated one where an attempt group would be created.
+fn assert_no_group_beside_self() -> Result<(), Box<dyn Error>> {
+    let own = super::super::cgroup::discover_own_group(
+        Path::new("/proc/self/cgroup"),
+        Path::new("/sys/fs/cgroup"),
+    )?;
+    let mut groups = Vec::new();
+    for entry in fs::read_dir(&own)? {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with("attempt-") {
+            groups.push(entry.path());
+        }
+    }
+    assert!(
+        groups.is_empty(),
+        "no attempt group may exist in {}, found {groups:?}",
+        own.display()
+    );
+    Ok(())
 }
 
 /// The pipe routing (`|` at the start of `kernel.core_pattern`) must be refused, so that no

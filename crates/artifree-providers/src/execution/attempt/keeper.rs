@@ -190,6 +190,8 @@ fn list_directory(
         let word = kind_word(kind);
         let size = stat.st_size;
         let line = format!("{path}\t{word}\t{size}");
+        // Pushed before its children, so the bound checked above counts every entry.
+        entries.push((path.clone(), line));
         if kind == FileType::Directory {
             let child_level = level + 1;
             if child_level > LIST_DEPTH {
@@ -206,7 +208,6 @@ fn list_directory(
             )?;
             list_directory(&child, &path, child_level, entries)?;
         }
-        entries.push((path, line));
     }
     Ok(())
 }

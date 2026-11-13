@@ -99,8 +99,8 @@ pub(super) struct AttemptPlan {
     /// checks and before the release (0056, amendment of 2026-11-13: planted trees). `None` in
     /// `fixture()`; a failure is `KeeperNotHeld`.
     pub(super) plant: Option<fn(&OwnedFd) -> io::Result<()>>,
-    /// A test-only step: after the group is empty and the last routing check, whatever the
-    /// verdict, list the whole scratch through the keeper into `AttemptEvidence::scratch` (0056,
+    /// A test-only step: after the group is ended, whatever the verdict, list the whole
+    /// scratch through the keeper into `AttemptEvidence::scratch` (0056,
     /// amendment of 2026-11-13, crashes). `false` in `fixture()`.
     pub(super) list_scratch: bool,
 }
@@ -541,10 +541,14 @@ pub(super) fn launch_with(
     let keeper = session.keeper.take();
     let usage = settled.usage;
     let refused = |failure: AttemptFailure| AttemptRefusal { failure, usage };
-    // The last routing check runs once the group is empty, before the verdict (0056 rule 5, as
-    // reworded by the amendment of 2026-11-13, crashes). A refusal ends the attempt here.
-    routing_after(&phase, &session.routing).map_err(refused)?;
     let scratch = scratch_listing(plan, keeper.as_ref());
+    // The last routing check runs once the group is empty, before the verdict (0056 rule 5, as
+    // reworded by the amendment of 2026-11-13, crashes). A refusal ends the attempt here. A group
+    // that was not observed gone is not empty: `settle` has quarantined the provider already, and
+    // the verdict names `CleanupNotObserved` first, whatever a poll saw.
+    if settled.cleanup_observed {
+        routing_after(&phase, &session.routing).map_err(refused)?;
+    }
     let outcome = Outcome {
         cleanup_observed: settled.cleanup_observed,
         output_exceeded: session.exceeded.load(Ordering::SeqCst),
@@ -632,9 +636,10 @@ fn routing_after(
     Ok(())
 }
 
-/// The plan's test-only scratch listing through the keeper, taken after the group is empty and the
-/// last routing check, whatever the verdict (0056, amendment of 2026-11-13, crashes). `None` when
-/// the plan does not ask for it or no keeper is held.
+/// The plan's test-only scratch listing through the keeper, taken after `settle`, whatever the
+/// verdict (0056, amendment of 2026-11-13, crashes). `None` when the plan does not ask for it or
+/// no keeper is held. It reaches the test in the evidence; a refused attempt carries none, and the
+/// crash tests require evidence.
 fn scratch_listing(
     plan: &AttemptPlan,
     keeper: Option<&Keeper>,
