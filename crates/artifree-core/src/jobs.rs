@@ -5,21 +5,24 @@
 //! A job pins the actor, one artifact, one source revision, and a kind, and
 //! its request key is fingerprinted like the keys of artifact requests. Access
 //! follows reads: an artifact in the trash, purged, missing, or another
-//! actor's makes every job request of it `not found`, a retry included. Jobs
-//! run trusted in-repository code only; they are not a way to run untrusted
-//! code, builds, or provider sampling, and nothing here claims they are.
-//! Cancelling a job never rolls back anything it did; the one kind of job
-//! today does nothing outside its own record.
+//! actor's makes every job request of it `not found`, a retry included.
+//! [`JobKind::VerifyRevision`] runs trusted in-repository code only; it is not
+//! a way to run untrusted code, builds, or provider sampling, and nothing here
+//! claims it is. [`JobKind::RunProfile`] is enqueued only by tests in this
+//! build (see [`ArtifactService::enqueue_profile_job`]). Cancelling a job never
+//! rolls back anything it did; a verification does nothing outside its own
+//! record.
 
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use artifree_domain::SourceRevision;
 use artifree_domain::identity::{ActorId, ArtifactId, InvalidValue, RequestKey, UnixMillis};
-use artifree_domain::job::{JobId, JobKind};
+use artifree_domain::job::{JobId, JobKind, ProfileName};
 use artifree_ports::artifact_store::{ArtifactStore, RequestIdentity};
 use artifree_ports::job_store::{
     JobCancel, JobListing, JobPosition, JobReceipt, JobRecord, JobStore, JobStoreError, NewJob,
+    NewProfileJob,
 };
 use sha2::{Digest, Sha256};
 
@@ -138,6 +141,52 @@ impl<S: ArtifactStore + JobStore> ArtifactService<S> {
                 artifact,
                 revision,
                 kind,
+                now,
+            })
+            .map_err(|error| job_error(error, Missing::Artifact))
+    }
+
+    /// Enqueues a `run_profile` job with `profile`, pinned like
+    /// [`Self::enqueue_job`] pins a verification: actor, artifact, revision,
+    /// kind and profile. Only tests call it. No HTTP route, MCP tool or CLI
+    /// command reaches it (decision 0057 rule 3), and no worker of this build
+    /// runs the kind, so a worker ends the job as `execution_unavailable`
+    /// (decision 0057 rule 1). The job is hidden from [`Self::job`] and
+    /// [`Self::jobs`] and does not count toward the actor's open jobs.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::enqueue_job`], except that the open-job bound does not apply.
+    pub fn enqueue_profile_job(
+        &self,
+        actor: &ActorId,
+        key: &RequestKey,
+        artifact: &ArtifactId,
+        revision: SourceRevision,
+        profile: &ProfileName,
+        now: UnixMillis,
+    ) -> Result<JobReceipt, ArtifactError> {
+        let record = self.authorized(actor, artifact)?;
+        if revision.0 == 0 || revision > record.current_revision {
+            return Err(ArtifactError::NotFound(Missing::Revision));
+        }
+        let mut hasher = Fingerprint::new("enqueue_job");
+        hasher.field(artifact.as_str().as_bytes());
+        hasher.field(&revision.0.to_be_bytes());
+        hasher.field(JobKind::RunProfile.as_str().as_bytes());
+        // The profile is pinned too, so the same key with another profile is
+        // another request (decision 0030 rule 2).
+        hasher.field(profile.as_str().as_bytes());
+        self.store
+            .enqueue_profile_job(NewProfileJob {
+                request: RequestIdentity {
+                    actor,
+                    key,
+                    fingerprint: hasher.finish(),
+                },
+                artifact,
+                revision,
+                profile,
                 now,
             })
             .map_err(|error| job_error(error, Missing::Artifact))
@@ -317,6 +366,7 @@ mod tests {
             artifact: ArtifactId::from_random([1; 16]),
             revision: SourceRevision(1),
             kind: JobKind::VerifyRevision,
+            profile: None,
             state: artifree_domain::job::JobState::Queued,
             cancel_requested: false,
             attempts: 0,

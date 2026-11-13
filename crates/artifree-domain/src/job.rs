@@ -1,10 +1,12 @@
 //! Persistent job vocabulary (decision 0030).
 //!
-//! A job pins an actor, an artifact, one source revision, and a kind. The one
-//! kind today, [`JobKind::VerifyRevision`], re-reads every file of the pinned
-//! revision and compares it with the digest and size stored for it. It runs
-//! trusted in-repository code only: untrusted execution, builds, and provider
-//! sampling are not job kinds.
+//! A job pins an actor, an artifact, one source revision, and a kind. The
+//! trusted kind, [`JobKind::VerifyRevision`], re-reads every file of the pinned
+//! revision and compares it with the digest and size stored for it; it runs
+//! trusted in-repository code only. The untrusted kind,
+//! [`JobKind::RunProfile`], runs a reviewed profile in an execution provider
+//! (decisions 0042 and 0057); no worker of this build executes one yet. Builds
+//! and provider sampling are not job kinds.
 
 use std::fmt;
 use std::str::FromStr;
@@ -27,6 +29,9 @@ pub const MAX_ACTIVE_JOBS_PER_ACTOR: u64 = 16;
 /// Most mismatches a verification result lists. The count of all mismatches is
 /// kept, so a result says when its list is cut short.
 pub const MAX_FINDINGS: usize = 50;
+
+/// The most characters a profile name has (decision 0057 rule 1).
+pub const MAX_PROFILE_NAME_CHARS: usize = 32;
 
 /// An opaque job identifier: `job_` followed by 32 lowercase hex digits.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -129,13 +134,137 @@ impl fmt::Display for WorkerId {
     }
 }
 
-/// What a job does. Each kind is trusted in-repository code; adding one needs
-/// a decision record and a schema step.
+/// The name of a reviewed operation profile (decision 0042 rule 2, decision
+/// 0057 rule 1): 1-32 lowercase letters, digits, or hyphens, starting with a
+/// letter. The schema holds no list of names; each build knows its own.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ProfileName(String);
+
+impl ProfileName {
+    /// The canonical string form.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for ProfileName {
+    type Err = InvalidValue;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let valid = (1..=MAX_PROFILE_NAME_CHARS).contains(&value.len())
+            && value
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_lowercase())
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+        if valid {
+            Ok(Self(value.to_owned()))
+        } else {
+            Err(InvalidValue {
+                what: "profile name",
+                rule: "expected 1-32 lowercase letters, digits, or hyphens, starting with a letter",
+            })
+        }
+    }
+}
+
+impl fmt::Display for ProfileName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// The random 128-bit identity of one claimed `run_profile` attempt (decision
+/// 0057 rule 6), stored as 32 lowercase hexadecimal digits. The caller draws
+/// it; the store never generates one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct AttemptIdentity([u8; 16]);
+
+const ATTEMPT_HEX_LEN: usize = 32;
+
+const INVALID_ATTEMPT_IDENTITY: InvalidValue = InvalidValue {
+    what: "attempt identity",
+    rule: "expected 32 lowercase hexadecimal digits",
+};
+
+impl AttemptIdentity {
+    /// Builds an identity from caller-supplied random bytes.
+    #[must_use]
+    pub fn from_random(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    /// The raw bytes of the identity.
+    #[must_use]
+    pub fn bytes(&self) -> [u8; 16] {
+        self.0
+    }
+
+    /// The canonical string form: 32 lowercase hexadecimal digits.
+    #[must_use]
+    pub fn hex(&self) -> String {
+        let mut value = String::with_capacity(ATTEMPT_HEX_LEN);
+        for byte in self.0 {
+            value.push(hex_digit(byte >> 4));
+            value.push(hex_digit(byte & 0x0f));
+        }
+        value
+    }
+}
+
+impl FromStr for AttemptIdentity {
+    type Err = InvalidValue;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.len() != ATTEMPT_HEX_LEN {
+            return Err(INVALID_ATTEMPT_IDENTITY);
+        }
+        let mut bytes = [0u8; 16];
+        for (byte, pair) in bytes.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+            let [high, low] = pair else {
+                return Err(INVALID_ATTEMPT_IDENTITY);
+            };
+            match (nibble(*high), nibble(*low)) {
+                (Some(high), Some(low)) => *byte = (high << 4) | low,
+                _ => return Err(INVALID_ATTEMPT_IDENTITY),
+            }
+        }
+        Ok(Self(bytes))
+    }
+}
+
+impl fmt::Display for AttemptIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.hex())
+    }
+}
+
+/// The value of one lowercase hexadecimal digit, or `None` for any other byte.
+fn nibble(digit: u8) -> Option<u8> {
+    match digit {
+        b'0'..=b'9' => digit.checked_sub(b'0'),
+        b'a'..=b'f' => digit
+            .checked_sub(b'a')
+            .and_then(|value| value.checked_add(10)),
+        _ => None,
+    }
+}
+
+/// What a job does. `verify_revision` is trusted in-repository code;
+/// `run_profile` is the untrusted kind of decision 0057. Adding a kind needs a
+/// decision record and a schema step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobKind {
     /// Re-reads every file of a pinned revision and compares its SHA-256
     /// digest and size with the stored listing.
     VerifyRevision,
+    /// Runs a reviewed operation profile on the pinned revision in an untrusted
+    /// execution provider (decisions 0042 and 0057). Only the store knows it so
+    /// far: no wire contract names it and no worker of this build runs it.
+    RunProfile,
 }
 
 impl JobKind {
@@ -144,6 +273,7 @@ impl JobKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::VerifyRevision => "verify_revision",
+            Self::RunProfile => "run_profile",
         }
     }
 }
@@ -152,12 +282,12 @@ impl FromStr for JobKind {
     type Err = InvalidValue;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        [Self::VerifyRevision]
+        [Self::VerifyRevision, Self::RunProfile]
             .into_iter()
             .find(|kind| kind.as_str() == value)
             .ok_or(InvalidValue {
                 what: "job kind",
-                rule: "expected verify_revision",
+                rule: "expected verify_revision or run_profile",
             })
     }
 }
@@ -239,6 +369,9 @@ pub enum JobFailure {
     LeaseExpired,
     /// A failure the worker did not expect.
     Internal,
+    /// The worker's build does not know the job's profile, so the job cannot
+    /// run anywhere this build runs (decision 0057 rule 1). It is never retried.
+    ExecutionUnavailable,
 }
 
 impl JobFailure {
@@ -250,6 +383,7 @@ impl JobFailure {
             Self::StorageUnavailable => "storage_unavailable",
             Self::LeaseExpired => "lease_expired",
             Self::Internal => "internal",
+            Self::ExecutionUnavailable => "execution_unavailable",
         }
     }
 
@@ -269,6 +403,7 @@ impl FromStr for JobFailure {
             Self::StorageUnavailable,
             Self::LeaseExpired,
             Self::Internal,
+            Self::ExecutionUnavailable,
         ]
         .into_iter()
         .find(|failure| failure.as_str() == value)
@@ -357,6 +492,197 @@ impl VerifyReport {
         // A list is never longer than its count, so inequality means cut short.
         u64::try_from(self.findings.len()) != Ok(self.mismatch_count)
     }
+}
+
+/// Why publication of an attempt was revoked (decision 0057 rule 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Revocation {
+    /// The job was asked to stop.
+    Cancel,
+    /// The artifact was moved to the trash while the attempt ran.
+    Trash,
+    /// The artifact was purged while the attempt ran.
+    Purge,
+    /// The actor's state generation moved on: it was disabled, or enabled
+    /// again, after the attempt pinned its generation.
+    Generation,
+    /// The actor no longer has access to the artifact.
+    Authority,
+    /// A restore marked the attempt cleanup pending (decision 0057 rule 13). An
+    /// ordinary expired lease stores no revocation (rules 10 and 19).
+    Lease,
+    /// The worker shut down while the attempt ran.
+    Shutdown,
+}
+
+impl Revocation {
+    /// Stable lowercase name used in storage and wire contracts.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cancel => "cancel",
+            Self::Trash => "trash",
+            Self::Purge => "purge",
+            Self::Generation => "generation",
+            Self::Authority => "authority",
+            Self::Lease => "lease",
+            Self::Shutdown => "shutdown",
+        }
+    }
+
+    /// The checkpoint answer that a stored revocation gives. A stored
+    /// `shutdown` is answered as `lease`, because rule 7 lists no shutdown
+    /// answer and rule 10 settles both alike.
+    #[must_use]
+    pub fn stop_reason(self) -> StopReason {
+        match self {
+            Self::Cancel => StopReason::Cancel,
+            Self::Trash => StopReason::Trash,
+            Self::Purge => StopReason::Purge,
+            Self::Generation => StopReason::Generation,
+            Self::Authority => StopReason::Authority,
+            Self::Lease | Self::Shutdown => StopReason::Lease,
+        }
+    }
+
+    /// Whether settling an attempt revoked this way ends its job as
+    /// `cancelled`. Decision 0057 rule 10 reads: "to `cancelled` for `cancel`,
+    /// `trash`, `purge`, `generation` and `authority`, and to `retry_scheduled`
+    /// or `failed` by its attempts for `lease` and `shutdown`".
+    #[must_use]
+    pub fn ends_cancelled(self) -> bool {
+        matches!(
+            self,
+            Self::Cancel | Self::Trash | Self::Purge | Self::Generation | Self::Authority
+        )
+    }
+}
+
+impl FromStr for Revocation {
+    type Err = InvalidValue;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        [
+            Self::Cancel,
+            Self::Trash,
+            Self::Purge,
+            Self::Generation,
+            Self::Authority,
+            Self::Lease,
+            Self::Shutdown,
+        ]
+        .into_iter()
+        .find(|revocation| revocation.as_str() == value)
+        .ok_or(InvalidValue {
+            what: "revocation",
+            rule: "expected a revocation name",
+        })
+    }
+}
+
+/// Where a claimed attempt stands in its cleanup (decision 0057 rule 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttemptState {
+    /// The attempt may still run.
+    Live,
+    /// The cleanup is not confirmed, so the attempt's job may not be claimed
+    /// again and may not end (decision 0057 rule 10).
+    CleanupPending,
+    /// The cleanup is confirmed, and the attempt no longer blocks its job.
+    Settled,
+}
+
+impl AttemptState {
+    /// Stable lowercase name used in storage and wire contracts.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::CleanupPending => "cleanup_pending",
+            Self::Settled => "settled",
+        }
+    }
+}
+
+impl FromStr for AttemptState {
+    type Err = InvalidValue;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        [Self::Live, Self::CleanupPending, Self::Settled]
+            .into_iter()
+            .find(|state| state.as_str() == value)
+            .ok_or(InvalidValue {
+                what: "attempt state",
+                rule: "expected an attempt state name",
+            })
+    }
+}
+
+/// Why a checkpoint or a publication of a `run_profile` attempt was refused
+/// (decision 0057 rule 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    /// Cancellation was requested for the job.
+    Cancel,
+    /// The artifact is in the trash.
+    Trash,
+    /// The artifact was purged.
+    Purge,
+    /// The actor is disabled, or its state generation differs from the pinned
+    /// one.
+    Generation,
+    /// The actor no longer has access to the artifact.
+    Authority,
+    /// The attempt is revoked as `lease` (by a restore, decision 0057 rule 13)
+    /// or as `shutdown`. An ordinary expired lease revokes nothing: the attempt
+    /// waits for the reconciler (rules 10 and 19).
+    Lease,
+    /// The job is no longer running with the attempt's fence.
+    Fence,
+}
+
+impl StopReason {
+    /// Stable lowercase name used in storage and wire contracts.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cancel => "cancel",
+            Self::Trash => "trash",
+            Self::Purge => "purge",
+            Self::Generation => "generation",
+            Self::Authority => "authority",
+            Self::Lease => "lease",
+            Self::Fence => "fence",
+        }
+    }
+
+    /// The revocation that a refusal stores in its transaction, or `None` for
+    /// `fence`, which stores none.
+    #[must_use]
+    pub fn revocation(self) -> Option<Revocation> {
+        match self {
+            Self::Cancel => Some(Revocation::Cancel),
+            Self::Trash => Some(Revocation::Trash),
+            Self::Purge => Some(Revocation::Purge),
+            Self::Generation => Some(Revocation::Generation),
+            Self::Authority => Some(Revocation::Authority),
+            Self::Lease => Some(Revocation::Lease),
+            Self::Fence => None,
+        }
+    }
+}
+
+/// The answer to a checkpoint of a `run_profile` attempt. It is `Continue` only
+/// when the attempt is `live` and not revoked, the job is `running` with the
+/// attempt's fence and no cancel requested, the artifact is neither trashed nor
+/// purged, and the actor is enabled with the pinned generation and still has
+/// access (decision 0057 rule 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointAnswer {
+    /// The attempt may keep running.
+    Continue,
+    /// The attempt must stop, for the given reason.
+    Stop(StopReason),
 }
 
 #[cfg(test)]

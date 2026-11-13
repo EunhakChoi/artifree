@@ -18,13 +18,14 @@
 use artifree_domain::SourceRevision;
 use artifree_domain::identity::{ArtifactId, UnixMillis};
 use artifree_domain::job::{
-    Finding, JobFailure, JobId, JobState, MAX_ACTIVE_JOBS_PER_ACTOR, MAX_ATTEMPTS, Problem,
-    VerifyReport, WorkerId,
+    AttemptIdentity, CheckpointAnswer, Finding, JobFailure, JobId, JobKind, JobState,
+    MAX_ACTIVE_JOBS_PER_ACTOR, MAX_ATTEMPTS, Problem, ProfileName, VerifyReport, WorkerId,
 };
 use artifree_ports::artifact_store::{Delivery, RequestIdentity, StoreError};
 use artifree_ports::job_store::{
-    Checkpoint, Claim, ClaimedJob, JobCancel, JobClaim, JobListing, JobReceipt, JobRecord,
-    JobStore, JobStoreError, Lease, NewJob, Retry,
+    AttemptRow, Checkpoint, Claim, ClaimedJob, JobCancel, JobClaim, JobListing, JobReceipt,
+    JobRecord, JobStore, JobStoreError, Lease, NewJob, NewProfileJob, ProfileBinding,
+    ProfileCounts, Retry, SettleOutcome,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -32,10 +33,12 @@ use super::{
     SqliteStore, corrupt, key_used_elsewhere, random_bytes, record_job_change, unavailable,
 };
 
+mod attempts;
+
 /// The columns of a job row, in the order [`RawJob::from_row`] reads them.
 const COLUMNS: &str = "id, actor, artifact_id, revision, kind, state, cancel_requested, attempts,
     max_attempts, run_after, lease_expires_at, worker, failure, files_checked, bytes_checked,
-    mismatch_count, created_at, started_at, finished_at";
+    mismatch_count, created_at, started_at, finished_at, profile";
 
 /// A job row as stored, before its text columns are parsed.
 struct RawJob {
@@ -58,6 +61,7 @@ struct RawJob {
     created_at: i64,
     started_at: Option<i64>,
     finished_at: Option<i64>,
+    profile: Option<String>,
 }
 
 impl RawJob {
@@ -82,6 +86,7 @@ impl RawJob {
             created_at: row.get(16)?,
             started_at: row.get(17)?,
             finished_at: row.get(18)?,
+            profile: row.get(19)?,
         })
     }
 
@@ -121,6 +126,10 @@ impl RawJob {
             created_at: UnixMillis(self.created_at),
             started_at: self.started_at.map(UnixMillis),
             finished_at: self.finished_at.map(UnixMillis),
+            profile: self
+                .profile
+                .map(|profile| profile.parse::<ProfileName>().map_err(corrupt))
+                .transpose()?,
         })
     }
 }
@@ -235,9 +244,12 @@ fn record_key(
     Ok(())
 }
 
+/// Enqueues a job. `profile` is the profile of a `run_profile` job and `None`
+/// for a `verify_revision` job; the table checks that the two agree.
 fn enqueue(
     transaction: &Transaction<'_>,
     request: NewJob<'_>,
+    profile: Option<&ProfileName>,
 ) -> Result<JobReceipt, JobStoreError> {
     // The target first, as every write does (decision 0013): a job of an
     // artifact in the trash or purged is not found, a retry included.
@@ -265,24 +277,29 @@ fn enqueue(
         Key::Reused => return Err(JobStoreError::RequestKeyReused),
         Key::Unused => {}
     }
-    let active: i64 = transaction
-        .query_row(
-            "SELECT count(*) FROM jobs j JOIN artifacts a ON a.id = j.artifact_id
-             WHERE j.actor = ?1 AND j.state IN ('queued', 'running', 'retry_scheduled')
-               AND a.purged_at IS NULL AND a.deleted_at IS NULL",
-            [request.request.actor.as_str()],
-            |row| row.get(0),
-        )
-        .map_err(unavailable)?;
-    if u64::try_from(active).map_err(corrupt)? >= MAX_ACTIVE_JOBS_PER_ACTOR {
-        return Err(JobStoreError::LimitReached);
+    // Decision 0057 rule 3: run_profile rows do not count toward the actor's 16 open
+    // jobs, and R03 sets the kind's own bound.
+    if request.kind == JobKind::VerifyRevision {
+        let active: i64 = transaction
+            .query_row(
+                "SELECT count(*) FROM jobs j JOIN artifacts a ON a.id = j.artifact_id
+                 WHERE j.actor = ?1 AND j.state IN ('queued', 'running', 'retry_scheduled')
+                   AND j.kind = 'verify_revision'
+                   AND a.purged_at IS NULL AND a.deleted_at IS NULL",
+                [request.request.actor.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(unavailable)?;
+        if u64::try_from(active).map_err(corrupt)? >= MAX_ACTIVE_JOBS_PER_ACTOR {
+            return Err(JobStoreError::LimitReached);
+        }
     }
     let id = JobId::from_random(random_bytes()?);
     transaction
         .execute(
             "INSERT INTO jobs (id, actor, artifact_id, revision, kind, state, attempts,
-                 max_attempts, fence, run_after, cancel_requested, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'queued', 0, ?6, 0, ?7, 0, ?7)",
+                 max_attempts, fence, run_after, cancel_requested, created_at, profile)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'queued', 0, ?6, 0, ?7, 0, ?7, ?8)",
             params![
                 id.as_str(),
                 request.request.actor.as_str(),
@@ -290,7 +307,8 @@ fn enqueue(
                 revision,
                 request.kind.as_str(),
                 MAX_ATTEMPTS,
-                request.now.0
+                request.now.0,
+                profile.map(ProfileName::as_str)
             ],
         )
         .map_err(unavailable)?;
@@ -309,7 +327,12 @@ fn cancel(
     let Some(job) = read_job(transaction, request.job)? else {
         return Err(JobStoreError::NotFound);
     };
-    if job.actor != *request.request.actor || !artifact_in_place(transaction, &job.artifact)? {
+    // Decision 0057 rule 3: nobody can see or cancel a run_profile job, so the
+    // request gets the same NotFound and records no key.
+    if job.actor != *request.request.actor
+        || job.kind != JobKind::VerifyRevision
+        || !artifact_in_place(transaction, &job.artifact)?
+    {
         return Err(JobStoreError::NotFound);
     }
     match key_of(transaction, request.request)? {
@@ -363,6 +386,10 @@ struct Due {
     cancel_requested: bool,
     attempts: i64,
     max_attempts: i64,
+    /// Its creation time, which orders the claim's cursor with `id`.
+    created_at: i64,
+    /// Its profile name, set for a `run_profile` job.
+    profile: Option<String>,
 }
 
 /// Which jobs a worker may take, for `?1` = now: a queued or retry-scheduled
@@ -375,21 +402,41 @@ struct Due {
 /// same statement as the job, and the claim runs in a write transaction, so a
 /// disable that commits before the claim is seen by it and one that commits
 /// after it comes too late to matter (a job already running is not stopped).
-/// An actor with no row in `users` is not disabled.
+/// An actor with no row in `users` is not disabled. A `run_profile` job with an
+/// attempt that is not `settled` is not due: an expired lease does not make it
+/// claimable (decision 0057, rule 10).
 const DUE: &str = "FROM jobs j JOIN artifacts a ON a.id = j.artifact_id
      WHERE a.purged_at IS NULL AND a.deleted_at IS NULL
        AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id = j.actor AND u.disabled_at IS NOT NULL)
+       AND NOT EXISTS (SELECT 1 FROM execution_attempts e WHERE e.job_id = j.id AND e.state <> 'settled')
        AND ((j.state IN ('queued', 'retry_scheduled') AND j.run_after <= ?1)
          OR (j.state = 'running' AND j.lease_expires_at <= ?1))";
 
-fn next_due(transaction: &Transaction<'_>, now: UnixMillis) -> Result<Option<Due>, StoreError> {
-    let row: Option<(String, String, bool, i64, i64)> = transaction
+/// The columns [`next_due`] reads for one due job: identifier, state, cancel
+/// request, attempts, maximum attempts, creation time and profile.
+type DueRow = (String, String, bool, i64, i64, i64, Option<String>);
+
+/// The first due job after `after`, the position (creation time and identifier)
+/// of a job the claim already passed over, or the first due job when `after` is
+/// `None`.
+fn next_due(
+    transaction: &Transaction<'_>,
+    now: UnixMillis,
+    after: Option<&(i64, JobId)>,
+) -> Result<Option<Due>, StoreError> {
+    let row: Option<DueRow> = transaction
         .query_row(
             &format!(
-                "SELECT j.id, j.state, j.cancel_requested, j.attempts, j.max_attempts {DUE}
+                "SELECT j.id, j.state, j.cancel_requested, j.attempts, j.max_attempts,
+                     j.created_at, j.profile {DUE}
+                   AND (?2 IS NULL OR j.created_at > ?2 OR (j.created_at = ?2 AND j.id > ?3))
                  ORDER BY j.created_at, j.id LIMIT 1"
             ),
-            [now.0],
+            params![
+                now.0,
+                after.map(|(created_at, _)| *created_at),
+                after.map(|(_, id)| id.as_str())
+            ],
             |row| {
                 Ok((
                     row.get(0)?,
@@ -397,20 +444,26 @@ fn next_due(transaction: &Transaction<'_>, now: UnixMillis) -> Result<Option<Due
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )
         .optional()
         .map_err(unavailable)?;
-    row.map(|(id, state, cancel_requested, attempts, max_attempts)| {
-        Ok(Due {
-            id: id.parse().map_err(corrupt)?,
-            running: state == JobState::Running.as_str(),
-            cancel_requested,
-            attempts,
-            max_attempts,
-        })
-    })
+    row.map(
+        |(id, state, cancel_requested, attempts, max_attempts, created_at, profile)| {
+            Ok(Due {
+                id: id.parse().map_err(corrupt)?,
+                running: state == JobState::Running.as_str(),
+                cancel_requested,
+                attempts,
+                max_attempts,
+                created_at,
+                profile,
+            })
+        },
+    )
     .transpose()
 }
 
@@ -449,6 +502,9 @@ fn any_due(connection: &Connection, now: UnixMillis) -> Result<bool, StoreError>
 }
 
 fn claim(transaction: &Transaction<'_>, claim: JobClaim<'_>) -> Result<Claim, JobStoreError> {
+    if let Some(execution) = &claim.execution {
+        attempts::check_execution(execution)?;
+    }
     let mut settled = Vec::new();
     let lease_ms = i64::try_from(claim.lease_ms).map_err(corrupt)?;
     let expires = claim
@@ -456,8 +512,11 @@ fn claim(transaction: &Transaction<'_>, claim: JobClaim<'_>) -> Result<Claim, Jo
         .0
         .checked_add(lease_ms)
         .ok_or_else(|| corrupt("lease end"))?;
-    // Each pass either returns or ends a job, so the due set shrinks.
-    while let Some(due) = next_due(transaction, claim.now)? {
+    // The position of the last job the claim left queued; the next due job is
+    // read after it, so a job passed over is not read again.
+    let mut after: Option<(i64, JobId)> = None;
+    // Each pass returns, ends a job, or moves the cursor past a job it leaves queued.
+    while let Some(due) = next_due(transaction, claim.now, after.as_ref())? {
         if due.running && due.cancel_requested {
             // The worker that was asked to stop is gone; nothing is left to run.
             end(transaction, &due.id, JobState::Cancelled, None, claim.now)?;
@@ -477,6 +536,38 @@ fn claim(transaction: &Transaction<'_>, claim: JobClaim<'_>) -> Result<Claim, Jo
             settled.push(written(transaction, &due.id)?);
             continue;
         }
+        let profile = due
+            .profile
+            .as_deref()
+            .map(str::parse::<ProfileName>)
+            .transpose()
+            .map_err(corrupt)?;
+        let run = match profile {
+            None => None,
+            // Decision 0057, rule 1: a profile this build does not know ends the
+            // job at once, as a failure that is never retried, without an attempt.
+            Some(profile) if !claim.known_profiles.contains(&profile) => {
+                end(
+                    transaction,
+                    &due.id,
+                    JobState::Failed,
+                    Some(JobFailure::ExecutionUnavailable),
+                    claim.now,
+                )?;
+                record_job_change(transaction, &due.id)?;
+                settled.push(written(transaction, &due.id)?);
+                continue;
+            }
+            Some(profile) => {
+                // A known profile with no execution directory in this worker:
+                // the job stays queued and the claim goes on.
+                let Some(execution) = claim.execution.as_ref() else {
+                    after = Some((due.created_at, due.id));
+                    continue;
+                };
+                Some((profile, execution))
+            }
+        };
         transaction
             .execute(
                 "UPDATE jobs SET state = 'running', attempts = attempts + 1, fence = fence + 1,
@@ -486,7 +577,6 @@ fn claim(transaction: &Transaction<'_>, claim: JobClaim<'_>) -> Result<Claim, Jo
             )
             .map_err(unavailable)?;
         record_job_change(transaction, &due.id)?;
-        let job = written(transaction, &due.id)?;
         let fence: i64 = transaction
             .query_row(
                 "SELECT fence FROM jobs WHERE id = ?1",
@@ -494,14 +584,16 @@ fn claim(transaction: &Transaction<'_>, claim: JobClaim<'_>) -> Result<Claim, Jo
                 |row| row.get(0),
             )
             .map_err(unavailable)?;
+        let fence = u64::try_from(fence).map_err(corrupt)?;
+        if let Some((profile, execution)) = &run {
+            attempts::insert(transaction, &due.id, fence, profile, execution, claim.now)?;
+        }
+        let job = written(transaction, &due.id)?;
         return Ok(Claim {
             settled,
             claimed: Some(ClaimedJob {
                 job,
-                lease: Lease {
-                    job: due.id,
-                    fence: u64::try_from(fence).map_err(corrupt)?,
-                },
+                lease: Lease { job: due.id, fence },
             }),
         });
     }
@@ -534,6 +626,28 @@ fn held(transaction: &Transaction<'_>, lease: &Lease) -> Result<bool, JobStoreEr
     }
 }
 
+/// Whether the job is a `run_profile` job.
+fn profile_job(connection: &Connection, id: &JobId) -> Result<bool, StoreError> {
+    connection
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM jobs WHERE id = ?1 AND kind = 'run_profile')",
+            [id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)
+}
+
+/// The terminal gate of decision 0057, rule 10: no transition of a `run_profile`
+/// job to `succeeded`, `failed`, `cancelled`, or `retry_scheduled` happens while
+/// its attempt is unsettled. Call it after [`held`] has checked the lease.
+fn gate(transaction: &Transaction<'_>, lease: &Lease) -> Result<(), JobStoreError> {
+    if profile_job(transaction, &lease.job)? && attempts::unsettled(transaction, &lease.job)? {
+        Err(JobStoreError::AttemptUnsettled)
+    } else {
+        Ok(())
+    }
+}
+
 fn heartbeat(
     transaction: &Transaction<'_>,
     lease: &Lease,
@@ -541,6 +655,11 @@ fn heartbeat(
     lease_ms: u64,
 ) -> Result<Checkpoint, JobStoreError> {
     let cancel = held(transaction, lease)?;
+    if profile_job(transaction, &lease.job)? {
+        return Err(JobStoreError::InvalidRequest(
+            "a run_profile job checkpoints with checkpoint_attempt",
+        ));
+    }
     let expires = now
         .0
         .checked_add(i64::try_from(lease_ms).map_err(corrupt)?)
@@ -564,7 +683,13 @@ fn complete(
     report: &VerifyReport,
     now: UnixMillis,
 ) -> Result<JobRecord, JobStoreError> {
-    if held(transaction, lease)? {
+    let cancel = held(transaction, lease)?;
+    if profile_job(transaction, &lease.job)? {
+        return Err(JobStoreError::InvalidRequest(
+            "a run_profile job completes with complete_profile_job",
+        ));
+    }
+    if cancel {
         // A cancel came in before the result was written: the job is
         // cancelled and the result is not kept.
         end(transaction, &lease.job, JobState::Cancelled, None, now)?;
@@ -610,7 +735,9 @@ fn fail(
     retry: Retry,
     now: UnixMillis,
 ) -> Result<JobRecord, JobStoreError> {
-    if held(transaction, lease)? {
+    let cancel = held(transaction, lease)?;
+    gate(transaction, lease)?;
+    if cancel {
         end(transaction, &lease.job, JobState::Cancelled, None, now)?;
         record_job_change(transaction, &lease.job)?;
         return Ok(written(transaction, &lease.job)?);
@@ -652,7 +779,9 @@ fn confirm_cancel(
     lease: &Lease,
     now: UnixMillis,
 ) -> Result<JobRecord, JobStoreError> {
-    if !held(transaction, lease)? {
+    let cancel = held(transaction, lease)?;
+    gate(transaction, lease)?;
+    if !cancel {
         return Err(JobStoreError::Conflict(JobState::Running));
     }
     end(transaction, &lease.job, JobState::Cancelled, None, now)?;
@@ -665,7 +794,9 @@ fn release(
     lease: &Lease,
     now: UnixMillis,
 ) -> Result<JobRecord, JobStoreError> {
-    if held(transaction, lease)? {
+    let cancel = held(transaction, lease)?;
+    gate(transaction, lease)?;
+    if cancel {
         end(transaction, &lease.job, JobState::Cancelled, None, now)?;
     } else {
         // The attempt is given back; the fencing token is not, so the
@@ -683,6 +814,41 @@ fn release(
     Ok(written(transaction, &lease.job)?)
 }
 
+/// Decision 0057 rule 8, in the trash transaction: every unsettled attempt of the
+/// artifact's `run_profile` jobs is revoked (`trash`) unless it already was for a
+/// reason that cancels, and its running job gets a cancel request and a raised
+/// fence. A `lease` or `shutdown` revocation (a restore, or the worker's own
+/// stop) is replaced by `trash`: those reasons retry the job at settlement, and a
+/// trashed job must end cancelled, so that its recovery needs a fresh request. Queued and retry-scheduled
+/// jobs are not changed: the trash hides them, and recovery makes them due again.
+/// It does not wait for the process. `verify_revision` jobs are untouched (0030's
+/// continue-and-hide).
+pub(super) fn revoke_for_trash(
+    transaction: &Transaction<'_>,
+    artifact: &ArtifactId,
+) -> Result<(), StoreError> {
+    transaction
+        .execute(
+            "UPDATE jobs SET cancel_requested = 1, fence = fence + 1
+             WHERE artifact_id = ?1 AND kind = 'run_profile' AND state = 'running'
+               AND EXISTS (SELECT 1 FROM execution_attempts e
+                           WHERE e.job_id = jobs.id AND e.state <> 'settled')",
+            [artifact.as_str()],
+        )
+        .map_err(unavailable)?;
+    transaction
+        .execute(
+            "UPDATE execution_attempts SET revoked = 'trash'
+             WHERE state <> 'settled'
+               AND (revoked IS NULL OR revoked IN ('lease', 'shutdown'))
+               AND job_id IN (SELECT id FROM jobs
+                              WHERE artifact_id = ?1 AND kind = 'run_profile')",
+            [artifact.as_str()],
+        )
+        .map_err(unavailable)?;
+    Ok(())
+}
+
 /// Ends the jobs of an artifact that is being purged and erases what they
 /// found: waiting, scheduled, and running jobs become cancelled, and a running
 /// job's fencing token is raised so its worker's next call is a lost lease.
@@ -690,16 +856,49 @@ fn release(
 /// every job of the artifact are deleted; the job headers stay, like the
 /// revision headers a purge keeps. It appends no change row for the jobs it
 /// ends: the `purged` change covers them (decision 0055, rule 9).
+///
+/// A `run_profile` job with an unsettled attempt is not ended here (decision 0057,
+/// rule 11). Its fencing token is raised and each unsettled attempt becomes the
+/// `cleanup_pending` tombstone, revoked as `purge` unless it already was for a
+/// reason that cancels (a `lease` or `shutdown` revocation would retry the job at
+/// settlement, on an artifact no claim can reach), and the job stays `running`
+/// until the attempt settles and ends it cancelled. No statement deletes an
+/// `execution_attempts` row, so the tombstone outlives the purge.
 pub(super) fn revoke_for_purge(
     transaction: &Transaction<'_>,
     artifact: &ArtifactId,
     now: UnixMillis,
 ) -> Result<(), StoreError> {
+    // Decision 0057 rule 11: the fence of a run_profile job with an unsettled
+    // attempt is raised, and the attempt is marked as the tombstone.
+    transaction
+        .execute(
+            "UPDATE jobs SET fence = fence + 1
+             WHERE artifact_id = ?1 AND kind = 'run_profile' AND state = 'running'
+               AND EXISTS (SELECT 1 FROM execution_attempts e
+                           WHERE e.job_id = jobs.id AND e.state <> 'settled')",
+            [artifact.as_str()],
+        )
+        .map_err(unavailable)?;
+    transaction
+        .execute(
+            "UPDATE execution_attempts
+             SET state = 'cleanup_pending',
+                 revoked = CASE WHEN revoked IS NULL OR revoked IN ('lease', 'shutdown')
+                                THEN 'purge' ELSE revoked END
+             WHERE state <> 'settled'
+               AND job_id IN (SELECT id FROM jobs WHERE artifact_id = ?1)",
+            [artifact.as_str()],
+        )
+        .map_err(unavailable)?;
+    // A job with an unsettled attempt is left running (decision 0057, rule 11).
     transaction
         .execute(
             "UPDATE jobs SET state = 'cancelled', fence = fence + 1, worker = NULL,
                  lease_expires_at = NULL, finished_at = ?2
-             WHERE artifact_id = ?1 AND state IN ('queued', 'running', 'retry_scheduled')",
+             WHERE artifact_id = ?1 AND state IN ('queued', 'running', 'retry_scheduled')
+               AND NOT EXISTS (SELECT 1 FROM execution_attempts e
+                               WHERE e.job_id = jobs.id AND e.state <> 'settled')",
             params![artifact.as_str(), now.0],
         )
         .map_err(unavailable)?;
@@ -722,7 +921,23 @@ pub(super) fn revoke_for_purge(
 
 impl JobStore for SqliteStore {
     fn enqueue_job(&self, request: NewJob<'_>) -> Result<JobReceipt, JobStoreError> {
-        self.write(|transaction| enqueue(transaction, request))
+        if request.kind == JobKind::RunProfile {
+            return Err(JobStoreError::InvalidRequest(
+                "a run_profile job is enqueued with enqueue_profile_job",
+            ));
+        }
+        self.write(|transaction| enqueue(transaction, request, None))
+    }
+
+    fn enqueue_profile_job(&self, request: NewProfileJob<'_>) -> Result<JobReceipt, JobStoreError> {
+        let job = NewJob {
+            request: request.request,
+            artifact: request.artifact,
+            revision: request.revision,
+            kind: JobKind::RunProfile,
+            now: request.now,
+        };
+        self.write(|transaction| enqueue(transaction, job, Some(request.profile)))
     }
 
     fn cancel_job(&self, request: JobCancel<'_>) -> Result<JobReceipt, JobStoreError> {
@@ -732,7 +947,8 @@ impl JobStore for SqliteStore {
     fn job(&self, id: &JobId) -> Result<Option<JobRecord>, JobStoreError> {
         let mut connection = self.connect()?;
         let snapshot = connection.transaction().map_err(unavailable)?;
-        Ok(read_job(&snapshot, id)?)
+        // Decision 0057 rule 3: a run_profile job is not readable (GET /v1/jobs/{id} is 404).
+        Ok(read_job(&snapshot, id)?.filter(|job| job.kind == JobKind::VerifyRevision))
     }
 
     fn list_jobs(&self, listing: JobListing<'_>) -> Result<Vec<JobRecord>, JobStoreError> {
@@ -744,6 +960,7 @@ impl JobStore for SqliteStore {
                 .prepare(
                     "SELECT j.id FROM jobs j JOIN artifacts a ON a.id = j.artifact_id
                      WHERE j.actor = ?1
+                       AND j.kind = 'verify_revision'
                        AND a.purged_at IS NULL AND a.deleted_at IS NULL
                        AND (?2 IS NULL OR j.artifact_id = ?2)
                        AND (?3 IS NULL OR j.created_at < ?3 OR (j.created_at = ?3 AND j.id > ?4))
@@ -817,5 +1034,51 @@ impl JobStore for SqliteStore {
 
     fn release_job(&self, lease: &Lease, now: UnixMillis) -> Result<JobRecord, JobStoreError> {
         self.write(|transaction| release(transaction, lease, now))
+    }
+
+    fn checkpoint_attempt(
+        &self,
+        lease: &Lease,
+        attempt: &AttemptIdentity,
+        now: UnixMillis,
+        lease_ms: u64,
+    ) -> Result<CheckpointAnswer, JobStoreError> {
+        self.write(|transaction| attempts::checkpoint(transaction, lease, attempt, now, lease_ms))
+    }
+
+    fn settle_attempt(
+        &self,
+        attempt: &AttemptIdentity,
+        now: UnixMillis,
+    ) -> Result<SettleOutcome, JobStoreError> {
+        self.write(|transaction| attempts::settle(transaction, attempt, now))
+    }
+
+    fn complete_profile_job(
+        &self,
+        lease: &Lease,
+        attempt: &AttemptIdentity,
+        binding: ProfileBinding<'_>,
+        counts: ProfileCounts,
+        now: UnixMillis,
+    ) -> Result<JobRecord, JobStoreError> {
+        // The inner result is a refusal, which commits what it wrote (a stored
+        // revocation); only a failure of storage rolls back.
+        self.write(|transaction| {
+            attempts::complete(transaction, lease, attempt, binding, counts, now)
+        })
+        .and_then(|answer| answer)
+    }
+
+    fn attempt_row(&self, attempt: &AttemptIdentity) -> Result<Option<AttemptRow>, JobStoreError> {
+        let mut connection = self.connect()?;
+        let snapshot = connection.transaction().map_err(unavailable)?;
+        Ok(attempts::read_attempt(&snapshot, attempt)?)
+    }
+
+    fn unsettled_attempts(&self) -> Result<Vec<AttemptRow>, JobStoreError> {
+        let mut connection = self.connect()?;
+        let snapshot = connection.transaction().map_err(unavailable)?;
+        Ok(attempts::unsettled_rows(&snapshot)?)
     }
 }

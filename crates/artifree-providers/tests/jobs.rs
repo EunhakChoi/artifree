@@ -189,6 +189,8 @@ fn claim_with(store: &SqliteStore, who: &str, now: i64) -> Result<Claim, JobStor
         worker: &worker(who),
         now: at(now),
         lease_ms: LEASE,
+        known_profiles: &[],
+        execution: None,
     })
 }
 

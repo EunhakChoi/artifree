@@ -219,7 +219,7 @@ admission policy. Reads are authenticated scoped attachments with
 no-store/nosniff; there is no public URL, and a frame reaches assets only through
 the runtime view routes above. The client calls, the MCP tools, the CLI
 commands, the web panel and the duplicate asset copy exist. The [content policy](asset-validation.md) records these limits.
-SQLite schema 13 keeps immutable bytes, independent versions, receipts and
+SQLite schema 14 keeps immutable bytes, independent versions, receipts and
 logical quotas in the same database as source files. Source and asset
 associations both protect shared blobs from purge and cleanup.
 

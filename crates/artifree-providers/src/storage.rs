@@ -392,6 +392,11 @@ impl ArtifactStore for SqliteStore {
                 (Some(_), None) => ChangeKind::Recovered,
                 _ => ChangeKind::MetadataUpdated,
             };
+            if kind == ChangeKind::Deleted {
+                // Decision 0057 rule 8: the trash revokes live run_profile attempts in the
+                // same transaction as the move.
+                jobs::revoke_for_trash(transaction, request.artifact)?;
+            }
             let metadata = if kind == ChangeKind::MetadataUpdated
                 && *values.title == current.title
                 && values.pinned == current.pinned
@@ -1231,13 +1236,16 @@ fn record_data_change(
 /// state or `cancel_requested` it changed (decision 0055, rule 7). The row goes
 /// to the feed of the job's owner and names the artifact's current revision and
 /// metadata revision (rule 8). A job of an artifact in the trash or purged gets
-/// none, because nothing of it is readable (rule 9).
+/// none, because nothing of it is readable (rule 9). A `run_profile` job gets none
+/// either: no `job_changed` row is ever written for it, so its transitions consume
+/// no actor sequence (decision 0057 rule 3).
 fn record_job_change(transaction: &Transaction<'_>, job: &JobId) -> Result<(), StoreError> {
-    let (actor, artifact_id, revision, metadata, in_trash): (String, String, i64, i64, bool) =
+    let (actor, artifact_id, revision, metadata, hidden): (String, String, i64, i64, bool) =
         transaction
             .query_row(
                 "SELECT j.actor, j.artifact_id, a.current_revision, a.metadata_revision,
                      a.deleted_at IS NOT NULL OR a.purged_at IS NOT NULL
+                         OR j.kind <> 'verify_revision'
                  FROM jobs j JOIN artifacts a ON a.id = j.artifact_id
                  WHERE j.id = ?1",
                 [job.as_str()],
@@ -1252,7 +1260,7 @@ fn record_job_change(transaction: &Transaction<'_>, job: &JobId) -> Result<(), S
                 },
             )
             .map_err(unavailable)?;
-    if in_trash {
+    if hidden {
         return Ok(());
     }
     let artifact: ArtifactId = artifact_id.parse().map_err(corrupt)?;

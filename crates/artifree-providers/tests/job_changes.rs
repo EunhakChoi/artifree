@@ -140,6 +140,8 @@ fn claim_as(store: &SqliteStore, name: &str, now: i64) -> Result<Claim, JobStore
         worker: &worker(name),
         now: at(now),
         lease_ms: LEASE_MS,
+        known_profiles: &[],
+        execution: None,
     })
 }
 

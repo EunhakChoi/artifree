@@ -10,7 +10,7 @@ use artifree_domain::identity::UnixMillis;
 use artifree_domain::job::{JobId, JobKind, JobState};
 use artifree_ports::artifact_store::{Delivery, RequestFingerprint, RequestIdentity};
 use artifree_ports::job_store::{JobCancel, JobStore, NewJob};
-use artifree_providers::storage::SqliteStore;
+use artifree_providers::storage::{SCHEMA_VERSION, SqliteStore};
 use common::{
     OLD_ID, TRASHED_ID, TempDir, TestResult, actor, current_database, database_in, files_of,
     historical_database, key, old_artifact, parsed, schema_of, user_version,
@@ -261,7 +261,7 @@ fn a_frozen_version_12_file_upgrades_to_13_keeping_its_rows_heads_and_schema() -
     SqliteStore::open(&path)
         .map_err(|error| format!("the version 12 file must upgrade: {error}"))?;
 
-    assert_eq!(user_version(&path)?, 13);
+    assert_eq!(user_version(&path)?, SCHEMA_VERSION);
     assert_eq!(
         schema_of(&path)?,
         fresh_schema,

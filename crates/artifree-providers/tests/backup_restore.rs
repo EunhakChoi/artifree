@@ -543,6 +543,8 @@ fn jobs_survive_a_restore_and_a_running_lease_is_expired_not_resumed() -> TestRe
                 worker: &parsed::<WorkerId>(who),
                 now: UnixMillis(now),
                 lease_ms: 60_000,
+                known_profiles: &[],
+                execution: None,
             })
             .map(|claim| claim.claimed)
     };
