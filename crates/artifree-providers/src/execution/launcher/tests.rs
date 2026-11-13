@@ -132,6 +132,7 @@ fn sample_report() -> HostReport {
         policy_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
             .to_owned(),
         core_routing: "|/usr/lib/systemd/systemd-coredump".to_owned(),
+        core_routing_bytes: b"|/usr/lib/systemd/systemd-coredump\n".to_vec(),
         delegated_controllers: "cpu io memory pids".to_owned(),
         effective_limits: vec![
             ("memory.max", "67108864".to_owned()),

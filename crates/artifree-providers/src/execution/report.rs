@@ -36,6 +36,10 @@ pub struct HostReport {
     pub(super) policy_sha256: String,
     /// Core routing as read from the host, verbatim.
     pub(super) core_routing: String,
+    /// The exact bytes that admission read from `kernel.core_pattern`, which the attempt
+    /// compares at each poll and after its group is empty (decision 0056, amendment of
+    /// 2026-11-13, crashes). Not printed: `core_routing` is the printed text.
+    pub(super) core_routing_bytes: Vec<u8>,
     /// Controllers the delegated group reports.
     pub(super) delegated_controllers: String,
     /// Limits read back from the probe group, as control file and value.

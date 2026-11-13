@@ -1,4 +1,4 @@
-//! Test-only payload of R02ab to R02af (decision 0056 rules 4, 12 and 14).
+//! Test-only payload of R02ab to R02ag (decision 0056 rules 4, 12 and 14).
 //!
 //! Built by the tests only and shipped in no release archive. The Linux
 //! enforcement job runs it inside the attempt's sandbox; no local run is
@@ -14,7 +14,7 @@
 //! `proc-dev`, `environment`, `marker`, `copy`, `input-write`, `out-socket`,
 //! `out-many`, `out-big-file`, `out-big-total`, `out-bomb`, `out-deep`,
 //! `out-invalid-name`, `out-collision`, `out-extension`, `out-no-entry`,
-//! `out-fail` and `out-plain`. Each prints fixed
+//! `out-fail`, `out-plain`, `crash`, `crash-setter` and `linger`. Each prints fixed
 //! lines to stdout, flushed, that the job tests parse. A scenario that cannot
 //! do its work prints the reason to stderr and exits with status 3. An unknown
 //! scenario word exits with status 2. Status 4 means that a call the filter
@@ -31,10 +31,20 @@
 //! mode change, a device or a mount.
 //!
 //! The scenarios start this binary again with one child role as its only
-//! argument: `hold`, `middle`, `detached`, `ignore`, `descriptors-child` or
-//! `hold-briefly`. Any other argument list exits with status 2. Other systems
-//! keep the R02ab behaviour only, because the Linux-only dependencies are not
-//! built there.
+//! argument: `hold`, `middle`, `detached`, `ignore`, `descriptors-child`,
+//! `hold-briefly`, `crash-child`, `setter-limit` or `setter-dumpable`. Any other
+//! argument list exits with status 2. Other systems keep the R02ab behaviour
+//! only, because the Linux-only dependencies are not built there.
+//!
+//! The crash scenarios (R02ag, decision 0056 amendment of 2026-11-13, crashes)
+//! print their core limits from `/proc/self/limits`, fill 8 MiB of memory, start
+//! their children and then send themselves signals with `kill`. The payload
+//! learns its PID from `/proc/self/stat`, since `getpid` is refused. `crash`
+//! ends by sending itself `SIGABRT`, and `crash-child` and `crash-setter` end by
+//! sending themselves `SIGSEGV` twice. The setter roles are killed by the
+//! filter. Status 4 means that a crash or a refused call returned. `linger`
+//! sleeps 15 seconds and exits with status 0. Since R02ag the payload starts in
+//! `/tmp`, the scratch root; every path the scenarios use is absolute.
 
 use std::env;
 use std::io::{self, Write};
@@ -209,6 +219,18 @@ mod linux {
     const BIG_TOTAL_FILES: usize = 6;
     /// The number of empty directories that `out-bomb` makes directly under the output root, which with the entry page is more than the collection's 2,048 entries.
     const BOMB_DIRECTORIES: usize = 2_100;
+    /// The memory that each crashing process fills before it crashes: 8 MiB of `0x5a`.
+    const CRASH_MEMORY: usize = 8 * MIB;
+    /// The core limit, 1 MiB, that the `setter-limit` role asks for.
+    const SETTER_LIMIT: u64 = 1_048_576;
+    /// How long the `linger` scenario sleeps before it exits with status 0.
+    const LINGER: Duration = Duration::from_secs(15);
+    /// The process's own status file; its first field is the PID, since `getpid` is refused.
+    const PROC_SELF_STAT: &str = "/proc/self/stat";
+    /// The process's own limits, whose core line the crash scenarios print.
+    const PROC_SELF_LIMITS: &str = "/proc/self/limits";
+    /// The name of the core limit's line in `/proc/self/limits`.
+    const CORE_LIMIT_LINE: &str = "Max core file size";
 
     /// Runs the payload for its arguments. None selects the scenario, one selects a child role, and any other count exits with status 2.
     pub(super) fn run(arguments: &[OsString]) -> ExitCode {
@@ -276,6 +298,9 @@ mod linux {
             "out-no-entry" => finish(out_no_entry()),
             "out-fail" => out_fail(),
             "out-plain" => finish(out_plain()),
+            "crash" => finish_status(crash()),
+            "crash-setter" => finish_status(crash_setter()),
+            "linger" => finish(linger()),
             other => report(&format!("unknown scenario {other}"), 2),
         }
     }
@@ -292,6 +317,9 @@ mod linux {
                 thread::sleep(BRIEF_HOLD);
                 ExitCode::SUCCESS
             }
+            Some("crash-child") => finish_status(crash_child()),
+            Some("setter-limit") => finish_status(setter_limit()),
+            Some("setter-dumpable") => finish_status(setter_dumpable()),
             _ => ExitCode::from(2),
         }
     }
@@ -1128,6 +1156,120 @@ mod linux {
     fn out_plain() -> io::Result<()> {
         write_output("index.html", OUT_PAGE)?;
         say("out-plain done")
+    }
+
+    /// Returns this process's PID, read from the first field of `/proc/self/stat`, since the filter refuses `getpid`.
+    fn own_pid() -> io::Result<nix::unistd::Pid> {
+        let stat = fs::read_to_string(PROC_SELF_STAT)?;
+        let first = stat
+            .split_whitespace()
+            .next()
+            .ok_or_else(|| io::Error::other("the stat file is empty"))?;
+        let raw: i32 = first.parse().map_err(io::Error::other)?;
+        Ok(nix::unistd::Pid::from_raw(raw))
+    }
+
+    /// Returns the soft and hard values of the core limit's line in `/proc/self/limits`, as the kernel prints them.
+    fn core_limits() -> io::Result<(String, String)> {
+        let text = fs::read_to_string(PROC_SELF_LIMITS)?;
+        let rest = text
+            .lines()
+            .find_map(|line| line.strip_prefix(CORE_LIMIT_LINE))
+            .ok_or_else(|| io::Error::other("no core limit line"))?;
+        let mut values = rest.split_whitespace();
+        match (values.next(), values.next()) {
+            (Some(soft), Some(hard)) => Ok((soft.to_owned(), hard.to_owned())),
+            _ => Err(io::Error::other(
+                "the core limit line has no soft and hard value",
+            )),
+        }
+    }
+
+    /// Fills 8 MiB with `0x5a` and returns it. The caller keeps the result alive until it crashes, so the memory is still mapped at the crash.
+    fn touch_memory() -> Vec<u8> {
+        std::hint::black_box(vec![0x5a_u8; CRASH_MEMORY])
+    }
+
+    /// Sends `sig` to this process with `kill`, since a fault needs `unsafe` code. The kernel takes the same dump path for it as for a fault.
+    fn raise(sig: Signal) -> io::Result<()> {
+        signal::kill(own_pid()?, sig).map_err(io::Error::from)
+    }
+
+    /// Returns the core flag of a wait status as the crash lines print it: 1 when the kernel reports a core, else 0.
+    fn core_word(status: std::process::ExitStatus) -> u8 {
+        u8::from(status.core_dumped())
+    }
+
+    /// Prints the core limits, fills memory and runs `crash-child`, prints its signal and core flag, then sends itself `SIGABRT`. Status 4 means that the signal returned.
+    fn crash() -> io::Result<ExitCode> {
+        let (soft, hard) = core_limits()?;
+        say(&format!("crash limits soft={soft} hard={hard}"))?;
+        let _held = touch_memory();
+        let status = Command::new(SELF).arg("crash-child").status()?;
+        say(&format!(
+            "crash child signal={} core={}",
+            number_word(status.signal()),
+            core_word(status)
+        ))?;
+        // Rust's runtime does not handle SIGABRT, so its default action ends the process.
+        raise(Signal::SIGABRT)?;
+        Ok(ExitCode::from(4))
+    }
+
+    /// The child of `crash`: prints its core limits, fills memory and sends itself `SIGSEGV` twice. Status 4 means that the signals returned.
+    fn crash_child() -> io::Result<ExitCode> {
+        let (soft, hard) = core_limits()?;
+        say(&format!("crash-child limits soft={soft} hard={hard}"))?;
+        let _held = touch_memory();
+        // Rust's runtime handles the first SIGSEGV: for a signal that is not a guard-page fault its handler restores the default action and returns, so the second one takes the default action.
+        raise(Signal::SIGSEGV)?;
+        raise(Signal::SIGSEGV)?;
+        Ok(ExitCode::from(4))
+    }
+
+    /// Prints the core limits, fills memory, runs the two setter children in turn and prints their signals and core flags, then sends itself `SIGSEGV` twice. Status 4 means that the signals returned.
+    fn crash_setter() -> io::Result<ExitCode> {
+        let (soft, hard) = core_limits()?;
+        say(&format!("crash-setter limits soft={soft} hard={hard}"))?;
+        let _held = touch_memory();
+        for (name, role) in [("limit", "setter-limit"), ("dumpable", "setter-dumpable")] {
+            let status = Command::new(SELF).arg(role).status()?;
+            say(&format!(
+                "crash-setter child={name} signal={} core={}",
+                number_word(status.signal()),
+                core_word(status)
+            ))?;
+        }
+        raise(Signal::SIGSEGV)?;
+        raise(Signal::SIGSEGV)?;
+        Ok(ExitCode::from(4))
+    }
+
+    /// The child that asks `prlimit64` to set its core limit to 1 MiB. The filter kills it with `SIGSYS`; a returned call is a failure and the status is 4.
+    fn setter_limit() -> io::Result<ExitCode> {
+        let result = process::prlimit(
+            None,
+            process::Resource::Core,
+            process::Rlimit {
+                current: Some(SETTER_LIMIT),
+                maximum: Some(SETTER_LIMIT),
+            },
+        );
+        say(&format!("setter-limit returned {result:?}"))?;
+        Ok(ExitCode::from(4))
+    }
+
+    /// The child that asks `prctl` to make it dumpable, which is `SUID_DUMP_USER`. The filter kills it with `SIGSYS`; a returned call is a failure and the status is 4.
+    fn setter_dumpable() -> io::Result<ExitCode> {
+        let result = process::set_dumpable_behavior(process::DumpableBehavior::Dumpable);
+        say(&format!("setter-dumpable returned {result:?}"))?;
+        Ok(ExitCode::from(4))
+    }
+
+    /// Sleeps for `LINGER`, then says that it is done. The scenario exits with status 0.
+    fn linger() -> io::Result<()> {
+        thread::sleep(LINGER);
+        say("linger done")
     }
 
     /// Starts the `detached` role without waiting for it, so that the child outlives this role.

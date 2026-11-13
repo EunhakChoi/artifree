@@ -11,6 +11,8 @@
 //! test payload runs the fixed resource and cleanup scenarios of R02ac and the syscall-mapping
 //! and descriptor scenarios of R02ad; no caller outside them can start an attempt.
 //! Its input staging and output collection (R02af) are compiled only into the tests too.
+//! The routing check during an attempt (R02ag, `routing_unchanged`) is compiled only into
+//! the tests too.
 //!
 //! Admission order; the first missing facility is reported (0056 rule 10):
 //! 1. Linux (`UnsupportedOperatingSystem`).
@@ -71,6 +73,10 @@ mod probes;
 #[cfg(target_os = "linux")]
 mod readiness;
 mod report;
+// The routing check during an attempt serves only the launch, which exists only in the test
+// build (0056 rule 16, amendment of 2026-11-13, crashes); its tests sit beside it.
+#[cfg(test)]
+mod routing_tests;
 // The input staging serves only the launch, which exists only in the test build (0056 rule 16;
 // amendment of 2026-11-13, input and output).
 #[cfg(all(test, target_os = "linux"))]
@@ -401,6 +407,28 @@ fn read_pattern(reader: io::Result<impl Read>) -> Result<Vec<u8>, AdmissionRefus
         return Err(AdmissionRefusal::UnknownCoreRouting);
     }
     Ok(bytes)
+}
+
+/// Compares the routing read now with the exact bytes that admission read, as the attempt does
+/// at each poll of the stub and once more after its group is empty (decision 0056 rule 5, as
+/// reworded by the amendment of 2026-11-13, crashes). Each read is fresh, so the one-second
+/// lifetime of admission's observation does not apply. The current bytes are compared, not
+/// validated again: bytes that differ are `CoreRoutingChanged`, whatever the new value is.
+///
+/// # Errors
+///
+/// Returns `UnreadableCoreRouting` for a read that fails and `UnknownCoreRouting` for a value
+/// over the bound (both from `read_pattern`), and `CoreRoutingChanged` for bytes that differ.
+#[cfg(test)]
+pub(super) fn routing_unchanged(
+    admitted: &[u8],
+    reader: io::Result<impl Read>,
+) -> Result<(), AdmissionRefusal> {
+    let current = read_pattern(reader)?;
+    if current != admitted {
+        return Err(AdmissionRefusal::CoreRoutingChanged);
+    }
+    Ok(())
 }
 
 // Intentionally only a literal portable basename, optionally followed by the

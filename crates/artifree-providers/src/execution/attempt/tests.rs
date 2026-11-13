@@ -132,6 +132,7 @@ fn sample_report() -> HostReport {
             .to_owned(),
         policy_sha256: EMPTY_SHA256.to_owned(),
         core_routing: "|/usr/lib/systemd/systemd-coredump".to_owned(),
+        core_routing_bytes: b"|/usr/lib/systemd/systemd-coredump\n".to_vec(),
         delegated_controllers: "cpu io memory pids".to_owned(),
         effective_limits: vec![("memory.max", "1073741824".to_owned())],
         peak_memory_bytes: Some(1_048_576),
@@ -255,6 +256,7 @@ fn sample_evidence() -> AttemptEvidence {
         filter_sha256: EMPTY_SHA256.to_owned(),
         report: sample_report(),
         output: Err(OutputRefusal::NotCollected),
+        scratch: None,
     }
 }
 
