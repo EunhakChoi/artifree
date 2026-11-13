@@ -497,8 +497,13 @@ how; where the two could be read differently, 0042 holds.
 > second amendment says. The payload also opens both paths through
 > `/proc/1/root`, and the test requires each open to fail. Its mutation:
 > the launcher's cover removed, with the bootstrap's kept, which must fail
-> the test on those opens. The arguments test pins the new options. Rule 2
-> is reworded; nothing else changes.
+> the test on those opens. The bootstrap's mount namespace starts as a copy
+> of the launcher's, so with the launcher's cover in place the bootstrap's
+> over-mount no longer decides the open of `/dev/ptmx`. Its mutation
+> therefore keeps the provider's mount check and must fail on it: the
+> launcher's tmpfs has no inode bound, so the check refuses it. The
+> arguments test pins the new options. Rule 2 is reworded; nothing else
+> changes.
 >
 > - **Rule 2.** The fixed argument list also mounts an empty read-only
 >   tmpfs over the minimal `/dev`'s `/dev/pts`.
