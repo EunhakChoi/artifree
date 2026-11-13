@@ -929,6 +929,189 @@ how; where the two could be read differently, 0042 holds.
 > - **Rule 17.** The R02ag point is settled by this amendment, for the
 >   `-aws` and `-azure` 7.0 kernels whose source was read.
 
+> **Amendment, 2026-11-13 (the guardian).** The R02ah row names the
+> guardian, the death of the supervisor at each phase, the attempt registry
+> and the quarantine, and renewals against a stand-in for the store. It does
+> not say what the guardian is, how it learns that the supervisor is gone,
+> what a renewal carries, how a test kills a supervisor without the service
+> manager cleaning up for it, or how a phase is reached. That is too much for
+> one PR, so this amendment splits the row: R02ah is the guardian, its
+> renewals and the supervisor's death; the new row R02ai is the attempt
+> registry, its reconciliation and the persisted quarantine. The temporary
+> branch `probe/r02ah` (deleted afterwards and never merged) measured the
+> following on `ubuntu-24.04` (`7.0.0-1017-azure`) with shell commands,
+> Python's standard library and Bubblewrap 0.9.0, in workflow run 43440918474
+> (commit `1cfe1cd`). No payload of this repository ran.
+>
+> - **A unit whose main process is killed.** A unit with `Delegate=yes`
+>   started a main shell that made `supervisor` and `attempt-1` beneath its
+>   group, moved itself into `supervisor`, put a `sleep` into `attempt-1` and
+>   left a background shell, the guardian's stand-in, in `supervisor`. With
+>   `KillMode=process`, a `SIGKILL` of the main process left the other two
+>   running. The stand-in saw its parent gone, wrote `1` to the attempt's
+>   `cgroup.kill`, read `populated 0` at its first look and removed the
+>   group. With the default `KillMode=control-group` the service manager
+>   killed the stand-in and the `sleep` itself, so the stand-in never acted.
+> - **The launcher's parent.** A Bubblewrap with `--unshare-user`,
+>   `--unshare-pid` and `--die-with-parent`, running two `sleep`s, left none
+>   of them after a `SIGKILL` of the shell that started it.
+> - **A thread that started the launcher.** A Bubblewrap started from a Python
+>   thread was still running, with its `sleep`, two seconds after that thread
+>   had ended while the process lived. That disagrees with the parent-death
+>   signal as `prctl(2)` describes it, and the cause was not examined. The
+>   comment in `launcher.rs` that keeps the spawning thread alive until the
+>   child is reaped stays; nothing below relies on a thread's exit either way.
+>
+> So a guardian that outlives the supervisor can end the attempt, and a test
+> must run the supervisor in a unit with `KillMode=process`, or the service
+> manager does the guardian's work and the test proves nothing. R02ah works as
+> follows.
+>
+> - **The guardian.** A new mode `guardian` of the fixture program in the
+>   tool root runs a function of the provider, as the stub does (rule 4). The
+>   provider starts it after the attempt group exists and before the stub. It
+>   stays in `supervisor`, outside the attempt group, and is the provider's
+>   child. Its arguments are the attempt group's name, its absolute deadline
+>   as milliseconds of `CLOCK_MONOTONIC`, and the renewal window in
+>   milliseconds. The deadline is fixed when it starts: that time plus the
+>   readiness deadline, the wall deadline and 2 seconds, so it falls after
+>   every deadline of the provider and an earlier test keeps its own refusal.
+>   The guardian accepts only a name of the form `attempt-<digits>-<digits>`,
+>   the provider's form, opens the parent of its own group (from
+>   `/proc/self/cgroup`) and that name beneath it with `openat2` and
+>   `RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS` and `RESOLVE_NO_MAGICLINKS`, and
+>   then writes one ready byte on its socket. The provider waits for that byte
+>   within the readiness deadline before it starts the stub. A guardian that
+>   does not report ready refuses the attempt as
+>   `NotStarted(GuardianNotStarted)`, and the group is ended as before. It
+>   never receives a credential, the input or the output.
+> - **What it watches.** Its standard input is one end of a Unix stream pair
+>   whose other end only the provider holds; both ends close on `exec`. Its
+>   standard output is null. The provider sends `L` at the release, `R` for
+>   each renewal, `S` once it stops polling the stub (the stub's exit seen or
+>   the group being ended), and `D` once its group is gone. End of file
+>   without `D`, from the supervisor's death or a closed socket, ends the
+>   attempt at any time, and so does the absolute deadline. Between `L` and
+>   `S`, the renewal window passing without an `R` ends it too; before the
+>   release the readiness deadline bounds the attempt, and after `S` the
+>   provider's teardown, both with the absolute deadline behind them. No
+>   renewal, record or live supervisor extends the deadline. The guardian ends
+>   the attempt by writing `1` to `cgroup.kill` and reads `cgroup.events` for
+>   `populated 0` for at most five seconds. It removes nothing: the provider's
+>   teardown removes the group as before, and a group left by a dead
+>   supervisor stays for R02ai's reconciliation. It then writes one line,
+>   `guardian <reason> emptied=<0|1>` with the reason `supervisor-gone`,
+>   `renewal-expired` or `deadline`, first on the standard error it inherits
+>   from the provider, so that the line survives a dead supervisor, and then
+>   on the socket, ignoring a failure of either write, and exits. After `D`
+>   it exits without a line.
+> - **Renewals.** The plan gains the job's lease, and the renewal window is a
+>   third of it (0042 rule 6). The provider asks the store for a heartbeat at
+>   the release and then at the first poll after half a window has passed
+>   since the last heartbeat it asked, and sends `R` only after an answer that
+>   confirms the current fence, no cancel, the pinned actor generation and
+>   continuing authority. Every other answer stops the renewals, ends the
+>   group as at the wall deadline and refuses the attempt as `LeaseLost` with
+>   the part that failed. A heartbeat that fails because the store is
+>   unavailable sends no `R` and is asked again half a window later, as 0030
+>   rule 12 retries a renewal at its next checkpoint; the guardian ends the
+>   attempt when the window passes. The store is a stand-in in the test build:
+>   a function of the plan that answers each heartbeat by its number, at
+>   once. The fixture plan's stand-in confirms every heartbeat. The real
+>   store's heartbeat, which must answer within a bound shorter than half a
+>   window, is R02b's.
+> - **The provider's view.** After its group is gone the provider sends `D`,
+>   reads the guardian's line from the socket if there is one, and waits for
+>   the guardian to exit, for at most the cleanup observation deadline. A
+>   guardian still running then is killed and reaped, and the attempt is
+>   refused as `CleanupNotObserved`, since a process outside its group would
+>   otherwise occupy `supervisor` at the next admission. An attempt that the
+>   guardian ended is refused as `Guardian` with the reason, even when the
+>   stub's exit was also seen; a cleanup that was not observed keeps
+>   `CleanupNotObserved` first, and a routing change keeps `Routing`, as
+>   R02ag ranks them.
+> - **Phases, for the tests.** A test-only step of the plan stops the
+>   supervisor at a named phase: it writes a marker named after the phase and
+>   then either waits until killed (`hold`) or waits for a given time and goes
+>   on (`stall`). The phases are `guarded` (the group and the guardian exist,
+>   the stub does not), `started` (the stub runs, before the readiness report
+>   is read), `ready` (the report was read, before the release), `running`
+>   (after the release) and `collecting` (after a passing verdict and `D`,
+>   before collection). A test-only switch also leaves the guardian out, so
+>   the launcher's own parent-death signal can be shown alone, and another
+>   makes the provider send `R` after every heartbeat whatever its answer and
+>   never end the group on it: the faulty supervisor of 0042's acceptance.
+> - **The death of the supervisor.** `run.sh` runs a supervisor test in a unit
+>   of its own with `Delegate=yes` and `KillMode=process`, waits for the
+>   phase's marker and sends `SIGKILL` to the unit's main process. Within ten
+>   seconds it requires that no payload, probe or guardian process is left.
+>   At `guarded`, `started`, `ready` and `running` it also requires an attempt
+>   group beneath the unit's group that is empty (`populated 0`) and the
+>   guardian's line naming `supervisor-gone` and `emptied=1` in the unit's
+>   output. At `collecting` it requires no attempt group and no guardian line,
+>   since the group was gone and the guardian had exited before the phase.
+>   At `running`, without the guardian, it requires that no payload process
+>   is left, through the launcher's `--die-with-parent`. `run.sh` then removes
+>   the empty group that is left, since only R02ai's reconciliation would
+>   remove it, and stops the unit.
+> - **The tests in one process.** These run in the job, each with its own
+>   execution directory, a lease of 3 seconds and so a window of 1 second:
+>   - A stand-in that confirms twice and then reports the fence revoked: the
+>     attempt of the `linger` scenario is refused as `LeaseLost(Fence)` within
+>     3 seconds of the release, no group is left, and the guardian ended with
+>     `D`. The same for a cancel, a changed generation and lost authority.
+>   - A stand-in that is unavailable from the first heartbeat: the attempt is
+>     refused as `Guardian(RenewalExpired)` within 3 seconds of the release.
+>   - A supervisor stalled at `running` for 4 seconds: the stand-in confirms,
+>     but no heartbeat is asked while the supervisor stalls, so the guardian
+>     ends the attempt and the provider, on going on, refuses it as
+>     `Guardian(RenewalExpired)`. Local liveness alone keeps nothing alive.
+>   - The two cases of 0042's acceptance, each with the provider's own
+>     deadline check switched off by a test-only switch and the `hang`
+>     scenario: a faulty supervisor that keeps sending `R` after the stand-in
+>     reports the fence revoked, and a stand-in that confirms every heartbeat.
+>     Each attempt is refused as `Guardian(Deadline)` after at least 120 and
+>     less than 135 seconds from the release.
+>   - The fixture plan still yields its output, and every earlier test passes
+>     with the guardian present.
+> - **Unit tests.** The guardian's name check and its decision (end of file,
+>   `L`, `S`, window, deadline, `D`) as a pure function of the times, the
+>   parser of its line, and the provider's renewal decision over a table of
+>   answers and times.
+> - **The mutations.** Each must fail its test in the job:
+>   - The guardian not started: the stalled supervisor and both 120-second
+>     tests pass the guardian's deadline.
+>   - The guardian's deadline check removed: both 120-second tests.
+>   - Its window check removed: the unavailable store and the stalled
+>     supervisor.
+>   - End of file ignored: the death of the supervisor at `guarded`, where no
+>     launcher exists yet.
+>   - The provider's refusal on a non-confirming answer removed, so that it
+>     keeps polling and renewing: the revoked fence, whose `linger` attempt
+>     then exits 0.
+>   - `--die-with-parent` removed, with the guardian left out: the death of
+>     the supervisor at `running`.
+>
+> R02ai is the attempt registry of 0042 rule 6 under the execution directory,
+> its reconciliation before a new admission (including a changed boot), the
+> persisted quarantine that refuses admission for the data directory and
+> reports that operator action is required, and the death of the supervisor
+> at the registry and group-creation phases, which leave a record or an empty
+> group with no guardian. The earlier amendments' "the persisted quarantine
+> is R02ah's" now reads R02ai's. Its own amendment plans it before its code.
+>
+> The rules, reworded:
+>
+> - **Rule 5.** After the attempt group exists, the provider starts the
+>   guardian and waits for its ready byte before the stub; it renews the
+>   guardian only after a confirming heartbeat, and sends `D` after the group
+>   is gone.
+> - **Rule 9.** The job also runs the supervisor tests in a unit with
+>   `KillMode=process` and kills its main process at each phase.
+> - **Rule 14.** The R02ah row is reworded and the R02ai row added, as below.
+> - **Rule 15.** R02ai adds the ownership record of 0042 rule 6.
+> - **Rule 17.** A new R02ah point is settled by this amendment.
+
 > **Note, 2026-11-12 (R02aa).** The provider's admission and the job
 > `Linux enforcement` exist. On the runner the provider's own code did what
 > the second measurement did with shell commands, which settles the first
@@ -1395,10 +1578,11 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
 | R02ae | Files, descriptors and network as amended on 2026-11-13: local networking in the fixture profile (with the mapping's network class, its guard mutations and the R02ad mutations run again), real host listeners whose counters do not change during the launch with the attempt's namespace read from outside and a mutation without the network namespace, host canaries and signals with a mutation exposing a host directory, `/proc` and the closed `/dev/pts` (the launcher's cover, required by the mount check, with `ENOENT` for `/dev/ptmx` and both paths through `/proc/1/root`, and a mutation without the cover with and without the check), a real descriptor leak refused by the bootstrap, and configuration injection with a live preload canary. | 4, 8                  |
 | R02af | Input and output as amended on 2026-11-13: a pinned input checked against its listing and bound read-only at `/input` from a fresh staging directory; the keeper opened through `/proc` before the release with its mount id checked; collection after a passing verdict, beneath the output root, with the bounds and refusals of the amendment and a bound manifest; the private mount tree with a `noexec` input; payload-made and planted hostile trees, the verdicts, the freed tmpfs, and the ten mutations.                                                                                                                                                                                                                                                 | 3 (input), 7, 8       |
 | R02ag | The crash acceptance as amended on 2026-11-13 (crashes): the scratch root as the payload's working directory, the `crash` and `crash-setter` fixtures under file routing with a 1 MiB parent limit, limits before and after `exec`, a scratch with no core and no stored core; the pipe and socket routes refused with their counters at zero and then shown live; an absolute pattern refused; a routing change during an attempt that ends it and quarantines the provider; and the six mutations.                                                                                                                                                                                                                                                               | 5 (cores), 8          |
-| R02ah | The guardian with its own deadline, death of the supervisor at each phase, the attempt registry and quarantine. Renewals run against a stand-in for the store, including one that keeps renewing after its fence is revoked and one that renews for the whole 120 seconds.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | 6, 8                  |
+| R02ah | The guardian as amended on 2026-11-13 (the guardian): a fixture mode in the tool root that stays in `supervisor`, is started before the stub and ends the group on its socket's end of file, an expired renewal window or the absolute deadline; renewals only after a heartbeat that confirms fence, cancel, generation and authority, against a stand-in store (revoked fence, cancel, generation, authority, unavailable, a stalled supervisor, 120 seconds of confirmations); the death of the supervisor at five phases in a unit with `KillMode=process`, and once without the guardian.                                                                                                                                                                     | 6, 8                  |
+| R02ai | The attempt registry of 0042 rule 6 under the execution directory, its reconciliation before a new admission and after a changed boot, the persisted quarantine with its operator report, and the death of the supervisor at the registry and group-creation phases; planned by its own amendment.                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | 6, 8                  |
 
 15. **What R02a leaves to R02b.** R02ab to R02ag launch without the ownership
-    record of 0042, rule 6; R02ah adds it. Everything that needs the job store
+    record of 0042, rule 6; R02ai adds it. Everything that needs the job store
     is R02b's, including the input's origin (the store, access checks and the
     pinned revision) and the rest of the binding of R02af's manifest (actor
     and generation, artifact, revision, job and fence; the amendment of
@@ -1448,6 +1632,9 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
     - R02ag: that the coredump behaviour 0042 cites for kernel 6.18 holds for
       the kernel of the runner, read from that kernel's source before the
       slice relies on it. Settled by the amendment of 2026-11-13 (crashes).
+    - R02ah: how the guardian learns that the supervisor is gone and how a
+      test kills a supervisor without the service manager's cleanup.
+      Settled by the amendment of 2026-11-13 (the guardian).
 
 ## Alternatives considered
 
