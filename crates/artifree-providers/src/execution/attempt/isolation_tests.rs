@@ -854,7 +854,8 @@ fn record_host_kernel_state(phase: &str, state: &(Vec<String>, Vec<String>)) -> 
 
 /// Requires that the payload reaches no `/proc/sys` value and no pseudo-terminal of the host. The
 /// host values are unchanged across the launch, every `/proc/sys` write reports an error, and the
-/// open of `/dev/ptmx` fails with `ENOENT`, because the bootstrap's empty mount covers `/dev/pts`.
+/// opens of `/dev/ptmx` and of both masters through `/proc/1/root` fail with `ENOENT`, because the
+/// launcher's empty tmpfs covers `/dev/pts` in its own and, inherited, in the bootstrap's namespace.
 #[test]
 #[ignore = "runs only in the Linux enforcement job"]
 fn job_proc_and_dev_pts_stay_inside() -> Result<(), Box<dyn Error>> {

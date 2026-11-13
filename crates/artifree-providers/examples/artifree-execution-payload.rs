@@ -886,6 +886,12 @@ mod linux {
             ))?;
             through_init.push(opened);
         }
+        // The mount table's `/dev/pts` lines, as evidence of the cover in the job's log.
+        if let Ok(table) = fs::read_to_string("/proc/self/mountinfo") {
+            for line in table.lines().filter(|line| line.contains(" /dev/pts ")) {
+                say(&format!("proc-dev mount {line}"))?;
+            }
+        }
         match list_dev_pts() {
             Ok(names) => say(&format!("proc-dev pts {names}")),
             Err(error) => say(&format!("proc-dev pts error={}", error_word(Some(&error)))),

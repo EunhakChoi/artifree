@@ -65,9 +65,8 @@ const MEASURED_LIMITS: &[&str] = &[
 
 /// The measured bootstrap's `/proc/<pid>/mountinfo` lines (the amendment of 2026-11-12). The
 /// mount points, options and filesystems are the kernel's values from the runner; the ids and the
-/// root of each line are illustrative. The last line is the bootstrap's empty read-only tmpfs over
-/// `/dev/pts` (the amendment of 2026-11-13, rule 3 as reworded), which the `/dev/pts` mount check
-/// requires.
+/// root of each line are illustrative. The last line is the launcher's empty read-only tmpfs over
+/// `/dev/pts` (0056 rule 2, as reworded on 2026-11-13), which the `/dev/pts` mount check requires.
 const MEASURED_MOUNTINFO: &[&str] = &[
     "1290 1201 0:110 / / ro,nosuid,nodev,relatime - tmpfs tmpfs rw,uid=1001,gid=1001,inode64",
     "1291 1290 8:1 /opt/artifree/tools/v1 /tools ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
@@ -77,7 +76,7 @@ const MEASURED_MOUNTINFO: &[&str] = &[
     "1295 1290 0:112 / /dev ro,nosuid,nodev,relatime - tmpfs tmpfs rw,mode=755,uid=1001,gid=1001,inode64",
     "1296 1295 0:113 / /dev/pts rw,nosuid,noexec,relatime - devpts devpts rw,mode=600,ptmxmode=666",
     "1299 1290 0:115 / /tmp rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,size=131072k,nr_inodes=4096,mode=700,uid=1001,gid=1001,inode64",
-    "1300 1296 0:116 / /dev/pts ro,nosuid,nodev,noexec,relatime - tmpfs tmpfs ro,size=4k,nr_inodes=1,mode=555,uid=1001,gid=1001,inode64",
+    "1300 1296 0:116 / /dev/pts ro,nosuid,nodev,noexec,relatime - tmpfs tmpfs ro,size=4k,mode=555,uid=1001,gid=1001,inode64",
 ];
 
 /// The limits line keys, as the kernel prints them at the start of a line.

@@ -629,10 +629,11 @@ how; where the two could be read differently, 0042 holds.
 > non-blocking flags allowed), `setsockopt` only for `SO_REUSEADDR` at the
 > socket level, and `bind`, `listen`, `accept4`, `connect`, `sendto`,
 > `recvfrom`, `getsockname` and `shutdown`. The mapping has a `network`
-> class of 19 refused probes and six allowed controls. After the scratch,
-> the bootstrap mounts an empty read-only tmpfs over `/dev/pts` and reads
-> both mounts back; the mount checks of the bootstrap and of the provider
-> require that mount, with its size, inode and mode bounds. The preparation
+> class of 19 refused probes and six allowed controls. The attempt's
+> arguments mount an empty read-only tmpfs over `/dev/pts` in the
+> launcher's mount namespace, which the bootstrap's inherits; the mount
+> checks of the bootstrap and of the provider require it as the last
+> `/dev/pts` mount, with its size and mode bounds. The preparation
 > writes the runner's IPv4 address into the tool root under the manifest.
 > Six job tests run in the job's part 8: real host listeners on TCP, UDP, a
 > Unix path and an abstract name keep their counters through a launch whose
@@ -640,9 +641,8 @@ how; where the two could be read differently, 0042 holds.
 > outside; canary files in `/var/tmp` and the runner's home and a canary
 > process stay intact while the payload reads, creates, sweeps every PID
 > with signal 0 and sends `kill(-1)`; `/proc/sys` writes fail and
-> `/dev/ptmx` gives `ENOENT`, and opening the launcher's masters through
-> `/proc/1/root` fails; a real leak of a directory, a connection and
-> a pipe is refused before READY; a live preload canary, built in the job,
+> `/dev/ptmx` and both masters through `/proc/1/root` give `ENOENT`; a
+> real leak of a directory, a connection and a pipe is refused before READY; a live preload canary, built in the job,
 > logs the test binary and neither the stub nor the launcher, and the payload
 > sees no variable (inside the sandbox neither the canary nor the host's
 > `/tmp` is mounted, so the log cannot show the bootstrap or the payload); and a marker written in one attempt is absent in the

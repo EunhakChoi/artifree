@@ -4,8 +4,8 @@
 //!
 //! The bootstrap's steps run in this order, with the numbers of their step documents: 1, the
 //! identity; 2, the control channel; 3, the leaked descriptors; 4, the scratch in its own mount
-//! namespace (the amendment of 2026-11-12, rule 3); 5, `/dev/pts` closed by an empty read-only
-//! tmpfs, and the mount table read back (rule 3 as reworded on 2026-11-13); 6, the limits; 7, the
+//! namespace (the amendment of 2026-11-12, rule 3); 5, the mount table read back, with the
+//! launcher's empty read-only tmpfs over `/dev/pts` (rule 3 as reworded on 2026-11-13); 6, the limits; 7, the
 //! privilege drop; 8, the two seccomp programs, the allowlist last; 9, the confirmation of its own
 //! setup. Then it writes the readiness record, waits for the release and replaces itself with the
 //! payload.
@@ -47,8 +47,6 @@ const PROC_SELF_FD: &str = "/proc/self/fd";
 const PROC_STATUS: &str = "/proc/self/status";
 const PROC_LIMITS: &str = "/proc/self/limits";
 const PROC_MOUNTINFO: &str = "/proc/self/mountinfo";
-/// The launcher's terminal directory, which the bootstrap covers.
-const TERMINALS: &str = "/dev/pts";
 
 /// Why the stub or the bootstrap stopped before any payload instruction ran (decision 0056 rules 3 and 5).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,8 +63,8 @@ pub enum BootstrapFailure {
     /// The scratch could not be mounted in the bootstrap's own mount namespace, or its mount table
     /// did not show both bounds and a read-only root and `/dev`.
     Scratch,
-    /// The empty read-only tmpfs could not be mounted over `/dev/pts`, or the mount table did not
-    /// show it (decision 0056 rule 3, as reworded on 2026-11-13).
+    /// The mount table did not show the launcher's empty read-only tmpfs as the last mount of
+    /// `/dev/pts` (decision 0056 rules 2 and 3, as reworded by the amendments of 2026-11-13).
     Terminals,
     /// A resource limit could not be set, or did not read back as set.
     Limits,
@@ -96,7 +94,7 @@ impl fmt::Display for BootstrapFailure {
             Self::Scratch => {
                 formatter.write_str("the scratch could not be mounted with its bounds")
             }
-            Self::Terminals => formatter.write_str("the terminal directory could not be closed"),
+            Self::Terminals => formatter.write_str("the terminal directory was not covered"),
             Self::Limits => formatter.write_str("a resource limit did not read back as set"),
             Self::Privileges => formatter.write_str("a privilege did not read back as dropped"),
             Self::Filter => formatter.write_str("the seccomp filter could not be installed"),
@@ -147,7 +145,7 @@ pub fn run_bootstrap(identity: &str) -> Result<Infallible, BootstrapFailure> {
     let control = take_control()?;
     refuse_leaked_descriptors(control.as_raw_fd())?;
     mount_scratch()?;
-    close_terminals()?;
+    confirm_terminals_and_scratch()?;
     set_limits()?;
     drop_privileges()?;
     // The control descriptor is close-on-exec, so the payload's exec closes it. Nothing is dropped
@@ -216,7 +214,7 @@ fn open_descriptor_numbers() -> Result<Vec<RawFd>, BootstrapFailure> {
 
 /// Step 4 (decision 0056 rule 3, amended on 2026-11-12): makes the bootstrap's own mount namespace and mounts the scratch there as one tmpfs, `nosuid`, `nodev` and `noexec`, owner-only, with the size and the inode count of decision 0042 rule 5. It comes after the identity, control and descriptor steps, which need no capability, and before the limits.
 ///
-/// `unshare` is called with the mount-namespace flag alone, while the bootstrap is a single thread; that flag is not among those that make the call unsound (0056 rule 7). The capabilities it uses belong to the innermost user namespace and reach only this namespace. The table, which `close_terminals` reads back, must show the scratch as required and a read-only root and `/dev`; the provider checks the same table with the same parser before the release. This runs before the filter, so ordinary std file reading is allowed.
+/// `unshare` is called with the mount-namespace flag alone, while the bootstrap is a single thread; that flag is not among those that make the call unsound (0056 rule 7). The capabilities it uses belong to the innermost user namespace and reach only this namespace. The table, which `confirm_terminals_and_scratch` reads back, must show the scratch as required and a read-only root and `/dev`; the provider checks the same table with the same parser before the release. This runs before the filter, so ordinary std file reading is allowed.
 fn mount_scratch() -> Result<(), BootstrapFailure> {
     sched::unshare(CloneFlags::CLONE_NEWNS).map_err(|_| BootstrapFailure::Scratch)?;
     let data = CString::new(format!(
@@ -237,23 +235,8 @@ fn mount_scratch() -> Result<(), BootstrapFailure> {
     Ok(())
 }
 
-/// Step 5 (decision 0056 rule 3, as reworded on 2026-11-13): in the same mount namespace, still holding `CAP_SYS_ADMIN` of the sandbox's user namespace, mounts an empty read-only tmpfs over the launcher's `/dev/pts`, then reads the mount table back with the scratch. Unmounting the launcher's devpts fails with `EINVAL` (its mounts are locked) and a devpts with `max=0` still lets `/dev/ptmx` open; with this mount, opening `/dev/ptmx` fails with `ENOENT` and creation there with `EROFS` (measured on the runner on 2026-11-13). The provider checks the same table with the same parser before the release.
-fn close_terminals() -> Result<(), BootstrapFailure> {
-    let data = CString::new(format!(
-        "size={}k,nr_inodes={},mode={:o}",
-        readiness::TERMINALS_SIZE_KIB,
-        readiness::TERMINALS_INODES,
-        readiness::TERMINALS_MODE
-    ))
-    .map_err(|_| BootstrapFailure::Terminals)?;
-    mount::mount(
-        "tmpfs",
-        TERMINALS,
-        "tmpfs",
-        MountFlags::RDONLY | MountFlags::NOSUID | MountFlags::NODEV | MountFlags::NOEXEC,
-        data.as_c_str(),
-    )
-    .map_err(|_| BootstrapFailure::Terminals)?;
+/// Step 5 (decision 0056 rule 3, as reworded by the amendments of 2026-11-13): reads the mount table back. It must show the scratch as required, a read-only root and `/dev`, and, as the last mount of `/dev/pts`, the launcher's empty read-only tmpfs (rule 2), which this mount namespace inherited from the launcher's. The bootstrap mounts nothing over `/dev/pts`: the launcher's cover is in both namespaces, and the launcher's init, the first process of the PID namespace, stays in the launcher's, which `/proc/1/root` shows. The provider checks the same table with the same parser before the release.
+fn confirm_terminals_and_scratch() -> Result<(), BootstrapFailure> {
     let limit = u64::try_from(readiness::PROC_FILE_BYTES).map_err(|_| BootstrapFailure::Scratch)?;
     let bytes = super::read_bounded(Path::new(PROC_MOUNTINFO), limit)
         .map_err(|_| BootstrapFailure::Scratch)?;

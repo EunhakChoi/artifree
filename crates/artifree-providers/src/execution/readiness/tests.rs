@@ -20,9 +20,10 @@ const ROOT_LINE: &str =
     "1290 1201 0:110 / / ro,nosuid,nodev,relatime - tmpfs tmpfs rw,uid=1001,gid=1001,inode64";
 const DEV_LINE: &str = "1295 1290 0:112 / /dev ro,nosuid,nodev,relatime - tmpfs tmpfs rw,mode=755,uid=1001,gid=1001,inode64";
 const TMP_LINE: &str = "1299 1290 0:115 / /tmp rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,size=131072k,nr_inodes=4096,mode=700,uid=1001,gid=1001,inode64";
-/// The bootstrap's empty read-only tmpfs over `/dev/pts`, stacked on the launcher's devpts (the
-/// amendment of 2026-11-13). Illustrative ids, kernel options as measured on the runner.
-const PTS_LINE: &str = "1300 1296 0:116 / /dev/pts ro,nosuid,nodev,noexec,relatime - tmpfs tmpfs ro,size=4k,nr_inodes=1,mode=555,uid=1001,gid=1001,inode64";
+/// The launcher's empty read-only tmpfs over `/dev/pts`, stacked on its devpts (0056, amendment of
+/// 2026-11-13, the launcher's `/dev/pts`). Illustrative ids, kernel options as measured on the
+/// runner.
+const PTS_LINE: &str = "1300 1296 0:116 / /dev/pts ro,nosuid,nodev,noexec,relatime - tmpfs tmpfs ro,size=4k,mode=555,uid=1001,gid=1001,inode64";
 
 const MEASURED_MOUNTINFO: [&str; 9] = [
     ROOT_LINE,
@@ -152,7 +153,6 @@ fn measured_mount_table_passes() -> Verdict {
                 is_tmpfs: true,
                 read_only: true,
                 size_kib: Some(4),
-                inodes: Some(1),
                 mode: Some(0o555),
             }),
         },
@@ -326,7 +326,7 @@ fn last_line_of_a_mount_point_wins() {
     ]);
 }
 
-/// The bootstrap's over-mount must be the last `/dev/pts` line and a read-only tmpfs. Each other
+/// The launcher's cover must be the last `/dev/pts` line and a read-only tmpfs. Each other
 /// table is refused as `DevPts`, whichever line is wrong (the amendment of 2026-11-13, rule 3 as
 /// reworded).
 #[test]
@@ -366,8 +366,8 @@ fn dev_pts_must_be_the_read_only_tmpfs_over_mount() {
     ]);
 }
 
-/// The over-mount must be empty as the bootstrap mounts it: 4 KiB, one inode and mode 555 (the
-/// amendment of 2026-11-13, rule 3 as reworded). A read-only tmpfs with other bounds is refused as
+/// The cover must be the launcher's empty tmpfs: 4 KiB and mode 555 (0056 rules 2 and 3, as
+/// reworded by the amendments of 2026-11-13). A read-only tmpfs with other bounds is refused as
 /// `DevPts`, including one with the scratch's bounds, which the same mount table would otherwise
 /// accept (the read-only tmpfs `/dev/shm` is not empty).
 #[test]
@@ -378,7 +378,7 @@ fn dev_pts_over_mount_must_be_empty() {
             edited_table("/dev/pts", |line| {
                 Some(replaced_in_over_mount(
                     line,
-                    "size=4k,nr_inodes=1,",
+                    "size=4k,",
                     "size=131072k,nr_inodes=4096,",
                 ))
             }),
@@ -395,20 +395,6 @@ fn dev_pts_over_mount_must_be_empty() {
             "no size bound",
             edited_table("/dev/pts", |line| {
                 Some(replaced_in_over_mount(line, "size=4k,", ""))
-            }),
-            Err(ReadinessFailure::DevPts),
-        ),
-        (
-            "two inodes",
-            edited_table("/dev/pts", |line| {
-                Some(replaced_in_over_mount(line, "nr_inodes=1,", "nr_inodes=2,"))
-            }),
-            Err(ReadinessFailure::DevPts),
-        ),
-        (
-            "no inode bound",
-            edited_table("/dev/pts", |line| {
-                Some(replaced_in_over_mount(line, "nr_inodes=1,", ""))
             }),
             Err(ReadinessFailure::DevPts),
         ),
