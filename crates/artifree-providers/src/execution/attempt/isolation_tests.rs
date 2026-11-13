@@ -27,7 +27,6 @@ use std::os::linux::net::SocketAddrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{SocketAddr as UnixSocketAddr, UnixListener, UnixStream};
 use std::path::Path;
-use std::process::{Child, Command};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
@@ -690,15 +689,25 @@ fn job_the_network_reaches_no_host_listener() -> Result<(), Box<dyn Error>> {
     assert_no_attempt_groups()
 }
 
-/// The canary process, which is killed and reaped when it is dropped. Its errors are ignored: the
-/// process may have ended already, and the test's own assertions decide the result.
-struct CanaryProcess(Child);
+/// The variable that names the canary process. `run.sh` starts the process on the host, outside
+/// the test's unit, because the provider refuses a group that holds another process
+/// (`OccupiedCgroup`), and stops it after the test.
+const CANARY_PID_VARIABLE: &str = "ARTIFREE_CANARY_PID";
 
-impl Drop for CanaryProcess {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
+/// The command line of the canary process that `run.sh` starts, as `/proc` shows it.
+const CANARY_COMMAND: &[u8] = b"sleep\x00300\x00";
+
+/// The process number of the canary process, from `CANARY_PID_VARIABLE`.
+fn canary_pid() -> Result<u32, Box<dyn Error>> {
+    let value = env::var(CANARY_PID_VARIABLE).map_err(|_| {
+        format!("{CANARY_PID_VARIABLE} must name the canary process; run.sh sets it")
+    })?;
+    Ok(value.trim().parse()?)
+}
+
+/// Whether the canary process still runs: `/proc` lists its number with the canary's command line.
+fn canary_running(pid: u32) -> bool {
+    fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|command| command == CANARY_COMMAND)
 }
 
 /// The canary directories, which are removed when this guard is dropped, so that a failed
@@ -771,7 +780,11 @@ fn record_canary_files(before: &[CanaryFile], after: &[CanaryFile]) -> Result<()
 fn job_host_files_and_processes_stay_intact() -> Result<(), Box<dyn Error>> {
     let _dirs = CanaryDirs;
     write_canary_files()?;
-    let mut canary = CanaryProcess(Command::new("/bin/sleep").arg("120").spawn()?);
+    let canary = canary_pid()?;
+    assert!(
+        canary_running(canary),
+        "the canary process {canary} must run before the launch"
+    );
     let files_before = canary_files()?;
     let (outcome, _elapsed) = timed_launch("host", &AttemptPlan::fixture())?;
     // Recorded before the checks, so that the observations survive a failed check.
@@ -779,7 +792,7 @@ fn job_host_files_and_processes_stay_intact() -> Result<(), Box<dyn Error>> {
     record_canary_files(&files_before, &files_after)?;
     let entries = fs::read_dir(DROP_DIR)?.count();
     record("canary.drop-directory.entries_after_launch", entries)?;
-    let running = canary.0.try_wait()?.is_none();
+    let running = canary_running(canary);
     record("canary.sleep-process.running_after_launch", running)?;
     assert_eq!(
         files_after, files_before,

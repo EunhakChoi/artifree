@@ -329,7 +329,7 @@ pub(super) const PROBES: [Probe; 119] = [
     native("net_socket_inet_l2tp", "network", 41, &[2, 2, 115]),
     native("net_socket_unix_protocol", "network", 41, &[1, 1, 1]),
     native("net_setsockopt_sndbuf", "network", 54, &[0, 1, 7, 0, 0]),
-    native("net_setsockopt_ip_level", "network", 54, &[0, 0, 1, 0, 0]),
+    native("net_setsockopt_ip_level", "network", 54, &[0, 0, 2, 0, 0]),
     native("net_accept", "network", 43, &[0, 0, 0]),
     native("net_sendmsg", "network", 46, &[0, 0, 0]),
     native("net_recvmsg", "network", 47, &[0, 0, 0]),

@@ -183,27 +183,27 @@ Resource-limit setters (0042 rule 5: the descriptor and core limits cannot be ch
 
 Sockets outside the forms the fixture profile allows for communication inside the attempt (0042 rule 4; 0056, amendment of 2026-11-13, files, descriptors and network). The profile allows `socket` for `AF_UNIX` stream or datagram with protocol 0, and for `AF_INET` and `AF_INET6` stream with protocol 0 or TCP and datagram with protocol 0 or UDP, the close-on-exec and non-blocking flags included; `setsockopt` only for `SO_REUSEADDR` at the socket level; and `bind`, `listen`, `accept4`, `connect`, `sendto`, `recvfrom`, `getsockname` and `shutdown`. That the attempt's network namespace keeps such sockets inside is proved by `job_the_network_reaches_no_host_listener` with real host listeners, not by this table.
 
-| Probe                       | Call                                         | Entry      | Expected                      | Control (unfiltered) | Mutation                     |
-| --------------------------- | -------------------------------------------- | ---------- | ----------------------------- | -------------------- | ---------------------------- |
-| `net_socket_netlink`        | socket(AF_NETLINK, SOCK_DGRAM, 0)            | x86-64 41  | record `sig=31 arch=c000003e` | not measured         | domain condition removed     |
-| `net_socket_packet`         | socket(AF_PACKET, SOCK_RAW, ETH_P_ALL)       | x86-64 41  | record `sig=31 arch=c000003e` | exit 1 (EPERM)       | domain condition removed     |
-| `net_socket_raw`            | socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)      | x86-64 41  | record `sig=31 arch=c000003e` | exit 1 (EPERM)       | type condition removed       |
-| `net_socket_inet_seqpacket` | socket(AF_INET, SOCK_SEQPACKET, 0)           | x86-64 41  | record `sig=31 arch=c000003e` | not measured         | type condition removed       |
-| `net_socket_unix_seqpacket` | socket(AF_UNIX, SOCK_SEQPACKET, 0)           | x86-64 41  | record `sig=31 arch=c000003e` | not measured         | type condition removed       |
-| `net_socket_inet_sctp`      | socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP)   | x86-64 41  | record `sig=31 arch=c000003e` | not measured         | protocol condition removed   |
-| `net_socket_inet6_mptcp`    | socket(AF_INET6, SOCK_STREAM, IPPROTO_MPTCP) | x86-64 41  | record `sig=31 arch=c000003e` | not measured         | protocol condition removed   |
-| `net_socket_inet_l2tp`      | socket(AF_INET, SOCK_DGRAM, IPPROTO_L2TP)    | x86-64 41  | record `sig=31 arch=c000003e` | not measured         | protocol condition removed   |
-| `net_socket_unix_protocol`  | socket(AF_UNIX, SOCK_STREAM, 1)              | x86-64 41  | record `sig=31 arch=c000003e` | not measured         | protocol condition removed   |
-| `net_setsockopt_sndbuf`     | setsockopt(SOL_SOCKET, SO_SNDBUF)            | x86-64 54  | record `sig=31 arch=c000003e` | not measured         | setsockopt condition removed |
-| `net_setsockopt_ip_level`   | setsockopt at level IPPROTO_IP               | x86-64 54  | record `sig=31 arch=c000003e` | not measured         | setsockopt condition removed |
-| `net_accept`                | accept                                       | x86-64 43  | record `sig=31 arch=c000003e` | not measured         | allowed alone                |
-| `net_sendmsg`               | sendmsg (descriptor passing)                 | x86-64 46  | record `sig=31 arch=c000003e` | not measured         | allowed alone                |
-| `net_recvmsg`               | recvmsg (descriptor passing)                 | x86-64 47  | record `sig=31 arch=c000003e` | not measured         | allowed alone                |
-| `net_getpeername`           | getpeername                                  | x86-64 52  | record `sig=31 arch=c000003e` | not measured         | allowed alone                |
-| `net_socketpair`            | socketpair                                   | x86-64 53  | record `sig=31 arch=c000003e` | not measured         | allowed alone                |
-| `net_getsockopt`            | getsockopt                                   | x86-64 55  | record `sig=31 arch=c000003e` | not measured         | allowed alone                |
-| `net_recvmmsg`              | recvmmsg                                     | x86-64 299 | record `sig=31 arch=c000003e` | not measured         | allowed alone                |
-| `net_sendmmsg`              | sendmmsg                                     | x86-64 307 | record `sig=31 arch=c000003e` | not measured         | allowed alone                |
+| Probe                       | Call                                         | Entry      | Expected                      | Control (unfiltered) | Mutation                   |
+| --------------------------- | -------------------------------------------- | ---------- | ----------------------------- | -------------------- | -------------------------- |
+| `net_socket_netlink`        | socket(AF_NETLINK, SOCK_DGRAM, 0)            | x86-64 41  | record `sig=31 arch=c000003e` | not measured         | domain condition removed   |
+| `net_socket_packet`         | socket(AF_PACKET, SOCK_RAW, ETH_P_ALL)       | x86-64 41  | record `sig=31 arch=c000003e` | exit 1 (EPERM)       | socket unconditional       |
+| `net_socket_raw`            | socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)      | x86-64 41  | record `sig=31 arch=c000003e` | exit 1 (EPERM)       | socket unconditional       |
+| `net_socket_inet_seqpacket` | socket(AF_INET, SOCK_SEQPACKET, 0)           | x86-64 41  | record `sig=31 arch=c000003e` | not measured         | type condition removed     |
+| `net_socket_unix_seqpacket` | socket(AF_UNIX, SOCK_SEQPACKET, 0)           | x86-64 41  | record `sig=31 arch=c000003e` | not measured         | type condition removed     |
+| `net_socket_inet_sctp`      | socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP)   | x86-64 41  | record `sig=31 arch=c000003e` | not measured         | protocol condition removed |
+| `net_socket_inet6_mptcp`    | socket(AF_INET6, SOCK_STREAM, IPPROTO_MPTCP) | x86-64 41  | record `sig=31 arch=c000003e` | not measured         | protocol condition removed |
+| `net_socket_inet_l2tp`      | socket(AF_INET, SOCK_DGRAM, IPPROTO_L2TP)    | x86-64 41  | record `sig=31 arch=c000003e` | not measured         | protocol condition removed |
+| `net_socket_unix_protocol`  | socket(AF_UNIX, SOCK_STREAM, 1)              | x86-64 41  | record `sig=31 arch=c000003e` | not measured         | protocol condition removed |
+| `net_setsockopt_sndbuf`     | setsockopt(SOL_SOCKET, SO_SNDBUF)            | x86-64 54  | record `sig=31 arch=c000003e` | not measured         | option condition removed   |
+| `net_setsockopt_ip_level`   | setsockopt(IPPROTO_IP, IP_TTL)               | x86-64 54  | record `sig=31 arch=c000003e` | not measured         | level condition removed    |
+| `net_accept`                | accept                                       | x86-64 43  | record `sig=31 arch=c000003e` | not measured         | allowed alone              |
+| `net_sendmsg`               | sendmsg (descriptor passing)                 | x86-64 46  | record `sig=31 arch=c000003e` | not measured         | allowed alone              |
+| `net_recvmsg`               | recvmsg (descriptor passing)                 | x86-64 47  | record `sig=31 arch=c000003e` | not measured         | allowed alone              |
+| `net_getpeername`           | getpeername                                  | x86-64 52  | record `sig=31 arch=c000003e` | not measured         | allowed alone              |
+| `net_socketpair`            | socketpair                                   | x86-64 53  | record `sig=31 arch=c000003e` | not measured         | allowed alone              |
+| `net_getsockopt`            | getsockopt                                   | x86-64 55  | record `sig=31 arch=c000003e` | not measured         | allowed alone              |
+| `net_recvmmsg`              | recvmmsg                                     | x86-64 299 | record `sig=31 arch=c000003e` | not measured         | allowed alone              |
+| `net_sendmmsg`              | sendmmsg                                     | x86-64 307 | record `sig=31 arch=c000003e` | not measured         | allowed alone              |
 
 ## abi
 

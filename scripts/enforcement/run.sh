@@ -276,7 +276,15 @@ say "part 8: files, descriptors and network"
 # job (decision 0056 rule 13). The record is the file that the start of this script writes.
 record_option=(--setenv="ARTIFREE_ENFORCEMENT_RECORD=$PWD/$OUT/environment.txt")
 run_in_scenario "$lib_binary" isolation_tests network isolation-network job_the_network_reaches_no_host_listener "${record_option[@]}"
-run_in_scenario "$lib_binary" isolation_tests host isolation-host job_host_files_and_processes_stay_intact "${record_option[@]}"
+# The host test's canary process runs on the host outside the test's unit, because the provider
+# refuses a group that holds another process (OccupiedCgroup). The test checks it through /proc.
+sleep 300 &
+canary_pid=$!
+run_in_scenario "$lib_binary" isolation_tests host isolation-host job_host_files_and_processes_stay_intact \
+  "${record_option[@]}" --setenv="ARTIFREE_CANARY_PID=$canary_pid"
+kill -0 "$canary_pid" || fail "the canary process ended during the host test"
+kill "$canary_pid"
+wait "$canary_pid" || true
 run_in_scenario "$lib_binary" isolation_tests proc-dev isolation-proc-dev job_proc_and_dev_pts_stay_inside "${record_option[@]}"
 run_in_scenario "$lib_binary" isolation_tests environment isolation-leaked-descriptor job_a_leaked_descriptor_is_refused "${record_option[@]}"
 # The injection check (decision 0056, amendment of 2026-11-13): the repository's own preload
