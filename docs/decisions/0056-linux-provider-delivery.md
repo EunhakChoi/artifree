@@ -8,8 +8,9 @@ fails acceptance on the reviewed kernel), R02ae (files, descriptors and
 network, as planned in the second and third amendments of 2026-11-13)
 R02af (input and output, as planned in the amendment of 2026-11-13 on
 input and output), R02ag (crashes, as planned in the amendment of
-2026-11-13 on crashes) and R02ah (the guardian, as planned in the amendment
-of 2026-11-13 on the guardian) are implemented**.
+2026-11-13 on crashes), R02ah (the guardian, as planned in the amendment
+of 2026-11-13 on the guardian) and R02ai (the attempt registry, as planned
+in the amendment of 2026-11-14) are implemented**.
 Roadmap: R02a. Builds on
 [0042](0042-linux-untrusted-execution.md) and
 [0055](0055-operating-background-work.md).
@@ -1559,6 +1560,39 @@ how; where the two could be read differently, 0042 holds.
 > `guarded`; with the refusal on a lost lease removed the revoked fence's
 > attempt exited 0; and without `--die-with-parent` and the guardian a
 > payload process outlived the supervisor's death at `running`.
+>
+> **Note, 2026-11-14 (R02ai).** The attempt registry of the amendment
+> exists, compiled only into the test build. Under the lock a launch checks
+> the in-process quarantine and the `quarantine` file (a failed lookup
+> refuses too), admits, reconciles, writes its record, stages its input and
+> makes the group named from the record's identity. Reconciliation opens the
+> cgroup mount once, after admission, and counts a group as gone when a
+> lookup, `cgroup.kill` or `cgroup.events` finds it removed (`ENOENT` or
+> `ENODEV`). A quarantine file whose later sync fails is kept: its presence
+> alone refuses a restart, and the attempt is still refused as
+> `QuarantineNotPersisted`. A failure to stage the input or to make the
+> group leaves the record without a quarantine, and the next reconciliation
+> finds no group and removes it. The operator text also names the records
+> that a quarantine keeps. Each bad-record case runs in a unit of its own,
+> since the in-process quarantine holds for the whole process. In the job
+> (run 43479574639) the supervisor killed at `registered` and at `created`
+> left its record, the service manager trimmed its empty group, and a second
+> unit's reconciliation removed the record and, at `created`, the staged
+> input before a launch passed; a same-boot leftover group with a trusted
+> `sleep` was killed, seen empty and removed; a changed boot left its live
+> decoy alone; a foreign group name, a `..` parent, another machine, another
+> namespace, a stray file and a root-owned parent each quarantined with the
+> decoy untouched; and the routing change persisted its quarantine for a
+> second process, which a launch passed once the test removed the file. The
+> rule 17 point of the amendment stays open: every group a dead supervisor
+> left was trimmed, so no reconciliation had to kill a populated group of
+> another unit; the kill was shown within one unit. On a temporary branch each of the
+> amendment's seven mutations (reconciliation skipped, the boot ignored, a
+> foreign group name and a `..` parent accepted, the quarantine not written
+> or not read, the input kept) was killed by its case, and the three
+> unmutated baselines passed (runs 43481478492 and 43482877269; the first
+> run's persisted cases were redone after a filter in the branch's script
+> had skipped their routing change).
 
 ## Context
 
