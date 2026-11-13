@@ -383,6 +383,7 @@ done
 sudo "$PREPARE" routing-counter-pipe
 for ((tries = 0; tries < 600; tries++)); do
   [[ -e "$markers/first" ]] && break
+  kill -0 "$change_pid" 2> /dev/null || break
   sleep 0.1
 done
 [[ -e "$markers/first" ]] || fail "the routing change test wrote no first marker within 60 s"

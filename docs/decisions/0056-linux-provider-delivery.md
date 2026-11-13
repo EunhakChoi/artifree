@@ -6,8 +6,9 @@ enforcement job), R02ab (the first launch, only from the job's tests), R02ac
 and R02ad (the syscall mapping, as amended on 2026-11-13; its x32 class
 fails acceptance on the reviewed kernel), R02ae (files, descriptors and
 network, as planned in the second and third amendments of 2026-11-13)
-and R02af (input and output, as planned in the amendment of 2026-11-13 on
-input and output) are implemented**.
+R02af (input and output, as planned in the amendment of 2026-11-13 on
+input and output) and R02ag (crashes, as planned in the amendment of
+2026-11-13 on crashes) are implemented**.
 Roadmap: R02a. Builds on
 [0042](0042-linux-untrusted-execution.md) and
 [0055](0055-operating-background-work.md).
@@ -1141,6 +1142,32 @@ how; where the two could be read differently, 0042 holds.
 > through the input test (the unchecked one already at a direct creation);
 > the keeper dropped early (no output); the handles kept (`Shmem` grew by
 > 65,456 KiB); and collection after a nonzero exit.
+
+> **Note, 2026-11-13 (R02ag).** The crash acceptance of the amendment exists,
+> compiled only into the test build. After the scratch the bootstrap makes
+> `/tmp` its working directory and reads it back. The report keeps the exact
+> routing bytes that admission read, and the attempt compares a fresh read
+> with them at each poll and, once the group was observed gone, after it; a
+> change or a failed read is refused as `Routing`, sets the in-process
+> quarantine and yields no output. A group that was not observed gone keeps
+> `CleanupNotObserved` as its reason, since it is not empty. The keeper keeps
+> the scratch handle, and the plan's test-only listing reaches the test in the
+> evidence, so the crash tests require an attempt that yields evidence. The
+> listener's socket lies in the preparation's root-only directory: in v7.0's
+> `net/unix/af_unix.c` the kernel looks a coredump socket up from init's root
+> with its own credentials and checks no write permission, and the trusted
+> crash reached it. The job's part 10 ran on `7.0.0-1017-azure` (run
+> 43435830055): no core in the scratch, both children's core flags clear,
+> SIGSYS for both setters, the pipe, socket and absolute routings refused
+> before any group with both counters at 0 and 1 after the trusted crash, and
+> the change refused as `CoreRoutingChanged`, then as quarantined. The six
+> mutations ran on the temporary branch `mutation/r02ag` (run 43436517883,
+> deleted afterwards and never merged), never in the product, and each
+> failed its test: without the limit guard the scratch held a `core` of
+> 1,175,552 bytes; without the pipe or the socket refusal the attempt ran and
+> its collector received two dumps of about 8.9 MB; without the watch the
+> `linger` attempt exited 0; without the quarantine the second launch ran;
+> and with `prlimit64` allowed as a setter the setter child was not killed.
 
 ## Context
 
