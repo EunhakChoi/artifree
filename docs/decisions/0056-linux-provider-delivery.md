@@ -478,35 +478,52 @@ how; where the two could be read differently, 0042 holds.
 
 > **Amendment, 2026-11-13 (the launcher's `/dev/pts`).** The R02ae
 > implementation's job run (PR #197, before merging) found a path that the
-> second amendment missed. The launcher's init is the first process of the
-> attempt's PID namespace (rule 2) and runs in the launcher's mount
-> namespace, not in the bootstrap's. The payload can open
-> `/proc/1/root/dev/ptmx` and `/proc/1/root/dev/pts/ptmx`: both opened, while
-> `/dev/ptmx` gave `ENOENT`. The bootstrap's over-mount covers only its own
-> mount namespace, so `/dev/pts` was not closed.
+> second amendment of 2026-11-13 missed. The launcher's init is the first
+> process of the attempt's PID namespace (rule 2) and stays in the
+> launcher's mount namespace, not the bootstrap's. The payload opened
+> `/proc/1/root/dev/ptmx` and `/proc/1/root/dev/pts/ptmx`, while
+> `/dev/ptmx` gave `ENOENT`: the bootstrap's over-mount covers only its own
+> mount namespace. So the second amendment's statements that the launch's
+> arguments do not change and that `/dev/pts` is closed do not hold; this
+> amendment replaces them.
 >
-> A temporary branch, deleted afterwards and never merged, measured the fix
-> on `ubuntu-24.04` (kernel 7.0, Bubblewrap 0.9.0). The attempt's
-> arguments also mount an empty tmpfs over `/dev/pts` in the launcher's
+> The temporary branch `probe/r02ae-pts` (commit `0374b1c`, deleted
+> afterwards and never merged) measured the fix on `ubuntu-24.04` (kernel
+> 7.0, Bubblewrap 0.9.0) in workflow run 43370355942. The attempt's
+> arguments mounted an empty tmpfs over `/dev/pts` in the launcher's
 > namespace (`--perms 0555 --size 4096 --tmpfs /dev/pts`, then
 > `--remount-ro /dev/pts`). With that, `/dev/ptmx` and both paths through
-> `/proc/1/root` gave `ENOENT`, and every other job test passed unchanged.
+> `/proc/1/root` gave `ENOENT`. The job tests before it passed unchanged.
+> The proc-dev test then failed only on a defect of its own: its check of
+> the `/dev/pts` listing matched the new lines' names.
 >
-> So R02ae works as follows. The attempt's arguments cover `/dev/pts` as
-> above, and the bootstrap's over-mount and its mount check stay as the
-> second amendment says. The payload also opens both paths through
-> `/proc/1/root`, and the test requires each open to fail. Its mutation:
-> the launcher's cover removed, with the bootstrap's kept, which must fail
-> the test on those opens. The bootstrap's mount namespace starts as a copy
-> of the launcher's, so with the launcher's cover in place the bootstrap's
-> over-mount no longer decides the open of `/dev/ptmx`. Its mutation
-> therefore keeps the provider's mount check and must fail on it: the
-> launcher's tmpfs has no inode bound, so the check refuses it. The
-> arguments test pins the new options. Rule 2 is reworded; nothing else
-> changes.
+> The bootstrap's mount namespace starts as a copy of the launcher's, so the
+> launcher's cover is in both namespaces and the bootstrap's own over-mount
+> adds nothing. So R02ae works as follows:
+>
+> - **The cover.** The attempt's arguments cover `/dev/pts` as above. The
+>   bootstrap no longer mounts over it.
+> - **The check.** The bootstrap's readback and the provider's read of the
+>   mount table require the last `/dev/pts` mount to be the launcher's
+>   cover: a read-only tmpfs of 4 KiB with mode `0555`. Bubblewrap cannot
+>   bound its inodes, and a read-only mount needs no inode bound.
+> - **The test.** The payload also opens both paths through `/proc/1/root`,
+>   and the test requires `ENOENT` for each, as for `/dev/ptmx`.
+> - **The mutations.** First, the launcher's cover removed, which must fail
+>   the mount check. Second, the cover removed with the check bypassed too,
+>   which must fail the test on the opens. The arguments test pins the new
+>   options.
+>
+> The rules, reworded:
 >
 > - **Rule 2.** The fixed argument list also mounts an empty read-only
 >   tmpfs over the minimal `/dev`'s `/dev/pts`.
+> - **Rule 3.** The bootstrap reads the launcher's cover of `/dev/pts` back
+>   with the scratch, and the provider's read of the mount table requires
+>   it. The bootstrap mounts nothing over `/dev/pts`.
+> - **Rule 14.** The R02ae row names the cover, its check, the opens
+>   through `/proc/1/root` and both mutations.
+> - **Rule 17.** The R02ae point is settled by this amendment.
 
 > **Note, 2026-11-12 (R02aa).** The provider's admission and the job
 > `Linux enforcement` exist. On the runner the provider's own code did what
@@ -734,9 +751,9 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
    cleared environment, read-only binds of the tool root and the staged input,
    the mount point of the scratch, a private `/proc` and a minimal `/dev`
    with an empty tmpfs over its `/dev/pts` (the amendment of 2026-11-13, the
-   launcher's `/dev/pts`), the sandbox's root, `/dev` and `/dev/pts` remounted
-   read-only, further user namespaces
-   disabled inside, and the two capabilities the bootstrap needs for the
+   launcher's `/dev/pts`), the sandbox's root, `/dev` and `/dev/pts`
+   remounted read-only, further user namespaces disabled inside, and the two
+   capabilities the bootstrap needs for the
    scratch (`CAP_SYS_ADMIN` and `CAP_SETPCAP`, held in the innermost user
    namespace, which owns none of the launcher's mounts). The launcher keeps its own reaping init
    as the first process of the PID namespace; the payload is never that
@@ -745,9 +762,9 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
    the launcher's direct child, under the launcher's init. In this order it:
    makes its own mount namespace, mounts the scratch there as one tmpfs with
    the flags of 0042, rule 4 and the size and the inode count of 0042, rule 5,
-   mounts an empty read-only tmpfs over `/dev/pts` there (the amendment of
-   2026-11-13, files, descriptors and network), and reads both back from its
-   mount table;
+   and reads it back from its mount table with the launcher's empty
+   read-only tmpfs over `/dev/pts` (the amendments of 2026-11-13, files,
+   descriptors and network, and the launcher's `/dev/pts`);
    sets the soft and hard resource limits of 0042, rule 5 (descriptors, core
    size) and reads them back; drops what the launcher left of capabilities,
    the two of rule 2 among them and the bounding set included, and
@@ -861,16 +878,16 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
     proves and which stay open. No slice runs a payload without the limits,
     the privilege drop and a default-deny filter of rule 3.
 
-| Slice | What it adds                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | 0042                  |
-| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
-| R02aa | The enforcement job with its three parts; the provider's admission: namespaces actually made, controllers written and read back, a group killed and seen empty, the routing policy, the kernel; every refusal of rule 10, for the tool root only a launcher or test-support program that is missing or not a regular executable file (the manifest's refusal is R02ab's). No payload.                                                                                                                                                                                        | 1, 5 (routing), 8     |
-| R02ab | The first launch: the tool root and its manifest, the stub and the handshake, the group's limits, the bootstrap with limits, privilege drop and a default-deny filter, the wall deadline, kill and the empty group, one attempt at a time by a crash-released lock. The fixture only exits.                                                                                                                                                                                                                                                                                  | 3 (tools), 4, 5, 6, 8 |
-| R02ac | The launch as amended on 2026-11-12 (read-only root and `/dev`, the scratch mounted and bounded by the bootstrap and read back by the provider), with its checks: file creation outside the scratch fails, and a launch without a read-only remount, without the inode count or without the provider's read of the mount table fails its test. Resources and cleanup under that launch: fork and thread bomb, memory, scratch bytes and inodes, log flood, hang, CPU; double fork, `setsid`, ignored signals, held pipes, a background writer.                               | 4 (scratch), 5, 6, 8  |
-| R02ad | The public mapping from each system-call restriction to its filter entry, probe, independent observation and mutation, and the descriptor ceiling with its inheritance, setter and guard checks (the real-leak case of an inherited descriptor is R02ae's).                                                                                                                                                                                                                                                                                                                  | 4, 8                  |
-| R02ae | Files, descriptors and network as amended on 2026-11-13: local networking in the fixture profile (with the mapping's network class, its guard mutations and the R02ad mutations run again), real host listeners whose counters do not change during the launch with the attempt's namespace read from outside and a mutation without the network namespace, host canaries and signals with a mutation exposing a host directory, `/proc` and the closed `/dev/pts`, a real descriptor leak refused by the bootstrap, and configuration injection with a live preload canary. | 4, 8                  |
-| R02af | Input staging from a pinned revision's files, and output collection in memory through a directory handle, with the hostile trees.                                                                                                                                                                                                                                                                                                                                                                                                                                            | 3 (input), 7, 8       |
-| R02ag | The crash acceptance: cores under file routing after `fork` and `exec`, the weakened limit, the pipe and socket routes with counters, a routing change that stops admission.                                                                                                                                                                                                                                                                                                                                                                                                 | 5 (cores), 8          |
-| R02ah | The guardian with its own deadline, death of the supervisor at each phase, the attempt registry and quarantine. Renewals run against a stand-in for the store, including one that keeps renewing after its fence is revoked and one that renews for the whole 120 seconds.                                                                                                                                                                                                                                                                                                   | 6, 8                  |
+| Slice | What it adds                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | 0042                  |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------- |
+| R02aa | The enforcement job with its three parts; the provider's admission: namespaces actually made, controllers written and read back, a group killed and seen empty, the routing policy, the kernel; every refusal of rule 10, for the tool root only a launcher or test-support program that is missing or not a regular executable file (the manifest's refusal is R02ab's). No payload.                                                                                                                                                                                                                                                                                                                                                                              | 1, 5 (routing), 8     |
+| R02ab | The first launch: the tool root and its manifest, the stub and the handshake, the group's limits, the bootstrap with limits, privilege drop and a default-deny filter, the wall deadline, kill and the empty group, one attempt at a time by a crash-released lock. The fixture only exits.                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | 3 (tools), 4, 5, 6, 8 |
+| R02ac | The launch as amended on 2026-11-12 (read-only root and `/dev`, the scratch mounted and bounded by the bootstrap and read back by the provider), with its checks: file creation outside the scratch fails, and a launch without a read-only remount, without the inode count or without the provider's read of the mount table fails its test. Resources and cleanup under that launch: fork and thread bomb, memory, scratch bytes and inodes, log flood, hang, CPU; double fork, `setsid`, ignored signals, held pipes, a background writer.                                                                                                                                                                                                                     | 4 (scratch), 5, 6, 8  |
+| R02ad | The public mapping from each system-call restriction to its filter entry, probe, independent observation and mutation, and the descriptor ceiling with its inheritance, setter and guard checks (the real-leak case of an inherited descriptor is R02ae's).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | 4, 8                  |
+| R02ae | Files, descriptors and network as amended on 2026-11-13: local networking in the fixture profile (with the mapping's network class, its guard mutations and the R02ad mutations run again), real host listeners whose counters do not change during the launch with the attempt's namespace read from outside and a mutation without the network namespace, host canaries and signals with a mutation exposing a host directory, `/proc` and the closed `/dev/pts` (the launcher's cover, required by the mount check, with `ENOENT` for `/dev/ptmx` and both paths through `/proc/1/root`, and a mutation without the cover with and without the check), a real descriptor leak refused by the bootstrap, and configuration injection with a live preload canary. | 4, 8                  |
+| R02af | Input staging from a pinned revision's files, and output collection in memory through a directory handle, with the hostile trees.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | 3 (input), 7, 8       |
+| R02ag | The crash acceptance: cores under file routing after `fork` and `exec`, the weakened limit, the pipe and socket routes with counters, a routing change that stops admission.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | 5 (cores), 8          |
+| R02ah | The guardian with its own deadline, death of the supervisor at each phase, the attempt registry and quarantine. Renewals run against a stand-in for the store, including one that keeps renewing after its fence is revoked and one that renews for the whole 120 seconds.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | 6, 8                  |
 
 15. **What R02a leaves to R02b.** R02ab to R02ag launch without the ownership
     record of 0042, rule 6; R02ah adds it. Everything that needs the job store
@@ -911,7 +928,8 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
       kernel. Settled by the amendment of 2026-11-13 (the syscall mapping).
     - R02ae: whether the private `/proc` and the launcher's `/dev/pts` reach
       beyond the attempt (the amendment of 2026-11-12). Settled by the
-      amendment of 2026-11-13 (files, descriptors and network).
+      amendments of 2026-11-13 (files, descriptors and network; the
+      launcher's `/dev/pts`).
     - R02af: how the keeper of 0042, rule 7 holds the scratch until
       collection ends, now that the mount is made inside the sandbox and
       lives in the bootstrap's mount namespace.
