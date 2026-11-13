@@ -617,8 +617,10 @@ fn job_scratch_inodes_are_bounded() -> Result<(), Box<dyn Error>> {
     let line = payload_line(text, "scratch")?;
     assert_eq!(
         field(line, "files")?,
-        "4095",
-        "the scratch must hold exactly 4095 files beside its root: {line}"
+        // 4,096 inodes: the root, the keeper's output root `out` (0056, amendment of 2026-11-13,
+        // input and output) and 4,094 files.
+        "4094",
+        "the scratch must hold exactly 4094 files beside its root and the output root: {line}"
     );
     assert_eq!(
         field(line, "refused")?,

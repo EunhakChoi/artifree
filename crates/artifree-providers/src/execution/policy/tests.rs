@@ -67,6 +67,8 @@ const MEASURED_LIMITS: &[&str] = &[
 /// mount points, options and filesystems are the kernel's values from the runner; the ids and the
 /// root of each line are illustrative. The last line is the launcher's empty read-only tmpfs over
 /// `/dev/pts` (0056 rule 2, as reworded on 2026-11-13), which the `/dev/pts` mount check requires.
+/// The `/input` line is the staged input after the bootstrap's remount (0056 rule 3, as reworded
+/// by the amendment of 2026-11-13, input and output), which the mount check requires too.
 const MEASURED_MOUNTINFO: &[&str] = &[
     "1290 1201 0:110 / / ro,nosuid,nodev,relatime - tmpfs tmpfs rw,uid=1001,gid=1001,inode64",
     "1291 1290 8:1 /opt/artifree/tools/v1 /tools ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
@@ -75,6 +77,7 @@ const MEASURED_MOUNTINFO: &[&str] = &[
     "1294 1290 0:111 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw",
     "1295 1290 0:112 / /dev ro,nosuid,nodev,relatime - tmpfs tmpfs rw,mode=755,uid=1001,gid=1001,inode64",
     "1296 1295 0:113 / /dev/pts rw,nosuid,noexec,relatime - devpts devpts rw,mode=620,ptmxmode=666",
+    "1297 1290 8:1 /home/runner/execution/input /input ro,nosuid,nodev,noexec,relatime - ext4 /dev/root rw,discard",
     "1299 1290 0:115 / /tmp rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,size=131072k,nr_inodes=4096,mode=700,uid=1001,gid=1001,inode64",
     "1300 1296 0:116 / /dev/pts ro,nosuid,nodev,relatime - tmpfs tmpfs rw,size=4k,mode=555,uid=1001,gid=1001,inode64",
 ];

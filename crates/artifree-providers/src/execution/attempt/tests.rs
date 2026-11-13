@@ -18,7 +18,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::DirBuilder;
 use std::os::unix::fs::DirBuilderExt;
 
-/// The attempt's argument list for the root `/opt/t`, exactly as the launch passes it. The launcher makes the scratch's mount point and remounts `/` and `/dev` read-only; the bootstrap mounts the scratch.
+/// The attempt's argument list for the root `/opt/t` and the staged input `/opt/i`, exactly as the launch passes it. The launcher binds the input read-only at `/input` right after the sandbox arguments, makes the scratch's mount point and remounts `/` and `/dev` read-only; the bootstrap mounts the scratch.
 const ATTEMPT_ARGUMENTS: &[&str] = &[
     "--unshare-user",
     "--unshare-pid",
@@ -43,6 +43,9 @@ const ATTEMPT_ARGUMENTS: &[&str] = &[
     "/proc",
     "--dev",
     "/dev",
+    "--ro-bind",
+    "/opt/i",
+    "/input",
     "--cap-add",
     "CAP_SYS_ADMIN",
     "--cap-add",
@@ -137,10 +140,13 @@ fn sample_report() -> HostReport {
 
 #[test]
 fn attempt_arguments_add_the_capabilities_and_leave_the_scratch_to_the_bootstrap() {
-    let arguments = text_arguments(&launcher::attempt_arguments(Path::new("/opt/t")));
+    let arguments = text_arguments(&launcher::attempt_arguments(
+        Path::new("/opt/t"),
+        Path::new("/opt/i"),
+    ));
     assert_eq!(
         arguments, ATTEMPT_ARGUMENTS,
-        "the attempt must make the scratch's mount point, add the two capabilities, remount / and /dev read-only, and then run the fixture's bootstrap mode"
+        "the attempt must bind the input read-only at /input after the sandbox arguments, make the scratch's mount point, add the two capabilities, remount / and /dev read-only, and then run the fixture's bootstrap mode"
     );
 }
 
@@ -237,6 +243,7 @@ fn sample_evidence() -> AttemptEvidence {
                 },
             },
             scratch: ScratchMount {
+                mount_id: 1299,
                 is_tmpfs: true,
                 read_only: false,
                 no_suid_dev_exec: true,
@@ -247,6 +254,7 @@ fn sample_evidence() -> AttemptEvidence {
         },
         filter_sha256: EMPTY_SHA256.to_owned(),
         report: sample_report(),
+        output: Err(OutputRefusal::NotCollected),
     }
 }
 

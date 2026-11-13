@@ -1,4 +1,4 @@
-//! Test-only payload of R02ab to R02ae (decision 0056 rules 4, 12 and 14).
+//! Test-only payload of R02ab to R02af (decision 0056 rules 4, 12 and 14).
 //!
 //! Built by the tests only and shipped in no release archive. The Linux
 //! enforcement job runs it inside the attempt's sandbox; no local run is
@@ -11,12 +11,24 @@
 //! `scratch-bytes`, `scratch-inodes`, `flood`, `hang`, `cpu`, `survivors`,
 //! `survivors-hang`, `probes`, `clone3`, `thread-refusal`,
 //! `descendant-refusal`, `lower`, `descriptors`, `watch`, `network`, `host`,
-//! `proc-dev`, `environment` and `marker`. Each prints fixed
+//! `proc-dev`, `environment`, `marker`, `copy`, `input-write`, `out-socket`,
+//! `out-many`, `out-big-file`, `out-big-total`, `out-bomb`, `out-deep`,
+//! `out-invalid-name`, `out-collision`, `out-extension`, `out-no-entry`,
+//! `out-fail` and `out-plain`. Each prints fixed
 //! lines to stdout, flushed, that the job tests parse. A scenario that cannot
 //! do its work prints the reason to stderr and exits with status 3. An unknown
 //! scenario word exits with status 2. Status 4 means that a call the filter
 //! must refuse returned. The `clone3` scenario replaces the payload with the
 //! probe `ns_clone3`, so its status is the probe's.
+//!
+//! The input and output scenarios (R02af, decision 0056 amendment of
+//! 2026-11-13) read the staged input at `/input` and write the output root
+//! `/tmp/out`, which the keeper makes before the release. Each of them exits
+//! with status 0 after its lines, except `out-fail`: it writes a valid entry
+//! page and then exits with status 3 on purpose, so that the job test sees a
+//! failed attempt that still has output. The `out-*` scenarios make only the
+//! calls that the filter allows, so none of them makes a link, a rename, a
+//! mode change, a device or a mount.
 //!
 //! The scenarios start this binary again with one child role as its only
 //! argument: `hold`, `middle`, `detached`, `ignore`, `descriptors-child` or
@@ -175,6 +187,28 @@ mod linux {
     const MARKER: &str = "/tmp/artifree-marker";
     /// The shared-memory file that the `marker` scenario tries to create. The attempt refuses the creation.
     const SHM_MARKER: &str = "/dev/shm/artifree-marker";
+    /// The staged input's entry page.
+    const INPUT_PAGE: &str = "/input/index.html";
+    /// The staged input as the launcher's own mount namespace shows it, reached through the root of the PID namespace's first process, which runs in that namespace and not in the bootstrap's.
+    const INIT_INPUT: &str = "/proc/1/root/input";
+    /// The output root that the keeper makes before the release.
+    const OUT_DIR: &str = "/tmp/out";
+    /// A valid entry page for the hostile output scenarios.
+    const OUT_PAGE: &[u8] = b"<!doctype html><title>out</title>";
+    /// The marker that `copy` appends to the input page.
+    const COPIED: &[u8] = b"<!-- copied -->";
+    /// The file that `copy` writes in the scratch, so that the scratch's shared memory is large while the payload runs.
+    const COPY_BIG_FILE: &str = "/tmp/big";
+    /// The number of one-mebibyte writes that `copy` makes to `COPY_BIG_FILE`.
+    const COPY_BIG_MIB: usize = 64;
+    /// Five mebibytes, which is the largest file that the package accepts.
+    const FIVE_MIB: usize = 5 * MIB;
+    /// The number of one-byte files that `out-many` adds to its entry page, which makes 257 files: more than the package accepts.
+    const MANY_FILES: usize = 256;
+    /// The number of five-mebibyte files that `out-big-total` adds to its entry page: 30 MiB, which is more than the package's 25 MiB.
+    const BIG_TOTAL_FILES: usize = 6;
+    /// The number of empty directories that `out-bomb` makes directly under the output root, which with the entry page is more than the collection's 2,048 entries.
+    const BOMB_DIRECTORIES: usize = 2_100;
 
     /// Runs the payload for its arguments. None selects the scenario, one selects a child role, and any other count exits with status 2.
     pub(super) fn run(arguments: &[OsString]) -> ExitCode {
@@ -228,6 +262,20 @@ mod linux {
             "proc-dev" => finish(proc_dev()),
             "environment" => finish(environment()),
             "marker" => finish(marker()),
+            "copy" => finish(copy()),
+            "input-write" => finish(input_write()),
+            "out-socket" => finish(out_socket()),
+            "out-many" => finish(out_many()),
+            "out-big-file" => finish(out_big_file()),
+            "out-big-total" => finish(out_big_total()),
+            "out-bomb" => finish(out_bomb()),
+            "out-deep" => finish(out_deep()),
+            "out-invalid-name" => finish(out_named("out-invalid-name", &[".hidden.txt"])),
+            "out-collision" => finish(out_named("out-collision", &["A.txt", "a.txt"])),
+            "out-extension" => finish(out_named("out-extension", &["x.exe"])),
+            "out-no-entry" => finish(out_no_entry()),
+            "out-fail" => out_fail(),
+            "out-plain" => finish(out_plain()),
             other => report(&format!("unknown scenario {other}"), 2),
         }
     }
@@ -926,6 +974,160 @@ mod linux {
             .open(SHM_MARKER)
             .map(drop);
         say(&format!("marker dev-shm {}", outcome_word(shared)))
+    }
+
+    /// Writes `contents` to `name` in the output root, which the keeper makes before the release.
+    fn write_output(name: &str, contents: &[u8]) -> io::Result<()> {
+        fs::write(format!("{OUT_DIR}/{name}"), contents)
+    }
+
+    /// Prints one `input-write` line: the name of the check and its outcome.
+    fn input_line(name: &str, result: io::Result<()>) -> io::Result<()> {
+        say(&format!("input-write {name} {}", outcome_word(result)))
+    }
+
+    /// Creates the file at `path` and fails when it already exists. Returns the outcome of the creation.
+    fn create_new_file(path: &str) -> io::Result<()> {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map(drop)
+    }
+
+    /// Opens the file at `path` for appending and writes nothing. Returns the outcome of the open.
+    fn append_to(path: &str) -> io::Result<()> {
+        OpenOptions::new().append(true).open(path).map(drop)
+    }
+
+    /// Writes the staged input page into the output with the marker appended, adds an asset, then writes 64 MiB to `/tmp/big`.
+    fn copy() -> io::Result<()> {
+        let mut copied = fs::read(INPUT_PAGE)?;
+        copied.extend_from_slice(COPIED);
+        write_output("index.html", &copied)?;
+        fs::create_dir(format!("{OUT_DIR}/assets"))?;
+        write_output("assets/result.txt", b"collected")?;
+        let mut big = File::create(COPY_BIG_FILE)?;
+        let chunk = vec![0x5a_u8; MIB];
+        for _ in 0..COPY_BIG_MIB {
+            big.write_all(&chunk)?;
+        }
+        say("copy done")
+    }
+
+    /// Tries each change to the staged input and prints one line for each. Then prints the `/input` line of the mount table and copies the unchanged input page into the output.
+    fn input_write() -> io::Result<()> {
+        input_line("create", create_new_file("/input/new.txt"))?;
+        input_line("unlink", fs::remove_file(INPUT_PAGE))?;
+        input_line("mkdir", fs::create_dir("/input/d"))?;
+        input_line("append", append_to(INPUT_PAGE))?;
+        input_line(
+            "init-append",
+            append_to(&format!("{INIT_INPUT}/index.html")),
+        )?;
+        input_line(
+            "init-create",
+            create_new_file(&format!("{INIT_INPUT}/new.txt")),
+        )?;
+        input_line(
+            "init-unlink",
+            fs::remove_file(format!("{INIT_INPUT}/index.html")),
+        )?;
+        input_line("init-mkdir", fs::create_dir(format!("{INIT_INPUT}/d")))?;
+        let table = fs::read_to_string("/proc/self/mountinfo")?;
+        let mount = table
+            .lines()
+            .rev()
+            .find(|line| line.split_whitespace().nth(4) == Some("/input"))
+            .unwrap_or("none");
+        say(&format!("input-write mount {mount}"))?;
+        write_output("index.html", &fs::read(INPUT_PAGE)?)?;
+        say("input-write done")
+    }
+
+    /// Writes a valid entry page and binds a Unix socket file named `s.txt` in the output root. The listener stays bound until after the announcement.
+    fn out_socket() -> io::Result<()> {
+        write_output("index.html", OUT_PAGE)?;
+        let listener = UnixListener::bind(format!("{OUT_DIR}/s.txt"))?;
+        let announced = say("out-socket done");
+        drop(listener);
+        announced
+    }
+
+    /// Writes a valid entry page and 256 one-byte files, which makes 257 files with the page.
+    fn out_many() -> io::Result<()> {
+        write_output("index.html", OUT_PAGE)?;
+        for index in 0..MANY_FILES {
+            write_output(&format!("f{index}.txt"), b"x")?;
+        }
+        say("out-many done")
+    }
+
+    /// Writes a valid entry page and one file of 5 MiB plus one byte.
+    fn out_big_file() -> io::Result<()> {
+        write_output("index.html", OUT_PAGE)?;
+        let big = vec![0x5a_u8; FIVE_MIB + 1];
+        write_output("big.txt", &big)?;
+        say("out-big-file done")
+    }
+
+    /// Writes a valid entry page and six files of 5 MiB each, which is 30 MiB in all.
+    fn out_big_total() -> io::Result<()> {
+        write_output("index.html", OUT_PAGE)?;
+        let chunk = vec![0x5a_u8; FIVE_MIB];
+        for index in 0..BIG_TOTAL_FILES {
+            write_output(&format!("b{index}.txt"), &chunk)?;
+        }
+        say("out-big-total done")
+    }
+
+    /// Writes a valid entry page and empty directories directly under the output root, more than the collection's entry bound.
+    fn out_bomb() -> io::Result<()> {
+        write_output("index.html", OUT_PAGE)?;
+        for index in 0..BOMB_DIRECTORIES {
+            fs::create_dir(format!("{OUT_DIR}/d{index}"))?;
+        }
+        say("out-bomb done")
+    }
+
+    /// Writes a valid entry page and eight directories nested one in another, so that the deepest one is below the collection's depth bound.
+    fn out_deep() -> io::Result<()> {
+        write_output("index.html", OUT_PAGE)?;
+        fs::create_dir_all(format!("{OUT_DIR}/d1/d2/d3/d4/d5/d6/d7/d8"))?;
+        say("out-deep done")
+    }
+
+    /// Writes a valid entry page and one file of one byte for each of `names`, then says that `scenario` is done.
+    fn out_named(scenario: &str, names: &[&str]) -> io::Result<()> {
+        write_output("index.html", OUT_PAGE)?;
+        for name in names {
+            write_output(name, b"x")?;
+        }
+        say(&format!("{scenario} done"))
+    }
+
+    /// Writes one file of one byte and no entry page, so that the output has no `index.html`.
+    fn out_no_entry() -> io::Result<()> {
+        write_output("page.txt", b"x")?;
+        say("out-no-entry done")
+    }
+
+    /// Writes a valid entry page and exits with status 3 on purpose, so that the job test sees a failed attempt that still has output. A write error is reported with status 3 too.
+    fn out_fail() -> ExitCode {
+        match write_output("index.html", OUT_PAGE) {
+            Ok(()) => {
+                // The status already says what happened, so a stdout that cannot be written does not change it.
+                drop(say("out-fail done"));
+                ExitCode::from(3)
+            }
+            Err(error) => report(&error, 3),
+        }
+    }
+
+    /// Writes only a valid entry page.
+    fn out_plain() -> io::Result<()> {
+        write_output("index.html", OUT_PAGE)?;
+        say("out-plain done")
     }
 
     /// Starts the `detached` role without waiting for it, so that the child outlives this role.

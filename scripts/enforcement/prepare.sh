@@ -47,7 +47,10 @@ usage: prepare.sh VERB [ARGUMENT]
                       (exit threads processes memory scratch-bytes scratch-inodes
                       flood hang cpu survivors survivors-hang probes clone3
                       thread-refusal descendant-refusal lower descriptors watch
-                      network host proc-dev environment marker)
+                      network host proc-dev environment marker
+                      copy input-write out-socket out-many out-big-file out-big-total
+                      out-bomb out-deep out-invalid-name out-collision out-extension
+                      out-no-entry out-fail out-plain)
   kernel-log          print the last 20 kernel log lines about seccomp (type=1326) or oom
   kernel-log-access   let the runner read the kernel log and lift its rate limit; refuse while an audit daemon runs
 EOF
@@ -344,6 +347,8 @@ is_scenario() {
     exit | threads | processes | memory | scratch-bytes | scratch-inodes | flood | hang | \
       cpu | survivors | survivors-hang | probes | clone3 | thread-refusal | descendant-refusal | \
       lower | descriptors | watch | network | host | proc-dev | environment | marker) return 0 ;;
+    copy | input-write | out-socket | out-many | out-big-file | out-big-total | out-bomb | out-deep | \
+      out-invalid-name | out-collision | out-extension | out-no-entry | out-fail | out-plain) return 0 ;;
     *) return 1 ;;
   esac
 }

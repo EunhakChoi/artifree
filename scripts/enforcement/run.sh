@@ -304,6 +304,20 @@ grep -q '^listener\.' "$OUT/environment.txt" || fail "the environment record hol
 grep -q '^canary\.' "$OUT/environment.txt" || fail "the environment record holds no canary observation"
 sudo "$PREPARE" scenario exit
 
+say "part 9: input and output"
+# R02af (decision 0056, amendment of 2026-11-13): the staged input, the keeper and collection.
+run_in_scenario "$lib_binary" io_tests copy io-copy job_input_becomes_the_expected_output "${record_option[@]}"
+run_in_scenario "$lib_binary" io_tests input-write io-input-write job_the_input_cannot_be_changed "${record_option[@]}"
+# One test per hostile output: each names its refusal reason, and its scenario holds one hostile feature.
+for scenario in out-socket out-many out-big-file out-big-total out-bomb out-deep out-invalid-name \
+  out-collision out-extension out-no-entry; do
+  run_in_scenario "$lib_binary" io_tests "$scenario" "io-$scenario" "job_output_${scenario//-/_}_is_refused" "${record_option[@]}"
+done
+run_in_scenario "$lib_binary" io_tests out-plain io-planted job_planted_entries_are_refused "${record_option[@]}"
+run_in_scenario "$lib_binary" io_tests out-fail io-failed job_a_failed_attempt_is_not_collected "${record_option[@]}"
+run_in_scenario "$lib_binary" io_tests copy io-fresh job_a_fresh_attempt_succeeds_after_a_refused_one "${record_option[@]}"
+sudo "$PREPARE" scenario exit
+
 say "restore the routing and the profile"
 sudo "$PREPARE" routing-pipe
 sudo "$PREPARE" profile-off

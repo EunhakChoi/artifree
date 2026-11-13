@@ -4,9 +4,13 @@
 //!
 //! The checks cover the bootstrap's status, its limits, its seccomp filter count and its mount
 //! table. The mount table holds the scratch tmpfs with its bounds, the read-only root and `/dev`
-//! (the amendment of 2026-11-12, rule 3), and the empty read-only tmpfs over `/dev/pts` (the
-//! amendment of 2026-11-13, rule 3 as reworded). The bootstrap reads its own table back, and the
-//! provider reads the same table of the bootstrap's process independently.
+//! (the amendment of 2026-11-12, rule 3), the empty read-only tmpfs over `/dev/pts` (the
+//! amendment of 2026-11-13, rule 3 as reworded), and the staged input at `/input`, read-only with
+//! `nosuid`, `nodev` and `noexec`, on a tree with no propagation tag (the amendment of
+//! 2026-11-13, input and output). The bootstrap reads its own table back, and the provider reads
+//! the same table of the bootstrap's process independently. `confirm_member`, which exists only in
+//! test builds, is the keeper's re-check that the bootstrap is still a member of the group in
+//! filter mode.
 
 #[cfg(test)]
 use std::fs;
@@ -46,6 +50,10 @@ const DEV_MOUNT: &str = "/dev";
 /// The mount point of the launcher's terminals, which the bootstrap covers with an empty
 /// read-only tmpfs (the amendment of 2026-11-13, rule 3 as reworded).
 const DEV_PTS_MOUNT: &str = "/dev/pts";
+/// The mount point of the staged input, bound read-only by the launcher and remounted with
+/// `nosuid`, `nodev` and `noexec` by the bootstrap (0056 rules 2 and 3, as reworded by the
+/// amendment of 2026-11-13, input and output).
+pub(super) const INPUT_MOUNT: &str = "/input";
 /// The size bound of the launcher's empty tmpfs over `/dev/pts` in the kernel's `size=<n>k` form:
 /// one page, as the attempt's arguments set it with `--size 4096` (0056 rule 2, as reworded by the
 /// amendment of 2026-11-13, the launcher's `/dev/pts`). Bubblewrap cannot bound its inodes, and a
@@ -60,6 +68,8 @@ const FIELD_SCRATCH: &str = "scratch";
 const FIELD_ROOT: &str = "root";
 const FIELD_DEV: &str = "dev";
 const FIELD_DEV_PTS: &str = "dev_pts";
+const FIELD_INPUT: &str = "input";
+const FIELD_PROPAGATION: &str = "propagation";
 const FIELD_MOUNTINFO: &str = "mountinfo";
 
 // Keys of `/proc/<pid>/status`, matched exactly.
@@ -94,6 +104,13 @@ pub(super) enum ReadinessFailure {
     /// its bounds: the cover is missing (0056 rules 2 and 3, as reworded by the amendments of
     /// 2026-11-13).
     DevPts,
+    /// `/input` has no line, or its last line lacks `ro`, `nosuid`, `nodev` or `noexec` (0056 rule
+    /// 3 as reworded by the amendment of 2026-11-13, input and output; 0042 rule 4).
+    Input,
+    /// A mount line carries a propagation tag (an optional field such as `shared:`, `master:`,
+    /// `propagate_from:` or `unbindable`), so the bootstrap's tree is not private (the same
+    /// amendment).
+    Propagation,
 }
 
 impl ReadinessFailure {
@@ -106,6 +123,8 @@ impl ReadinessFailure {
             | Self::Malformed(key)
             | Self::Unexpected(key) => key,
             Self::DevPts => FIELD_DEV_PTS,
+            Self::Input => FIELD_INPUT,
+            Self::Propagation => FIELD_PROPAGATION,
         }
     }
 }
@@ -218,6 +237,9 @@ pub(super) fn confirm_limits(facts: &LimitFacts) -> Result<(), ReadinessFailure>
 /// fields are read for the scratch mount; for the root and `/dev`, only `read_only` is read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ScratchMount {
+    /// The mount id, the line's first field. The keeper compares it with the mount id that
+    /// `statx` gives for its descriptor (0056, amendment of 2026-11-13, input and output).
+    pub(super) mount_id: u64,
     /// Whether the filesystem type is `tmpfs`.
     pub(super) is_tmpfs: bool,
     /// Whether the mount options include `ro`.
@@ -248,6 +270,24 @@ pub(super) struct PtsMount {
     pub(super) mode: Option<u32>,
 }
 
+/// The mount flags of the last `/input` line, which the checks require all set (0042 rule 4; 0056
+/// rule 3, as reworded by the amendment of 2026-11-13, input and output).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the four mount flags that 0042 rule 4 and the amendment of 2026-11-13 require on /input, each checked by name"
+)]
+pub(super) struct InputMount {
+    /// Whether the mount options include `ro`.
+    pub(super) read_only: bool,
+    /// Whether the mount options include `nosuid`.
+    pub(super) nosuid: bool,
+    /// Whether the mount options include `nodev`.
+    pub(super) nodev: bool,
+    /// Whether the mount options include `noexec`.
+    pub(super) noexec: bool,
+}
+
 /// The facts of the last `mountinfo` line for each mount point that the checks read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct MountFacts {
@@ -260,25 +300,37 @@ pub(super) struct MountFacts {
     /// The last `/dev/pts` line's facts, or `None` when no line has its mount point. With stacked
     /// mounts the cover is the later line, over the launcher's devpts, so the later one decides.
     pub(super) dev_pts: Option<PtsMount>,
+    /// The last `/input` line's flags, or `None` when no line has its mount point.
+    pub(super) input: Option<InputMount>,
+    /// Whether any line carries a propagation tag.
+    pub(super) propagation_tagged: bool,
 }
 
-/// One `mountinfo` line: its mount point and the facts that the checks read from it.
+/// One `mountinfo` line: its mount point, its mount options, whether it carries a propagation
+/// tag, and the facts that the checks read from it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MountLine<'a> {
     mount_point: &'a str,
+    /// The mount options, which are the line's sixth field.
+    options: &'a str,
+    /// Whether an optional field before the lone `-` names a propagation tag.
+    tagged: bool,
     facts: ScratchMount,
 }
 
 /// Reads the mount points that the checks need from `/proc/<pid>/mountinfo` text.
 ///
-/// Each line has the mount point in its fifth field and the mount options in its sixth. Optional
-/// fields follow, up to a lone `-`, and then the filesystem type, the source and the super
-/// options. A later line covers an earlier one with the same mount point, so the last line for
-/// each mount point decides. Empty lines are skipped.
+/// Each line has the mount id in its first field, the mount point in its fifth and the mount
+/// options in its sixth. Optional fields follow, up to a lone `-`; any of them is a propagation
+/// tag (`shared:`, `master:`, `propagate_from:` or `unbindable`), and one sets
+/// `propagation_tagged`. Then come the filesystem type, the source and the super options. A later
+/// line covers an earlier one with the same mount point, so the last line for each mount point
+/// decides. Empty lines are skipped.
 ///
 /// # Errors
 /// Returns `Malformed` for the `mountinfo` field when the text fills `PROC_FILE_BYTES`, or when
-/// any line lacks the fields above. A mount point without a line is `None`, not an error.
+/// any line lacks the fields above or has a mount id that is not decimal. A mount point without a
+/// line is `None`, not an error.
 pub(super) fn parse_mounts(text: &str) -> Result<MountFacts, ReadinessFailure> {
     if text.len() >= PROC_FILE_BYTES {
         return Err(ReadinessFailure::Malformed(FIELD_MOUNTINFO));
@@ -297,19 +349,26 @@ pub(super) fn parse_mounts(text: &str) -> Result<MountFacts, ReadinessFailure> {
             size_kib: line.facts.size_kib,
             mode: line.facts.mode,
         }),
+        input: last_mount(&lines, INPUT_MOUNT).map(|line| input_mount(line.options)),
+        propagation_tagged: lines.iter().any(|line| line.tagged),
     })
 }
 
 /// Checks the mount table that the bootstrap set up (the amendment of 2026-11-12, rules 2 and
 /// 3): a scratch tmpfs with `nosuid`, `nodev` and `noexec` (decision 0042 rule 4) that is not
 /// read-only, owner-only, with the size and inode bounds of decision 0042 rule 5, a read-only
-/// root and `/dev`, and `/dev/pts` covered by the launcher's empty read-only tmpfs of 4 KiB with mode
-/// 555 (rules 2 and 3, as reworded by the amendments of 2026-11-13).
+/// root and `/dev`, and `/dev/pts` covered by the launcher's empty read-only tmpfs of 4 KiB with
+/// mode 555 (rules 2 and 3, as reworded by the amendments of 2026-11-13). It also requires `/input`
+/// to be read-only with `nosuid`, `nodev` and `noexec`, and no line to carry a propagation tag
+/// (0056 rule 3, as reworded by the amendment of 2026-11-13, input and output: "its readback, and
+/// the provider's read of the mount table, require these flags and no propagation tag").
 ///
 /// # Errors
 /// Returns `Missing` for the scratch, root or `/dev` without a line, and `Unexpected` for the first
 /// of them that differs. `DevPts` refuses `/dev/pts` when its last line is not the launcher's empty
-/// read-only tmpfs with those bounds. The checks run in the order scratch, root, `/dev`, `/dev/pts`.
+/// read-only tmpfs with those bounds. `Input` refuses `/input` without a line, or whose last line
+/// lacks one of the four flags, and `Propagation` refuses any line with a propagation tag. The
+/// checks run in the order scratch, root, `/dev`, `/dev/pts`, `/input`, propagation.
 pub(super) fn confirm_mounts(facts: &MountFacts) -> Result<(), ReadinessFailure> {
     let scratch = facts
         .scratch
@@ -334,6 +393,15 @@ pub(super) fn confirm_mounts(facts: &MountFacts) -> Result<(), ReadinessFailure>
     if !terminals_as_required {
         return Err(ReadinessFailure::DevPts);
     }
+    let input_as_required = facts
+        .input
+        .is_some_and(|input| input.read_only && input.nosuid && input.nodev && input.noexec);
+    if !input_as_required {
+        return Err(ReadinessFailure::Input);
+    }
+    if facts.propagation_tagged {
+        return Err(ReadinessFailure::Propagation);
+    }
     Ok(())
 }
 
@@ -347,14 +415,18 @@ fn confirm_read_only(read_only: Option<bool>, field: &'static str) -> Result<(),
     }
 }
 
-/// Reads one `mountinfo` line into its mount point and facts.
+/// Reads one `mountinfo` line into its mount point, its options, its propagation tag and its facts.
 ///
 /// # Errors
-/// Returns `Malformed` for the `mountinfo` field when the line has no mount point or options, no
-/// lone `-` after them, or not exactly a filesystem type, a source and super options after it.
+/// Returns `Malformed` for the `mountinfo` field when the line has no mount id, mount point or
+/// options, a mount id that is not decimal, no lone `-` after the options, or not exactly a
+/// filesystem type, a source and super options after it.
 fn mount_line(line: &str) -> Result<MountLine<'_>, ReadinessFailure> {
     let malformed = ReadinessFailure::Malformed(FIELD_MOUNTINFO);
     let fields: Vec<&str> = line.split_whitespace().collect();
+    let Some(&id) = fields.first() else {
+        return Err(malformed);
+    };
     let (Some(&mount_point), Some(&options)) = (fields.get(4), fields.get(5)) else {
         return Err(malformed);
     };
@@ -367,11 +439,16 @@ fn mount_line(line: &str) -> Result<MountLine<'_>, ReadinessFailure> {
         return Err(malformed);
     };
 
-    let has_option = |token: &str| options.split(',').any(|option| option == token);
+    let tagged = optional
+        .get(..separator)
+        .is_some_and(|tags| !tags.is_empty());
     let facts = ScratchMount {
+        mount_id: decimal_value(id, FIELD_MOUNTINFO)?,
         is_tmpfs: fs_type == "tmpfs",
-        read_only: has_option("ro"),
-        no_suid_dev_exec: has_option("nosuid") && has_option("nodev") && has_option("noexec"),
+        read_only: has_option(options, "ro"),
+        no_suid_dev_exec: has_option(options, "nosuid")
+            && has_option(options, "nodev")
+            && has_option(options, "noexec"),
         size_kib: last_option(super_options, "size=")
             .and_then(|value| value.strip_suffix('k'))
             .and_then(|digits| decimal_value(digits, FIELD_MOUNTINFO).ok()),
@@ -380,7 +457,27 @@ fn mount_line(line: &str) -> Result<MountLine<'_>, ReadinessFailure> {
         mode: last_option(super_options, "mode=")
             .and_then(|digits| u32::from_str_radix(digits, 8).ok()),
     };
-    Ok(MountLine { mount_point, facts })
+    Ok(MountLine {
+        mount_point,
+        options,
+        tagged,
+        facts,
+    })
+}
+
+/// Whether the comma-separated mount `options` include `token` as a whole option.
+fn has_option(options: &str, token: &str) -> bool {
+    options.split(',').any(|option| option == token)
+}
+
+/// The flags that the checks read from an `/input` line's mount options, each as a whole option.
+fn input_mount(options: &str) -> InputMount {
+    InputMount {
+        read_only: has_option(options, "ro"),
+        nosuid: has_option(options, "nosuid"),
+        nodev: has_option(options, "nodev"),
+        noexec: has_option(options, "noexec"),
+    }
 }
 
 /// The value after the last comma-separated option that starts with `prefix`, such as `size=`.
@@ -601,6 +698,38 @@ pub(super) fn observe_group(
         limits,
         scratch,
     })
+}
+
+/// Reads the attempt group's members again and requires `pid` among them, still in seccomp filter
+/// mode: the keeper's re-check after it opened the scratch (0056, amendment of 2026-11-13, input
+/// and output). A bootstrap that died, or whose pid was reused, fails it, since nothing outside the
+/// attempt can join its group.
+///
+/// # Errors
+/// Returns `Unreadable` for a listing or status that cannot be read or a listing line that is not
+/// a pid, `Membership` when `pid` is not listed or not in filter mode, and `Field` for a malformed
+/// status.
+#[cfg(test)]
+pub(super) fn confirm_member(
+    group: &Path,
+    proc_root: &Path,
+    pid: u32,
+) -> Result<(), ObservationFailure> {
+    let listing = read_proc_text(&group.join("cgroup.procs"))?;
+    let mut listed = false;
+    for line in listing.lines() {
+        let member: u32 = line.parse().map_err(|_| ObservationFailure::Unreadable)?;
+        listed |= member == pid;
+    }
+    if !listed {
+        return Err(ObservationFailure::Membership);
+    }
+    let text = read_proc_text(&member_file(proc_root, pid, "status"))?;
+    let status = parse_status(&text).map_err(ObservationFailure::Field)?;
+    if status.seccomp != SECCOMP_MODE_FILTER {
+        return Err(ObservationFailure::Membership);
+    }
+    Ok(())
 }
 
 /// The `name` file below one process's directory under `proc_root`.
