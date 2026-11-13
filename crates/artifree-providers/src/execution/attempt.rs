@@ -29,6 +29,13 @@
 //! the group is gone. A guardian that is not reaped without a kill leaves the cleanup unobserved.
 //! A reason that the guardian reports refuses the attempt as `Guardian`, after `Routing`. The
 //! plan's test-only switches and pauses serve the job tests of the enforcement job only.
+//!
+//! R02ai (0056 rule 14, amendment of 2026-11-14, the attempt registry) checks the persisted
+//! quarantine before admission, reconciles the registry after it, writes the attempt's record
+//! before the input is staged and names the group by the record's identity. The record is removed
+//! only when the attempt did not quarantine, its group was observed gone and its input removed.
+//! Every quarantine also writes the quarantine file; a file that was not written refuses the
+//! attempt as `QuarantineNotPersisted`, first.
 
 use std::ffi::OsStr;
 use std::fmt;
@@ -38,9 +45,9 @@ use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{self, Child, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -49,11 +56,13 @@ use sha2::{Digest, Sha256};
 
 use super::admission::{self, AdmissionRoots, wait_within};
 use super::bootstrap::{EXEC_FAILED, LAUNCH, READY, RELEASE};
+use super::cgroup;
 use super::collection::{CollectedOutput, CollectionRefusal, ManifestBinding};
 use super::guardian::{self, GuardianReason};
 use super::lock::{AdmissionLock, LockRefusal};
 use super::probe_group::{self, ProbeGroup};
 use super::readiness::{self, GroupObservation};
+use super::registry::{self, HostIdentity, Identity, QuarantineReason, Reconciled, Registry};
 use super::report::HostReport;
 use super::staging::{InputListing, InputRefusal, VerifiedInput};
 use super::usage::{self, GroupUsage};
@@ -98,12 +107,12 @@ const GUARDIAN_MARGIN: Duration = Duration::from_secs(2);
 /// The sleep step of a held pause.
 const HOLD_STEP: Duration = Duration::from_secs(1);
 
-/// Set once a cleanup was not observed, or once the routing changed or could not be read during an
-/// attempt (0056 rule 5, as reworded). The group of a failed cleanup stays in place; launches in
-/// this process are refused.
+/// Set once this process quarantined the provider: a cleanup not observed, a routing change, a
+/// guardian not reaped, or a refusal of reconciliation (0042 rule 6; 0056 rule 5, as reworded by
+/// the amendments of 2026-11-13 and 2026-11-14). Launches in this process are refused. The
+/// persisted quarantine file of the execution directory (`registry::persist_quarantine`) carries it
+/// across restarts. The group of a failed cleanup stays in place.
 static QUARANTINED: AtomicBool = AtomicBool::new(false);
-/// Numbers the attempt groups of this process, so that no two attempts share a name.
-static ATTEMPT_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// The inputs of one launch: the stub's arguments and its two deadlines. After `list_scratch` come
 /// the job's lease, the stand-in store and the guardian's test-only switches (decision 0056,
@@ -198,9 +207,15 @@ pub(super) struct Pause {
 }
 
 /// The phases of one launch at which a test may pause the provider (0056, amendment of
-/// 2026-11-13, the guardian).
+/// 2026-11-13, the guardian, and amendment of 2026-11-14, the attempt registry).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Phase {
+    /// `registered`: the attempt's record is durable; nothing else exists (0056, amendment of
+    /// 2026-11-14).
+    Registered,
+    /// `created`: the input is staged and the group exists; the guardian and the stub do not
+    /// (0056, amendment of 2026-11-14).
+    Created,
     /// `guarded`: the group and the guardian exist, the stub does not.
     Guarded,
     /// `started`: the stub runs, before the readiness report is read.
@@ -218,6 +233,8 @@ impl Phase {
     #[must_use]
     pub(super) fn word(self) -> &'static str {
         match self {
+            Self::Registered => "registered",
+            Self::Created => "created",
             Self::Guarded => "guarded",
             Self::Started => "started",
             Self::Ready => "ready",
@@ -286,6 +303,9 @@ pub(super) enum NotStartedReason {
     /// The guardian could not be started, or it did not write its ready byte within the readiness
     /// deadline (0056, amendment of 2026-11-13, the guardian).
     GuardianNotStarted,
+    /// The attempt's record was not written, or the host identity for it could not be read, before
+    /// any resource existed (0056, amendment of 2026-11-14, the attempt registry).
+    RegistryNotWritten,
 }
 
 /// Why a launch produced no evidence of a run.
@@ -295,8 +315,15 @@ pub(super) enum AttemptFailure {
     Busy,
     /// The admission lock could not be used.
     LockUnusable,
-    /// An earlier cleanup was not observed in this process.
+    /// The provider is quarantined: in this process (a cleanup not observed, a routing change, a
+    /// guardian not reaped, a refusal of reconciliation), or by the quarantine file of the
+    /// execution directory, which exists or cannot be looked up. Operator action is required
+    /// (`operator_text`).
     Quarantined,
+    /// The attempt quarantined the provider, but the quarantine file was not written: the
+    /// quarantine holds in this process only, and a restart would not remember it (0056, amendment
+    /// of 2026-11-14). Operator action is required (`operator_text`).
+    QuarantineNotPersisted,
     /// The host admission refused, with its refusal.
     Refused(AdmissionRefusal),
     /// The fixture filter could not be built for the policy digest.
@@ -321,8 +348,9 @@ pub(super) enum AttemptFailure {
     CleanupNotObserved,
     /// `kernel.core_pattern` changed or could not be read during the attempt, at a poll of the
     /// stub or after the group was empty (0056 rule 5, as reworded by the amendment of
-    /// 2026-11-13, crashes). The group was ended as at the wall deadline, and the provider is
-    /// quarantined in its process; the persisted quarantine is R02ai's.
+    /// 2026-11-13, crashes). The group was ended as at the wall deadline, the provider is
+    /// quarantined in its process, and the quarantine file of the execution directory is written
+    /// (amendment of 2026-11-14).
     Routing(AdmissionRefusal),
     /// A heartbeat did not confirm the lease, with the part that failed. The renewals stopped, and
     /// the group was ended as at the wall deadline (0056, amendment of 2026-11-13, the guardian).
@@ -330,6 +358,18 @@ pub(super) enum AttemptFailure {
     /// The guardian ended the attempt, with its reason, even when the stub's exit was also seen
     /// (0056, amendment of 2026-11-13, the guardian).
     Guardian(GuardianReason),
+}
+
+impl AttemptFailure {
+    /// The operator's text of a quarantine refusal (0056, amendment of 2026-11-14, the attempt
+    /// registry): `Some` for `Quarantined` and `QuarantineNotPersisted`, `None` otherwise.
+    #[must_use]
+    pub(super) fn operator_text(self) -> Option<&'static str> {
+        match self {
+            Self::Quarantined | Self::QuarantineNotPersisted => Some(registry::OPERATOR_TEXT),
+            _ => None,
+        }
+    }
 }
 
 /// Why a launch produced no evidence of a run, with the group's counters when they were read.
@@ -575,6 +615,29 @@ struct Session {
     routing: RoutingWatch,
     /// The guardian, once it reported ready. Every path ends it in `conclude`.
     guardian: Option<GuardianLink>,
+    /// The execution directory whose quarantine file every quarantine of this attempt writes.
+    execution_dir: PathBuf,
+    /// Whether this attempt quarantined the provider, so that its record stays.
+    quarantined: bool,
+    /// Whether a quarantine of this attempt did not write its quarantine file, so the attempt is
+    /// refused as `QuarantineNotPersisted`.
+    persist_failed: bool,
+}
+
+impl Session {
+    /// Quarantines the provider for `reason` (see `quarantine`) and notes it in this attempt.
+    fn enter_quarantine(&mut self, reason: QuarantineReason) {
+        let persisted = quarantine(&self.execution_dir, reason);
+        self.note_quarantine(persisted);
+    }
+
+    /// Notes a quarantine of this attempt, and whether its quarantine file was written.
+    fn note_quarantine(&mut self, persisted: bool) {
+        self.quarantined = true;
+        if !persisted {
+            self.persist_failed = true;
+        }
+    }
 }
 
 /// What the group phase measured before the group was ended.
@@ -622,13 +685,16 @@ fn fixture_input() -> Result<VerifiedInput, InputRefusal> {
     VerifiedInput::verify(package, listing)
 }
 
-/// Runs one attempt: the admission lock, the quarantine check, the whole host admission, the
-/// staging of the input, then the attempt group. The group is always ended and removed, or the
-/// attempt is quarantined (decision 0042 rule 6); `conclude` ends the guardian with it. A refusal
-/// carries the group's counters whenever the group was created, emptied and read.
+/// Runs one attempt: the admission lock, the quarantine check, the whole host admission, the filter
+/// digest and the pid namespace, the reconciliation of the registry, the attempt's record, the
+/// staging of the input, then the attempt group, named by the record's identity (0056 rule 5, as
+/// reworded by the amendment of 2026-11-14). The group is always ended and removed, or the attempt
+/// is quarantined (decision 0042 rule 6); `conclude` ends the guardian with it. A refusal carries
+/// the group's counters whenever the group was created, emptied and read.
 ///
-/// `execution_dir` holds the admission lock and the staging directory `input`. The group is
-/// created beside the admission's `supervisor` child, not in `execution_dir`.
+/// `execution_dir` holds the admission lock, the attempts registry and the staging directory
+/// `input`. The group is created beside the admission's `supervisor` child, not in
+/// `execution_dir`.
 pub(super) fn launch_with(
     plan: &AttemptPlan,
     input: VerifiedInput,
@@ -640,41 +706,27 @@ pub(super) fn launch_with(
     // Held until this function returns, so that no second launch can start meanwhile.
     let _lock = AdmissionLock::acquire(execution_dir)
         .map_err(|refusal| without_usage(lock_failure(refusal)))?;
-    if QUARANTINED.load(Ordering::SeqCst) {
-        return Err(without_usage(AttemptFailure::Quarantined));
-    }
-    let (report, delegated) = admission::admit_for_attempt(InspectionProfile::fixture(), roots)
-        .map_err(|failure| without_usage(AttemptFailure::Refused(failure)))?;
-    let filter_sha256 =
-        policy::policy_sha256().map_err(|_| without_usage(AttemptFailure::PolicyUnavailable))?;
-    let own_pid_namespace =
-        fs::read_link(roots.proc_self.join("ns").join("pid")).map_err(|_| {
-            without_usage(AttemptFailure::Refused(
-                AdmissionRefusal::NamespacesUnavailable,
-            ))
-        })?;
-    // Staged under the admission lock, before any group exists (0056, amendment of 2026-11-13).
+    let (report, delegated) = admit_checked(roots, execution_dir).map_err(without_usage)?;
+    let (filter_sha256, own_pid_namespace) = policy_and_namespace(roots)?;
+    let (registry, identity) =
+        open_record(plan, roots, &delegated, execution_dir).map_err(without_usage)?;
+    // Staged under the admission lock, after the record and before any group exists (0056,
+    // amendment of 2026-11-13).
     let staged = input
         .stage(execution_dir)
         .map_err(|failure| without_usage(AttemptFailure::Input(failure)))?;
     let input_digest = staged.digest();
-    let name = format!(
-        "attempt-{}-{}",
-        process::id(),
-        ATTEMPT_COUNTER.fetch_add(1, Ordering::Relaxed)
-    );
-    let group = match probe_group::create_probe(&delegated, &name) {
-        Ok(group) => group,
-        Err(failure) => {
-            // The attempt is refused already; the removal is best effort.
-            staged.remove().ok();
-            return Err(without_usage(AttemptFailure::Refused(failure)));
-        }
-    };
+    let name = identity.group_name();
+    // A failure drops `staged`, which removes it, best effort. The record stays: the next
+    // reconciliation finds no group under its name and removes the record.
+    let group = probe_group::create_probe(&delegated, &name)
+        .map_err(|failure| without_usage(AttemptFailure::Refused(failure)))?;
     let group_path = delegated.join(&name);
+    pause_at(plan, Phase::Created);
 
     // From here on every path ends the group in `settle`, whatever the group phase returned.
     let mut session = Session {
+        execution_dir: execution_dir.to_path_buf(),
         routing: RoutingWatch::of(&report, roots),
         ..Session::default()
     };
@@ -690,33 +742,41 @@ pub(super) fn launch_with(
     let (settled, guardian_reason) = conclude(group, &group_path, &mut session);
     // Removed after the group is gone, on every path that staged it.
     let removed = staged.remove();
+    // The last routing check runs once the group is empty and before the record is removed, so an
+    // attempt that quarantines keeps its record (0056 rule 5, as reworded by the amendment of
+    // 2026-11-13, crashes; amendment of 2026-11-14).
+    let routing = if settled.cleanup_observed {
+        routing_after(&phase, &mut session)
+    } else {
+        Ok(())
+    };
+    let record_not_removed = release_record(
+        &registry,
+        identity,
+        &mut session,
+        settled.cleanup_observed && removed.is_ok(),
+    );
     let keeper = session.keeper.take();
     let usage = settled.usage;
     let refused = |failure: AttemptFailure| AttemptRefusal { failure, usage };
     let scratch = scratch_listing(plan, keeper.as_ref());
-    // The last routing check runs once the group is empty, before the verdict (0056 rule 5, as
-    // reworded by the amendment of 2026-11-13, crashes). A refusal ends the attempt here, and so
-    // does a reason that the guardian reported, even when the stub's exit was seen (0056, amendment
-    // of 2026-11-13, the guardian). A group that was not observed gone is not empty: `conclude` has
-    // quarantined the provider already, and the verdict names `CleanupNotObserved` first, whatever
-    // a poll saw or the guardian reported.
+    // A quarantine whose file was not written ranks first, because a restart would not remember it
+    // (0056, amendment of 2026-11-14).
+    if session.persist_failed {
+        return Err(refused(AttemptFailure::QuarantineNotPersisted));
+    }
+    // A refusal of the routing ends the attempt here, and so does a reason that the guardian
+    // reported, even when the stub's exit was seen (0056, amendment of 2026-11-13, crashes and the
+    // guardian). A group that was not observed gone is not empty: `conclude` has quarantined the
+    // provider already, and the verdict names `CleanupNotObserved` first, after
+    // `QuarantineNotPersisted`, whatever a poll saw or the guardian reported.
     if settled.cleanup_observed {
-        routing_after(&phase, &session.routing).map_err(refused)?;
+        routing.map_err(refused)?;
         if let Some(reason) = guardian_reason {
             return Err(refused(AttemptFailure::Guardian(reason)));
         }
     }
-    let outcome = Outcome {
-        cleanup_observed: settled.cleanup_observed,
-        output_exceeded: session.exceeded.load(Ordering::SeqCst),
-        phase: phase.as_ref().map(|_| ()).map_err(|failure| *failure),
-        usage,
-        survivors: session.survivors,
-        captures_read: matches!(
-            (&settled.stdout, &settled.stderr),
-            (Some(Ok(_)), Some(Ok(_)))
-        ),
-    };
+    let outcome = outcome_of(&settled, &session, &phase);
     final_verdict(&outcome).map_err(refused)?;
     let (Ok(passed), Some(Ok(stdout)), Some(Ok(stderr)), Some(counters)) =
         (phase, settled.stdout, settled.stderr, usage)
@@ -725,6 +785,9 @@ pub(super) fn launch_with(
     };
     pause_at(plan, Phase::Collecting);
     removed.map_err(|failure| refused(AttemptFailure::Input(failure)))?;
+    if record_not_removed {
+        return Err(refused(AttemptFailure::Quarantined));
+    }
     let binding = manifest_binding(&report, &filter_sha256, input_digest);
     let output = collect_output(keeper, passed.exit, &binding);
     Ok(AttemptEvidence {
@@ -742,6 +805,159 @@ pub(super) fn launch_with(
         output,
         scratch,
     })
+}
+
+/// The quarantine check and the admission under the held lock (0056 rule 5, as reworded by the
+/// amendment of 2026-11-14). A process quarantined in memory, or an execution directory whose
+/// quarantine file exists or cannot be looked up, is refused as `Quarantined` before admission.
+/// The check itself quarantines nothing.
+fn admit_checked(
+    roots: &AdmissionRoots<'_>,
+    execution_dir: &Path,
+) -> Result<(HostReport, PathBuf), AttemptFailure> {
+    if QUARANTINED.load(Ordering::SeqCst) || registry::quarantine_present(execution_dir) {
+        return Err(AttemptFailure::Quarantined);
+    }
+    admission::admit_for_attempt(InspectionProfile::fixture(), roots)
+        .map_err(AttemptFailure::Refused)
+}
+
+/// Reads the filter's digest and the supervisor's pid namespace after admission. A failure of
+/// either refuses the attempt before the registry is touched.
+fn policy_and_namespace(roots: &AdmissionRoots<'_>) -> Result<(String, PathBuf), AttemptRefusal> {
+    let filter_sha256 =
+        policy::policy_sha256().map_err(|_| without_usage(AttemptFailure::PolicyUnavailable))?;
+    let own_pid_namespace =
+        fs::read_link(roots.proc_self.join("ns").join("pid")).map_err(|_| {
+            without_usage(AttemptFailure::Refused(
+                AdmissionRefusal::NamespacesUnavailable,
+            ))
+        })?;
+    Ok((filter_sha256, own_pid_namespace))
+}
+
+/// Reconciles the registry of `execution_dir` after admission (0056, amendment of 2026-11-14) and
+/// returns the host's identity with what reconciliation did. A host identity that cannot be read
+/// refuses as `NotStarted(RegistryNotWritten)` and quarantines nothing. A refusal of
+/// reconciliation quarantines the provider with the reason `registry` and refuses as
+/// `Quarantined`, or as `QuarantineNotPersisted` when the quarantine file was not written.
+fn reconcile_registry(
+    roots: &AdmissionRoots<'_>,
+    execution_dir: &Path,
+) -> Result<(HostIdentity, Vec<Reconciled>), AttemptFailure> {
+    let own_uid = cgroup::own_uid(roots.proc_self).map_err(AttemptFailure::Refused)?;
+    let host = HostIdentity::read(
+        roots.proc_self,
+        Path::new(registry::MACHINE_ID),
+        Path::new(registry::BOOT_ID),
+    )
+    .map_err(|_| AttemptFailure::NotStarted(NotStartedReason::RegistryNotWritten))?;
+    match registry::reconcile(execution_dir, roots.cgroup_mount, own_uid, &host) {
+        Ok(reconciled) => Ok((host, reconciled)),
+        Err(_) => Err(if quarantine(execution_dir, QuarantineReason::Registry) {
+            AttemptFailure::Quarantined
+        } else {
+            AttemptFailure::QuarantineNotPersisted
+        }),
+    }
+}
+
+/// Writes the record of a new attempt before the input is staged and the group made (0056,
+/// amendment of 2026-11-14): a random identity, the host's identity, the delegated group relative
+/// to the cgroup mount and the group name of the identity. Any failure refuses as
+/// `NotStarted(RegistryNotWritten)` before any resource exists.
+fn register(
+    roots: &AdmissionRoots<'_>,
+    delegated: &Path,
+    execution_dir: &Path,
+    host: HostIdentity,
+) -> Result<(Registry, Identity), AttemptFailure> {
+    let not_written = AttemptFailure::NotStarted(NotStartedReason::RegistryNotWritten);
+    let parent = delegated
+        .strip_prefix(roots.cgroup_mount)
+        .ok()
+        .and_then(Path::to_str)
+        .ok_or(not_written)?
+        .to_owned();
+    let identity = Identity::random().map_err(|_| not_written)?;
+    let record = registry::Record {
+        identity,
+        machine: host.machine,
+        boot: host.boot,
+        cgroupns: host.cgroupns,
+        parent,
+        group: identity.group_name(),
+    };
+    let registry = Registry::open(execution_dir).map_err(|_| not_written)?;
+    registry.write(&record).map_err(|_| not_written)?;
+    Ok((registry, identity))
+}
+
+/// Reconciles the registry, writes the attempt's record and then pauses at `registered` (0056,
+/// amendment of 2026-11-14). Returns the registry handle and the record's identity.
+fn open_record(
+    plan: &AttemptPlan,
+    roots: &AdmissionRoots<'_>,
+    delegated: &Path,
+    execution_dir: &Path,
+) -> Result<(Registry, Identity), AttemptFailure> {
+    let (host, _reconciled) = reconcile_registry(roots, execution_dir)?;
+    let (registry, identity) = register(roots, delegated, execution_dir, host)?;
+    pause_at(plan, Phase::Registered);
+    Ok((registry, identity))
+}
+
+/// Removes the attempt's record once the attempt is over (0056, amendment of 2026-11-14): only
+/// when the attempt did not quarantine and `released` says that its group was observed gone and
+/// its staged input removed. A removal that fails quarantines the provider with the reason
+/// `registry` and returns `true`; the caller then refuses as `Quarantined` unless an earlier
+/// refusal applies.
+#[must_use]
+fn release_record(
+    registry: &Registry,
+    identity: Identity,
+    session: &mut Session,
+    released: bool,
+) -> bool {
+    if session.quarantined || !released || registry.remove(identity).is_ok() {
+        return false;
+    }
+    session.enter_quarantine(QuarantineReason::Registry);
+    true
+}
+
+/// The parts of one attempt as plain values for `final_verdict`: the cleanup, the output budget,
+/// the group phase, the counters, the survivor listing and the captures.
+fn outcome_of(
+    settled: &Settled,
+    session: &Session,
+    phase: &Result<Passed, AttemptFailure>,
+) -> Outcome {
+    Outcome {
+        cleanup_observed: settled.cleanup_observed,
+        output_exceeded: session.exceeded.load(Ordering::SeqCst),
+        phase: phase.as_ref().map(|_| ()).map_err(|failure| *failure),
+        usage: settled.usage,
+        survivors: session.survivors,
+        captures_read: matches!(
+            (&settled.stdout, &settled.stderr),
+            (Some(Ok(_)), Some(Ok(_)))
+        ),
+    }
+}
+
+/// Test-only (0056, amendment of 2026-11-14, reconciliation alone): takes the lock, checks the
+/// quarantine, admits and reconciles, and returns what reconciliation did for each record. It
+/// stages no input, makes no group and writes no record.
+#[cfg(test)]
+pub(super) fn reconcile_only(execution_dir: &Path) -> Result<Vec<Reconciled>, AttemptRefusal> {
+    let roots = &admission::production_roots();
+    let _lock = AdmissionLock::acquire(execution_dir)
+        .map_err(|refusal| without_usage(lock_failure(refusal)))?;
+    admit_checked(roots, execution_dir).map_err(without_usage)?;
+    reconcile_registry(roots, execution_dir)
+        .map(|(_, reconciled)| reconciled)
+        .map_err(without_usage)
 }
 
 /// The binding of the output manifest: the profile identity, the SHA-256 of the profile's
@@ -777,18 +993,19 @@ fn collect_output(
 /// The last routing check, once the group is empty (0056 rule 5, as reworded by the amendment of
 /// 2026-11-13, crashes): a change or a failed read ends the group, quarantines the provider in its
 /// process and refuses the attempt. A routing refusal that a poll saw comes first; the check still
-/// runs once more.
+/// runs once more. The quarantine is noted in `session`, and its file is written (amendment of
+/// 2026-11-14).
 fn routing_after(
     phase: &Result<Passed, AttemptFailure>,
-    watch: &RoutingWatch,
+    session: &mut Session,
 ) -> Result<(), AttemptFailure> {
-    let last = watch.check();
+    let last = session.routing.check();
     let refusal = match phase {
         Err(AttemptFailure::Routing(refusal)) => Some(*refusal),
         _ => last.err(),
     };
     if let Some(refusal) = refusal {
-        quarantine();
+        session.enter_quarantine(QuarantineReason::Routing);
         return Err(AttemptFailure::Routing(refusal));
     }
     Ok(())
@@ -816,12 +1033,14 @@ fn lock_failure(refusal: LockRefusal) -> AttemptFailure {
     }
 }
 
-/// Records that a cleanup was not observed, so that later launches in this process are refused
-/// (decision 0042 rule 6), or that the routing changed during an attempt (0056 rule 5, as reworded
-/// by the amendment of 2026-11-13, crashes). The attempt's verdict then names `CleanupNotObserved`
-/// or `Routing`. It lives in this process only; the persisted quarantine is R02ai's.
-fn quarantine() {
+/// Quarantines the provider: sets the in-process flag, so that later launches in this process are
+/// refused (decision 0042 rule 6), and writes the quarantine file of `execution_dir` with `reason`
+/// (0056, amendment of 2026-11-14, the attempt registry). Returns whether the file was written or
+/// already existed; `false` leaves the quarantine in this process only, and a restart would not
+/// remember it.
+fn quarantine(execution_dir: &Path, reason: QuarantineReason) -> bool {
     QUARANTINED.store(true, Ordering::SeqCst);
+    registry::persist_quarantine(execution_dir, reason).is_ok()
 }
 
 /// The group phase: limits, the stub, its placement, the readiness check and release, the wait
@@ -1239,7 +1458,7 @@ fn settle(group: ProbeGroup, group_path: &Path, session: &mut Session) -> Settle
     let cleanup_observed =
         emptied && reaped && readers_finished && probe_group::remove_probe(group).is_ok();
     if !cleanup_observed {
-        quarantine();
+        session.enter_quarantine(QuarantineReason::Cleanup);
     }
     Settled {
         cleanup_observed,
@@ -1334,13 +1553,20 @@ fn start_guardian(
         .readiness_deadline
         .saturating_add(plan.wall_deadline)
         .saturating_add(GUARDIAN_MARGIN);
-    session.guardian = Some(GuardianLink::start(
+    let mut guardian_quarantine = None;
+    let started = GuardianLink::start(
         roots.tool_root,
         name,
         deadline,
         plan.renewal_window(),
         plan.readiness_deadline,
-    )?);
+        &session.execution_dir,
+        &mut guardian_quarantine,
+    );
+    if let Some(persisted) = guardian_quarantine {
+        session.note_quarantine(persisted);
+    }
+    session.guardian = Some(started?);
     Ok(())
 }
 
@@ -1420,7 +1646,7 @@ fn conclude(
     let (report, reaped) = link.finish(within);
     if !reaped {
         settled.cleanup_observed = false;
-        quarantine();
+        session.enter_quarantine(QuarantineReason::Guardian);
     }
     (settled, report.map(|(reason, _emptied)| reason))
 }
@@ -1439,6 +1665,8 @@ mod keeper;
 mod kernel_log;
 #[cfg(test)]
 mod mapping_tests;
+#[cfg(test)]
+mod registry_tests;
 #[cfg(test)]
 mod renewal_tests;
 #[cfg(test)]

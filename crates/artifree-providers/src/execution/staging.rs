@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use super::report::hex;
 
 /// The staging directory's name inside the execution directory.
-const INPUT_DIR: &str = "input";
+pub(super) const INPUT_DIR: &str = "input";
 /// The version tag that starts the listing's canonical text.
 const LISTING_TAG: &str = "artifree-input-listing-v1";
 /// The permission bits of a staged file: read only.
@@ -205,7 +205,7 @@ fn write_tree(path: &Path, package: FilePackage) -> io::Result<()> {
 ///
 /// Returns an error when a directory cannot be opened or made owner-writable, or when the tree
 /// cannot be removed.
-fn remove_tree(path: &Path) -> io::Result<()> {
+pub(super) fn remove_tree(path: &Path) -> io::Result<()> {
     let root = match rustix::fs::open(
         path,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,

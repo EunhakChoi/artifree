@@ -32,6 +32,10 @@ const OUTPUT_ROOT_LINE: &str = "out\tdirectory\t";
 /// The environment variable that names the markers directory. run.sh sets it on the unit, and the
 /// test only reads it.
 const MARKERS_VARIABLE: &str = "ARTIFREE_ROUTING_MARKERS";
+/// The environment variable that names an execution directory that run.sh made and keeps, so that
+/// the quarantine file survives this process (0056, amendment of 2026-11-14). Unset, the test
+/// makes its own. The test only reads it.
+const PERSIST_DIR_VARIABLE: &str = "ARTIFREE_PERSIST_DIR";
 /// The marker that the routing-change test creates once its first launch was refused.
 const FIRST_MARKER: &str = "first";
 /// The marker that run.sh creates once the routing is restored.
@@ -311,7 +315,9 @@ fn wait_for_marker(path: &Path) -> Result<(), Box<dyn Error>> {
 /// as `Quarantined`, even after run.sh restored the routing.
 ///
 /// run.sh starts the linger scenario, changes the routing once the group exists, then waits for
-/// the first marker and restores the routing before it creates the restored marker.
+/// the first marker and restores the routing before it creates the restored marker. When
+/// `ARTIFREE_PERSIST_DIR` names a kept directory, the test uses it, so that the quarantine file
+/// outlives this process.
 #[test]
 #[ignore = "runs only in the Linux enforcement job"]
 fn job_a_routing_change_stops_the_attempt() -> Result<(), Box<dyn Error>> {
@@ -319,7 +325,10 @@ fn job_a_routing_change_stops_the_attempt() -> Result<(), Box<dyn Error>> {
     let markers = PathBuf::from(
         env::var_os(MARKERS_VARIABLE).ok_or("run.sh must set the routing markers variable")?,
     );
-    let dir = ExecutionDir::new("routing-change")?;
+    let dir = match env::var_os(PERSIST_DIR_VARIABLE) {
+        Some(path) => ExecutionDir::existing(PathBuf::from(path))?,
+        None => ExecutionDir::new("routing-change")?,
+    };
     let plan = AttemptPlan::fixture();
     let first = refusal_of(launch(&plan, dir.path()))?;
     assert_eq!(

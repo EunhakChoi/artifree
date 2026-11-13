@@ -116,7 +116,7 @@ run_scenario() {
   run_in_scenario "$1" resource_tests "$2" "$3" "$4"
 }
 
-# death_at PHASE GUARDIAN SCENARIO kills the supervisor of a guardian test at PHASE and checks what it
+# death_at PHASE GUARDIAN SCENARIO [HOLD_DIR] kills the supervisor of a guardian test at PHASE and checks what it
 # leaves (R02ah, decision 0056, amendment of 2026-11-13, the guardian). A test must run the supervisor
 # in a unit with `KillMode=process`, or the service manager does the guardian's work and the test
 # proves nothing. Within 10 s no payload, probe or guardian process may be left. Each attempt group
@@ -124,8 +124,11 @@ run_scenario() {
 # the empty groups of a delegated subtree when the unit stops (measured in the job of #205: at guarded
 # none was left), and the kernel removes only an empty group, so a removed group was empty too. With
 # GUARDIAN=1 and any phase but collecting, the guardian's line must name supervisor-gone with emptied=1. Otherwise no guardian line may appear. The unit is then removed.
+# With HOLD_DIR the supervisor uses that execution directory, which run.sh made and removes, so that a second
+# unit can reconcile it (R02ai). At registered and created no guardian exists.
 death_at() {
   local phase=$1 guardian=$2 scenario=$3
+  local hold_dir=${4:-}
   local unit="artifree-supervisor-$phase-$guardian"
   local markers="$OUT/death-$phase-$guardian"
   local log="$OUT/death-$phase-$guardian.log"
@@ -133,6 +136,8 @@ death_at() {
   local pattern='artifree-execution-payload|/tools/probes/|/tools/v1/probes/|artifree-execution-fixture guardian'
   local unit_pid main tries status=0 populated left
   local -a groups=()
+  local -a hold_option=()
+  if [[ -n $hold_dir ]]; then hold_option=(--setenv="ARTIFREE_HOLD_DIR=$PWD/$hold_dir"); fi
   sudo "$PREPARE" scenario "$scenario"
   rm -rf -- "$markers"
   mkdir -p -- "$markers"
@@ -144,6 +149,7 @@ death_at() {
       --uid="$(id -u)" --gid="$(id -g)" --working-directory="$PWD" \
       --setenv="ARTIFREE_HOLD_PHASE=$phase" --setenv="ARTIFREE_HOLD_GUARDIAN=$guardian" \
       --setenv="ARTIFREE_HOLD_MARKERS=$PWD/$markers" \
+      "${hold_option[@]}" \
       "$lib_binary" --ignored --exact execution::attempt::guardian_tests::job_supervisor_holds_at_its_phase \
       --test-threads=1
   ) > "$log" 2>&1 &
@@ -203,6 +209,40 @@ death_at() {
   wait "$unit_pid" || true
 }
 
+# routing_change LABEL MARKERS [systemd-run option...] runs the routing-change test of R02ag (part 10,
+# decision 0056, amendment of 2026-11-13). The test's linger attempt runs in a unit while this script waits
+# for its attempt group, sets the pipe routing, waits for the test's first marker, restores the file routing
+# and then requires the test to pass. The extra systemd-run options are passed to the unit after the test's own.
+routing_change() {
+  local label=$1 markers=$2 change_pid seen leftover tries
+  shift 2
+  mkdir -p -- "$markers"
+  # The wait below takes the first attempt group it finds, so none may be left from an earlier test.
+  leftover="$(find /sys/fs/cgroup -maxdepth 8 -type d -name 'attempt-*' -print -quit 2> /dev/null || true)"
+  [[ -z $leftover ]] || fail "an attempt group is left before the routing change: $leftover"
+  run_in_scenario "$lib_binary" crash_tests linger "$label" job_a_routing_change_stops_the_attempt -p LimitCORE=1M \
+    --setenv="ARTIFREE_ROUTING_MARKERS=$PWD/$markers" "${record_option[@]}" "$@" &
+  change_pid=$!
+  seen=""
+  for ((tries = 0; tries < 300; tries++)); do
+    seen="$(find /sys/fs/cgroup -maxdepth 8 -type d -name 'attempt-*' -print -quit 2> /dev/null || true)"
+    [[ -n $seen ]] && break
+    kill -0 "$change_pid" 2> /dev/null || break
+    sleep 0.1
+  done
+  [[ -n $seen ]] || fail "no attempt group appeared within 30 s for the routing change"
+  sudo "$PREPARE" routing-counter-pipe
+  for ((tries = 0; tries < 600; tries++)); do
+    [[ -e "$markers/first" ]] && break
+    kill -0 "$change_pid" 2> /dev/null || break
+    sleep 0.1
+  done
+  [[ -e "$markers/first" ]] || fail "the routing change test wrote no first marker within 60 s"
+  sudo "$PREPARE" routing-file
+  touch -- "$markers/restored"
+  wait "$change_pid" || fail "the routing change test failed"
+}
+
 # This script changes the host's crash routing, its AppArmor profiles, /opt, and the kernel
 # log's access and rate limit (`kernel.dmesg_restrict`, `kernel.printk_ratelimit`). It is for
 # the job's disposable runner only (decision 0056 rule 12).
@@ -226,6 +266,7 @@ restore_host() {
     sudo "$PREPARE" tool-missing-off 2> /dev/null || true
     sudo "$PREPARE" manifest-back 2> /dev/null || true
     sudo "$PREPARE" payload-restore 2> /dev/null || true
+    sudo "$PREPARE" decoy-off 2> /dev/null || true
     sudo "$PREPARE" scenario exit 2> /dev/null || true
     sudo "$PREPARE" listener-stop 2> /dev/null || true
     sudo "$PREPARE" profile-off 2> /dev/null || true
@@ -452,32 +493,7 @@ sudo "$PREPARE" routing-absolute
 run_in_scenario "$lib_binary" crash_tests exit crash-absolute job_absolute_routing_is_refused -p LimitCORE=1M "${record_option[@]}"
 sudo "$PREPARE" routing-file
 # A change during an attempt: the test's linger attempt runs while this script sets the pipe routing.
-markers="$OUT/routing-change"
-mkdir -p -- "$markers"
-# The wait below takes the first attempt group it finds, so none may be left from an earlier test.
-leftover="$(find /sys/fs/cgroup -maxdepth 8 -type d -name 'attempt-*' -print -quit 2> /dev/null || true)"
-[[ -z $leftover ]] || fail "an attempt group is left before the routing change: $leftover"
-run_in_scenario "$lib_binary" crash_tests linger crash-change job_a_routing_change_stops_the_attempt -p LimitCORE=1M \
-  --setenv="ARTIFREE_ROUTING_MARKERS=$PWD/$markers" "${record_option[@]}" &
-change_pid=$!
-seen=""
-for ((tries = 0; tries < 300; tries++)); do
-  seen="$(find /sys/fs/cgroup -maxdepth 8 -type d -name 'attempt-*' -print -quit 2> /dev/null || true)"
-  [[ -n $seen ]] && break
-  kill -0 "$change_pid" 2> /dev/null || break
-  sleep 0.1
-done
-[[ -n $seen ]] || fail "no attempt group appeared within 30 s for the routing change"
-sudo "$PREPARE" routing-counter-pipe
-for ((tries = 0; tries < 600; tries++)); do
-  [[ -e "$markers/first" ]] && break
-  kill -0 "$change_pid" 2> /dev/null || break
-  sleep 0.1
-done
-[[ -e "$markers/first" ]] || fail "the routing change test wrote no first marker within 60 s"
-sudo "$PREPARE" routing-file
-touch -- "$markers/restored"
-wait "$change_pid" || fail "the routing change test failed"
+routing_change crash-change "$OUT/routing-change"
 sudo "$PREPARE" listener-stop
 # Rule 13: the environment record must hold both counters before and after the trusted crash.
 for key in core.pipe.before core.pipe.after core.socket.before core.socket.after; do
@@ -501,6 +517,50 @@ death_at running 1 linger
 death_at collecting 1 copy
 # Without the guardian, only the launcher's --die-with-parent ends the payload.
 death_at running 0 linger
+sudo "$PREPARE" scenario exit
+
+say "part 12: the attempt registry"
+# R02ai (decision 0056, amendment of 2026-11-14): the death of the supervisor at registered and created,
+# then reconciliation alone in a second unit with the same execution directory.
+for phase in registered created; do
+  dir="$OUT/registry-$phase"
+  rm -rf -- "$dir"
+  mkdir -m 700 -- "$dir"
+  death_at "$phase" 0 exit "$dir"
+  sudo "$PREPARE" scenario exit
+  run_unit "$lib_binary" "registry-reconcile-$phase" execution::attempt::registry_tests::job_reconcile_after_death -p Delegate=yes \
+    --setenv="ARTIFREE_RECONCILE_DIR=$PWD/$dir" --setenv="ARTIFREE_HOLD_PHASE=$phase"
+  # A staged input is read-only, so it is made writable before the removal.
+  chmod -R u+w -- "$dir"
+  rm -rf -- "$dir"
+done
+run_in_scenario "$lib_binary" registry_tests exit registry-same-boot job_a_same_boot_leftover_is_killed
+run_in_scenario "$lib_binary" registry_tests exit registry-changed-boot job_a_changed_boot_leaves_its_group_alone
+# Each malformed or foreign record quarantines its process, so each case runs in its own unit.
+for case in group-name dotdot machine namespace stray; do
+  run_in_scenario "$lib_binary" registry_tests exit "registry-bad-$case" job_bad_records_quarantine \
+    --setenv="ARTIFREE_BAD_RECORD=$case"
+done
+# A parent owned by root holds a decoy that the record names; it must stay populated and alive.
+decoy_group=attempt-72623859790382856-651345242494996240
+sudo "$PREPARE" decoy-on "$decoy_group"
+run_in_scenario "$lib_binary" registry_tests exit registry-root-parent job_a_root_owned_parent_quarantines \
+  --setenv="ARTIFREE_DECOY_GROUP=$decoy_group"
+decoy="$(sudo "$PREPARE" decoy-check "$decoy_group")"
+printf '%s\n' "$decoy"
+[[ $decoy == 'decoy populated=1 alive=1' ]] || fail "the root-owned decoy was touched: $decoy"
+sudo "$PREPARE" decoy-off
+# The persisted quarantine: the routing change of part 10 in a kept directory, then a second unit.
+persist="$OUT/persist"
+rm -rf -- "$persist"
+mkdir -m 700 -- "$persist"
+sudo "$PREPARE" routing-file
+routing_change registry-routing-change "$OUT/routing-change-persist" --setenv="ARTIFREE_PERSIST_DIR=$PWD/$persist"
+sudo "$PREPARE" scenario exit
+run_unit "$lib_binary" registry-persisted execution::attempt::registry_tests::job_quarantine_is_persisted -p Delegate=yes \
+  --setenv="ARTIFREE_PERSIST_DIR=$PWD/$persist"
+chmod -R u+w -- "$persist"
+rm -rf -- "$persist"
 sudo "$PREPARE" scenario exit
 
 say "restore the routing and the profile"

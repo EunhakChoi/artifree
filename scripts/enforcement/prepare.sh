@@ -26,6 +26,10 @@ readonly COLLECTOR="$COLLECTOR_DIR/collector"
 readonly SOCKET_DIR="$SAVED_DIR"
 readonly SOCKET="$SOCKET_DIR/core.sock"
 readonly LISTENER_UNIT=artifree-core-listener
+# The root-owned parent of the decoy groups and the file that keeps the decoy's pid in the saved
+# directory (decision 0056, amendment of 2026-11-14, the attempt registry).
+readonly DECOY_ROOT=/sys/fs/cgroup/artifree-decoy
+readonly DECOY_PID="$SAVED_DIR/decoy.pid"
 
 usage() {
   cat >&2 <<'EOF'
@@ -71,7 +75,11 @@ usage: prepare.sh VERB [ARGUMENT]
   kernel-log          print the last 20 kernel log lines about seccomp (type=1326) or oom
   kernel-log-access   let the runner read the kernel log and lift its rate limit; refuse while an audit daemon runs
   supervisor-clear UNIT  remove the empty attempt groups directly beneath the supervisor test unit UNIT
-                      (artifree-supervisor-<phase>-<0|1>); a group that is not empty stays and fails the verb
+                      (artifree-supervisor-<phase>-<0|1>, where phase is registered, created, guarded,
+                      started, ready, running or collecting); a group that is not empty stays and fails the verb
+  decoy-on NAME     make the root-owned group artifree-decoy/NAME (attempt-<digits>-<digits>) holding a trusted sleep
+  decoy-check NAME  print decoy populated=<0|1> alive=<0|1>
+  decoy-off         kill and remove every decoy group and artifree-decoy; never fails if absent
 EOF
   exit 2
 }
@@ -504,7 +512,80 @@ supervisor_clear() {
 }
 
 is_supervisor_unit() {
-  [[ $1 =~ ^artifree-supervisor-(guarded|started|ready|running|collecting)-[01]$ ]]
+  [[ $1 =~ ^artifree-supervisor-(registered|created|guarded|started|ready|running|collecting)-[01]$ ]]
+}
+
+is_decoy_name() {
+  [[ $1 =~ ^attempt-[0-9]+-[0-9]+$ ]]
+}
+
+# Decision 0056, amendment of 2026-11-14 (the attempt registry): a parent owned by root, made by the
+# preparation script, holding the decoy. The decoy is a trusted sleep in a group named like an attempt
+# group, so that a reconciliation which followed a record into it would find a live process. The
+# script is not a process group leader, so setsid runs sleep in place and $! is sleep's own pid.
+decoy_on() {
+  local name=$1 pid
+  ensure_saved_dir
+  mkdir -p -- "$DECOY_ROOT"
+  chmod 0755 -- "$DECOY_ROOT"
+  mkdir -- "$DECOY_ROOT/$name"
+  setsid /bin/sleep 600 < /dev/null > /dev/null 2>&1 &
+  pid=$!
+  printf '%s\n' "$pid" > "$DECOY_ROOT/$name/cgroup.procs"
+  grep -qx -- "$pid" "$DECOY_ROOT/$name/cgroup.procs" || fail "the decoy process is not in its group"
+  printf '%s\n' "$pid" > "$DECOY_PID"
+}
+
+# Returns 0 when the decoy group NAME holds no process or has no events file, and 1 when it does.
+# An events file without a populated line fails the verb.
+decoy_empty() {
+  local events="$DECOY_ROOT/$1/cgroup.events" populated
+  [[ -f "$events" ]] || return 0
+  populated="$(awk '$1 == "populated" { print $2 }' "$events")"
+  case "$populated" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) fail "$events names no populated flag" ;;
+  esac
+}
+
+# Prints decoy populated=<0|1> alive=<0|1> for the decoy group NAME: populated from its events file,
+# alive from kill -0 of the pid that decoy-on saved.
+decoy_check() {
+  local name=$1 populated alive=0
+  if decoy_empty "$name"; then
+    populated=0
+  else
+    populated=1
+  fi
+  if [[ -f "$DECOY_PID" ]] && kill -0 "$(cat -- "$DECOY_PID")" 2> /dev/null; then
+    alive=1
+  fi
+  printf 'decoy populated=%s alive=%s\n' "$populated" "$alive"
+}
+
+# Kills every decoy group, waiting up to 5 s for each to empty, then removes the groups, the root
+# and the pid file. Absence of any of them is not a failure.
+decoy_off() {
+  local entry name tries
+  if [[ ! -d "$DECOY_ROOT" ]]; then
+    rm -f -- "$DECOY_PID"
+    return 0
+  fi
+  for entry in "$DECOY_ROOT"/attempt-*; do
+    [[ -e "$entry" ]] || continue
+    name="${entry##*/}"
+    [[ $name =~ ^attempt-[0-9]+-[0-9]+$ && -d "$entry" && ! -L "$entry" ]] || continue
+    printf '1\n' > "$entry/cgroup.kill"
+    for ((tries = 0; tries < 50; tries++)); do
+      decoy_empty "$name" && break
+      sleep 0.1
+    done
+    decoy_empty "$name" || fail "the decoy group $name still has processes after 5 s"
+    rmdir -- "$entry"
+  done
+  rmdir -- "$DECOY_ROOT"
+  rm -f -- "$DECOY_PID"
 }
 
 main() {
@@ -521,6 +602,11 @@ main() {
         usage
       fi
       ;;
+    decoy-on | decoy-check)
+      if (( $# != 2 )) || ! is_decoy_name "$2"; then
+        usage
+      fi
+      ;;
     save-routing | routing-file | routing-pipe | profile-on | profile-off | \
       launcher-away | launcher-back | fixture-away | fixture-back | \
       nomem-slice-on | nomem-slice-off | tool-modify | tool-restore | \
@@ -529,6 +615,7 @@ main() {
       kernel-log | kernel-log-access) (( $# == 1 )) || usage ;;
     counters-install | listener-start | listener-stop | routing-counter-pipe | \
       routing-counter-socket | routing-absolute | counters-show) (( $# == 1 )) || usage ;;
+    decoy-off) (( $# == 1 )) || usage ;;
     *) usage ;;
   esac
   if (( EUID != 0 )); then
@@ -568,6 +655,9 @@ main() {
     kernel-log) kernel_log ;;
     kernel-log-access) kernel_log_access ;;
     supervisor-clear) supervisor_clear "$2" ;;
+    decoy-on) decoy_on "$2" ;;
+    decoy-check) decoy_check "$2" ;;
+    decoy-off) decoy_off ;;
   esac
 }
 

@@ -5,7 +5,9 @@
 //! sets the payload scenario, runs one test by its exact name, and then checks what the attempt
 //! left behind. Locally the tests are only compiled and linted. Each one ends by requiring that no
 //! attempt group remains. `job_supervisor_holds_at_its_phase` is the supervisor that run.sh kills at
-//! a phase; it reads the `ARTIFREE_HOLD_*` variables that run.sh sets and sets none itself.
+//! a phase. It reads the `ARTIFREE_HOLD_*` variables that run.sh sets and sets none itself: part 11
+//! holds it from `guarded` to `collecting`, and part 12 holds it at `registered` and `created` in
+//! the directory that `ARTIFREE_HOLD_DIR` names, which run.sh keeps for a reconciliation unit.
 
 use std::env;
 use std::error::Error;
@@ -51,8 +53,14 @@ const HOLD_PHASE_VARIABLE: &str = "ARTIFREE_HOLD_PHASE";
 const HOLD_GUARDIAN_VARIABLE: &str = "ARTIFREE_HOLD_GUARDIAN";
 /// The variable that names the directory that receives the phase's marker file.
 const HOLD_MARKERS_VARIABLE: &str = "ARTIFREE_HOLD_MARKERS";
-/// Every phase at which a test may hold the supervisor.
-const PHASES: [Phase; 5] = [
+/// The variable that names the execution directory that run.sh made for the held supervisor, so
+/// that a second unit can reconcile it (0056, amendment of 2026-11-14). Unset, the test makes its
+/// own.
+const HOLD_DIR_VARIABLE: &str = "ARTIFREE_HOLD_DIR";
+/// Every phase at which a test may hold the supervisor, in the order that an attempt reaches them.
+const PHASES: [Phase; 7] = [
+    Phase::Registered,
+    Phase::Created,
     Phase::Guarded,
     Phase::Started,
     Phase::Ready,
@@ -352,9 +360,13 @@ fn job_the_fixture_plan_still_yields_its_output() -> Result<(), Box<dyn Error>> 
 }
 
 /// The supervisor that run.sh kills at a phase. It holds at the phase named by
-/// `ARTIFREE_HOLD_PHASE`, with the guardian that `ARTIFREE_HOLD_GUARDIAN` names, and it writes its
-/// marker into `ARTIFREE_HOLD_MARKERS`. A hold does not return, so this test returns only when the
-/// phase is never reached, and then it fails.
+/// `ARTIFREE_HOLD_PHASE` (`registered`, `created`, `guarded`, `started`, `ready`, `running` or
+/// `collecting`), with the guardian that `ARTIFREE_HOLD_GUARDIAN` names, and it writes its marker
+/// into `ARTIFREE_HOLD_MARKERS`. With `ARTIFREE_HOLD_DIR` set, it runs in that execution directory
+/// and leaves it in place; otherwise it makes its own. A supervisor killed at `registered` or
+/// `created` leaves no guardian, whatever the plan's guardian switch, because the guardian starts
+/// only after `created`. A hold does not return, so this test returns only when the phase is never
+/// reached, and then it fails.
 #[test]
 #[ignore = "runs only in the Linux enforcement job"]
 fn job_supervisor_holds_at_its_phase() -> Result<(), Box<dyn Error>> {
@@ -370,7 +382,10 @@ fn job_supervisor_holds_at_its_phase() -> Result<(), Box<dyn Error>> {
         }),
         ..AttemptPlan::fixture()
     };
-    let dir = ExecutionDir::new("supervisor-holds")?;
+    let dir = match env::var_os(HOLD_DIR_VARIABLE) {
+        Some(path) => ExecutionDir::existing(PathBuf::from(path))?,
+        None => ExecutionDir::new("supervisor-holds")?,
+    };
     let outcome = launch(&plan, dir.path());
     Err(format!(
         "the supervisor was never held at {}: {:?}",

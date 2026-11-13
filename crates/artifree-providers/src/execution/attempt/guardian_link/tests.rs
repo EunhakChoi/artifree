@@ -54,6 +54,7 @@ fn silence_is_not_ready_once_the_bound_passes() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn a_guardian_that_cannot_start_refuses_the_attempt() {
+    let mut quarantined = None;
     // No such directory exists, so the spawn of its fixture program fails.
     let outcome = GuardianLink::start(
         Path::new("/nonexistent/artifree-tool-root"),
@@ -61,11 +62,17 @@ fn a_guardian_that_cannot_start_refuses_the_attempt() {
         Duration::from_secs(1),
         Duration::from_secs(1),
         WITHIN,
+        Path::new("/nonexistent/artifree-execution-dir"),
+        &mut quarantined,
     );
     assert_eq!(
         outcome.err(),
         Some(AttemptFailure::NotStarted(
             NotStartedReason::GuardianNotStarted
         ))
+    );
+    assert_eq!(
+        quarantined, None,
+        "a guardian that never spawned quarantines nothing"
     );
 }
