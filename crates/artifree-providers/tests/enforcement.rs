@@ -76,7 +76,6 @@ fn check_report_rule_13(text: &str) -> Result<(), String> {
         ("limit.memory.oom.group", "1"),
         ("limit.cpu.max", "100000 100000"),
         ("limit.pids.max", "64"),
-        ("listener_counters", "not measured in this slice"),
         ("architecture", std::env::consts::ARCH),
     ] {
         expect_report_value(text, key, expected)?;
@@ -92,6 +91,14 @@ fn check_report_rule_13(text: &str) -> Result<(), String> {
     require(
         !text.lines().any(|line| line.starts_with("tool_identity=")),
         "the report must carry no tool_identity line: the tool root is verified by its manifest"
+            .to_owned(),
+    )?;
+    require(
+        !text
+            .lines()
+            .any(|line| line.starts_with("listener_counters=")),
+        "the report must carry no listener_counters line: the isolation tests record the counters \
+         in the environment record"
             .to_owned(),
     )?;
     for key in ["launcher_sha256", "tool_manifest_sha256", "policy_sha256"] {

@@ -173,12 +173,21 @@ const fn control(name: &'static str, number: u32, arguments: &'static [u32], bod
 /// Every probe, grouped by class. Each class is a section heading of
 /// `docs/linux-syscall-mapping.md`.
 #[rustfmt::skip]
-pub(super) const PROBES: [Probe; 94] = [
+pub(super) const PROBES: [Probe; 119] = [
     // Controls: calls the filter must allow.
     control("ok_gettid", 186, &[], Body::Single),
     control("ok_prlimit_query", 302, &[0, 7, 0, 0], Body::Single),
     control("ok_clone_plain", 56, &[17, 0, 0, 0, 0], Body::Single),
     control("ok_fork_child_gettid", 186, &[], Body::ForkedChild),
+    // Local networking that the fixture profile allows (0056, amendment of 2026-11-13, files,
+    // descriptors and network). Descriptor 0 is not a socket, so setsockopt answers ENOTSOCK; the
+    // point is that no record is left.
+    control("ok_socket_inet_stream", 41, &[2, 1, 0], Body::Single),
+    control("ok_socket_inet6_dgram", 41, &[10, 0x0008_0002, 0], Body::Single),
+    control("ok_socket_unix_stream", 41, &[1, 0x801, 0], Body::Single),
+    control("ok_socket_inet_tcp", 41, &[2, 1, 6], Body::Single),
+    control("ok_socket_inet6_udp", 41, &[10, 2, 17], Body::Single),
+    control("ok_setsockopt_reuseaddr", 54, &[0, 1, 2, 0, 0], Body::Single),
 
     // Default denial: numbers that the policy does not name.
     native("default_uname", "default", 63, &[0]),
@@ -307,6 +316,28 @@ pub(super) const PROBES: [Probe; 94] = [
     native("limit_setrlimit", "limits", 160, &[7, 0]),
     // The new-limit pointer is non-null, so the call would set a limit.
     native("limit_prlimit_set", "limits", 302, &[0, 7, 0x40_0000, 0]),
+
+    // Network: socket forms, socket options and message calls outside the local networking that
+    // the fixture profile allows (0056, amendment of 2026-11-13, files, descriptors and network).
+    native("net_socket_netlink", "network", 41, &[16, 2, 0]),
+    native("net_socket_packet", "network", 41, &[17, 3, 0x300]),
+    native("net_socket_raw", "network", 41, &[2, 3, 1]),
+    native("net_socket_inet_seqpacket", "network", 41, &[2, 5, 0]),
+    native("net_socket_unix_seqpacket", "network", 41, &[1, 5, 0]),
+    native("net_socket_inet_sctp", "network", 41, &[2, 1, 132]),
+    native("net_socket_inet6_mptcp", "network", 41, &[10, 1, 262]),
+    native("net_socket_inet_l2tp", "network", 41, &[2, 2, 115]),
+    native("net_socket_unix_protocol", "network", 41, &[1, 1, 1]),
+    native("net_setsockopt_sndbuf", "network", 54, &[0, 1, 7, 0, 0]),
+    native("net_setsockopt_ip_level", "network", 54, &[0, 0, 1, 0, 0]),
+    native("net_accept", "network", 43, &[0, 0, 0]),
+    native("net_sendmsg", "network", 46, &[0, 0, 0]),
+    native("net_recvmsg", "network", 47, &[0, 0, 0]),
+    native("net_getpeername", "network", 52, &[0, 0, 0]),
+    native("net_socketpair", "network", 53, &[1, 1, 0, 0]),
+    native("net_getsockopt", "network", 55, &[0, 0, 0, 0, 0]),
+    native("net_recvmmsg", "network", 299, &[0, 0, 0, 0, 0]),
+    native("net_sendmmsg", "network", 307, &[0, 0, 0, 0]),
 
     // Alternate ABIs: the x32 entries and the i386 entries through `int 0x80`.
     // The x32 class FAILS this host's acceptance (0056, amendment of 2026-11-13): the reviewed

@@ -9,18 +9,24 @@ The public acceptance mapping of decision 0042 (rule 4 and the acceptance sectio
 - **Control (unfiltered).** What the kernel did with the same probe and no filter, measured on the runner (kernel 7.0.0-1017-azure) by a temporary job on 2026-11-13. Most calls fail in the kernel for another reason, which is why only the record counts. _not measured_ marks probes added after that job.
 - **Mutation.** Run by a script on a temporary branch, never in the product: one patch at a time, then the named job test must fail. Every refused call is also allowed alone in turn; the results are attached to the pull request and rerun whenever the filter, this table or the bootstrap's limits change. Rows marked _measured_ were already observed by the planning job; the results of the R02ad run are at the end.
 
-Beyond the probes, the job also proves: a refused call from a payload thread started after `exec` (record of the payload, `unshare`); a `prlimit64` that sets the limit of the payload's own child (record, `prlimit64`); a lower-and-restore of the soft descriptor limit within the hard limit is refused (the setter guard's case); the descriptor ceiling of 256 in the payload and in a child after `exec` (`EMFILE` with the highest descriptor 255); and, read from outside through `/proc`, `NoNewPrivs` 1, seccomp mode 2 with two filters, empty capability sets and both limits in every payload task. The descriptor guard's mutations: the ceiling raised to 512, and the initial limit guard removed so that the runner's own limit is inherited; both must fail the ceiling test. A descriptor inherited above the ceiling is refused by the bootstrap; its proof with a real leak is R02ae's.
+Beyond the probes, the job also proves: a refused call from a payload thread started after `exec` (record of the payload, `unshare`); a `prlimit64` that sets the limit of the payload's own child (record, `prlimit64`); a lower-and-restore of the soft descriptor limit within the hard limit is refused (the setter guard's case); the descriptor ceiling of 256 in the payload and in a child after `exec` (`EMFILE` with the highest descriptor 255); and, read from outside through `/proc`, `NoNewPrivs` 1, seccomp mode 2 with two filters, empty capability sets and both limits in every payload task. The descriptor guard's mutations: the ceiling raised to 512, and the initial limit guard removed so that the runner's own limit is inherited; both must fail the ceiling test. A descriptor inherited above the ceiling is refused by the bootstrap; `job_a_leaked_descriptor_is_refused` proves it with a real leak of a directory, a connection and a pipe (R02ae).
 
 ## controls
 
 Allowed calls in the same launch; each must run, exit on its own with a code and leave no record, and `ok_prlimit_query` must exit 0. The exit codes of the others are a thread or child id, so they cannot tell an allowed call from one answered with an error number; no rule of this filter answers these calls with one.
 
-| Probe                  | Call                     | Entry      | Expected           | Control (unfiltered) | Mutation |
-| ---------------------- | ------------------------ | ---------- | ------------------ | -------------------- | -------- |
-| `ok_gettid`            | gettid                   | x86-64 186 | allowed, no record | succeeded            | —        |
-| `ok_prlimit_query`     | prlimit64, no new limit  | x86-64 302 | allowed, no record | exit 0 (0)           | —        |
-| `ok_clone_plain`       | clone(SIGCHLD)           | x86-64 56  | allowed, no record | succeeded            | —        |
-| `ok_fork_child_gettid` | gettid in a forked child | x86-64 186 | allowed, no record | exit 0 (0)           | —        |
+| Probe                     | Call                                                    | Entry      | Expected                                         | Control (unfiltered) | Mutation |
+| ------------------------- | ------------------------------------------------------- | ---------- | ------------------------------------------------ | -------------------- | -------- |
+| `ok_gettid`               | gettid                                                  | x86-64 186 | allowed, no record                               | succeeded            | —        |
+| `ok_prlimit_query`        | prlimit64, no new limit                                 | x86-64 302 | allowed, no record                               | exit 0 (0)           | —        |
+| `ok_clone_plain`          | clone(SIGCHLD)                                          | x86-64 56  | allowed, no record                               | succeeded            | —        |
+| `ok_fork_child_gettid`    | gettid in a forked child                                | x86-64 186 | allowed, no record                               | exit 0 (0)           | —        |
+| `ok_socket_inet_stream`   | socket(AF_INET, SOCK_STREAM, 0)                         | x86-64 41  | allowed, no record                               | not measured         | —        |
+| `ok_socket_inet6_dgram`   | socket(AF_INET6, SOCK_DGRAM \| SOCK_CLOEXEC, 0)         | x86-64 41  | allowed, no record                               | not measured         | —        |
+| `ok_socket_unix_stream`   | socket(AF_UNIX, SOCK_STREAM \| SOCK_NONBLOCK, 0)        | x86-64 41  | allowed, no record                               | not measured         | —        |
+| `ok_socket_inet_tcp`      | socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)               | x86-64 41  | allowed, no record                               | not measured         | —        |
+| `ok_socket_inet6_udp`     | socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP)               | x86-64 41  | allowed, no record                               | not measured         | —        |
+| `ok_setsockopt_reuseaddr` | setsockopt(0, SOL_SOCKET, SO_REUSEADDR) on a non-socket | x86-64 54  | allowed, no record (the kernel answers ENOTSOCK) | not measured         | —        |
 
 ## default
 
@@ -172,6 +178,32 @@ Resource-limit setters (0042 rule 5: the descriptor and core limits cannot be ch
 | ------------------- | -------------------------- | ---------- | ----------------------------- | -------------------- | -------------------------------------------------- |
 | `limit_setrlimit`   | setrlimit                  | x86-64 160 | record `sig=31 arch=c000003e` | exit 14 (EFAULT)     | allowed alone                                      |
 | `limit_prlimit_set` | prlimit64 with a new limit | x86-64 302 | record `sig=31 arch=c000003e` | exit 22 (EINVAL)     | setter guard removed: EINVAL, no record (measured) |
+
+## network
+
+Sockets outside the forms the fixture profile allows for communication inside the attempt (0042 rule 4; 0056, amendment of 2026-11-13, files, descriptors and network). The profile allows `socket` for `AF_UNIX` stream or datagram with protocol 0, and for `AF_INET` and `AF_INET6` stream with protocol 0 or TCP and datagram with protocol 0 or UDP, the close-on-exec and non-blocking flags included; `setsockopt` only for `SO_REUSEADDR` at the socket level; and `bind`, `listen`, `accept4`, `connect`, `sendto`, `recvfrom`, `getsockname` and `shutdown`. That the attempt's network namespace keeps such sockets inside is proved by `job_the_network_reaches_no_host_listener` with real host listeners, not by this table.
+
+| Probe                       | Call                                         | Entry      | Expected                      | Control (unfiltered) | Mutation                     |
+| --------------------------- | -------------------------------------------- | ---------- | ----------------------------- | -------------------- | ---------------------------- |
+| `net_socket_netlink`        | socket(AF_NETLINK, SOCK_DGRAM, 0)            | x86-64 41  | record `sig=31 arch=c000003e` | not measured         | domain condition removed     |
+| `net_socket_packet`         | socket(AF_PACKET, SOCK_RAW, ETH_P_ALL)       | x86-64 41  | record `sig=31 arch=c000003e` | exit 1 (EPERM)       | domain condition removed     |
+| `net_socket_raw`            | socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)      | x86-64 41  | record `sig=31 arch=c000003e` | exit 1 (EPERM)       | type condition removed       |
+| `net_socket_inet_seqpacket` | socket(AF_INET, SOCK_SEQPACKET, 0)           | x86-64 41  | record `sig=31 arch=c000003e` | not measured         | type condition removed       |
+| `net_socket_unix_seqpacket` | socket(AF_UNIX, SOCK_SEQPACKET, 0)           | x86-64 41  | record `sig=31 arch=c000003e` | not measured         | type condition removed       |
+| `net_socket_inet_sctp`      | socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP)   | x86-64 41  | record `sig=31 arch=c000003e` | not measured         | protocol condition removed   |
+| `net_socket_inet6_mptcp`    | socket(AF_INET6, SOCK_STREAM, IPPROTO_MPTCP) | x86-64 41  | record `sig=31 arch=c000003e` | not measured         | protocol condition removed   |
+| `net_socket_inet_l2tp`      | socket(AF_INET, SOCK_DGRAM, IPPROTO_L2TP)    | x86-64 41  | record `sig=31 arch=c000003e` | not measured         | protocol condition removed   |
+| `net_socket_unix_protocol`  | socket(AF_UNIX, SOCK_STREAM, 1)              | x86-64 41  | record `sig=31 arch=c000003e` | not measured         | protocol condition removed   |
+| `net_setsockopt_sndbuf`     | setsockopt(SOL_SOCKET, SO_SNDBUF)            | x86-64 54  | record `sig=31 arch=c000003e` | not measured         | setsockopt condition removed |
+| `net_setsockopt_ip_level`   | setsockopt at level IPPROTO_IP               | x86-64 54  | record `sig=31 arch=c000003e` | not measured         | setsockopt condition removed |
+| `net_accept`                | accept                                       | x86-64 43  | record `sig=31 arch=c000003e` | not measured         | allowed alone                |
+| `net_sendmsg`               | sendmsg (descriptor passing)                 | x86-64 46  | record `sig=31 arch=c000003e` | not measured         | allowed alone                |
+| `net_recvmsg`               | recvmsg (descriptor passing)                 | x86-64 47  | record `sig=31 arch=c000003e` | not measured         | allowed alone                |
+| `net_getpeername`           | getpeername                                  | x86-64 52  | record `sig=31 arch=c000003e` | not measured         | allowed alone                |
+| `net_socketpair`            | socketpair                                   | x86-64 53  | record `sig=31 arch=c000003e` | not measured         | allowed alone                |
+| `net_getsockopt`            | getsockopt                                   | x86-64 55  | record `sig=31 arch=c000003e` | not measured         | allowed alone                |
+| `net_recvmmsg`              | recvmmsg                                     | x86-64 299 | record `sig=31 arch=c000003e` | not measured         | allowed alone                |
+| `net_sendmmsg`              | sendmmsg                                     | x86-64 307 | record `sig=31 arch=c000003e` | not measured         | allowed alone                |
 
 ## abi
 

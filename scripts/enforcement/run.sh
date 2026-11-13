@@ -62,16 +62,18 @@ run_unit() {
   require_one_passed "$OUT/$label.log"
 }
 
-# run_in_scenario BINARY MODULE SCENARIO LABEL TEST sets the payload scenario, runs one job test
-# of execution::attempt::MODULE in a delegated unit, and then requires that no payload or probe
-# process is left on the host. systemd kills what is left of a unit when the unit stops, so this
-# check shows only that nothing escaped the unit. The evidence that the launch itself left
+# run_in_scenario BINARY MODULE SCENARIO LABEL TEST [systemd-run option...] sets the payload
+# scenario, runs one job test of execution::attempt::MODULE in a delegated unit, and then requires
+# that no payload or probe process is left on the host. The extra systemd-run options are passed
+# to the unit after `-p Delegate=yes`. systemd kills what is left of a unit when the unit stops, so
+# this check shows only that nothing escaped the unit. The evidence that the launch itself left
 # nothing is the job test's own: it lists the attempt groups and scans /proc after the launch
 # returns, while the unit still runs.
 run_in_scenario() {
   local binary=$1 module=$2 scenario=$3 label=$4 name=$5 left status=0
+  shift 5
   sudo "$PREPARE" scenario "$scenario"
-  run_unit "$binary" "$label" "execution::attempt::$module::$name" -p Delegate=yes
+  run_unit "$binary" "$label" "execution::attempt::$module::$name" -p Delegate=yes "$@"
   # pgrep exits 1 when nothing matches; any other status is a failure of the check itself.
   left="$(pgrep -a -f 'artifree-execution-payload|/tools/probes/|/tools/v1/probes/')" || status=$?
   case "$status" in
@@ -267,6 +269,31 @@ run_in_scenario "$lib_binary" mapping_tests descendant-refusal mapping-descendan
 run_in_scenario "$lib_binary" mapping_tests lower mapping-lower job_lowering_the_soft_limit_is_refused
 run_in_scenario "$lib_binary" mapping_tests descriptors mapping-descriptors job_descriptors_stop_at_the_ceiling
 run_in_scenario "$lib_binary" mapping_tests watch mapping-watch job_the_boundary_holds_in_every_task
+sudo "$PREPARE" scenario exit
+
+say "part 8: files, descriptors and network"
+# The job tests append their observations to the environment record, which is an artifact of the
+# job (decision 0056 rule 13). The record is the file that the start of this script writes.
+record_option=(--setenv="ARTIFREE_ENFORCEMENT_RECORD=$PWD/$OUT/environment.txt")
+run_in_scenario "$lib_binary" isolation_tests network isolation-network job_the_network_reaches_no_host_listener "${record_option[@]}"
+run_in_scenario "$lib_binary" isolation_tests host isolation-host job_host_files_and_processes_stay_intact "${record_option[@]}"
+run_in_scenario "$lib_binary" isolation_tests proc-dev isolation-proc-dev job_proc_and_dev_pts_stay_inside "${record_option[@]}"
+run_in_scenario "$lib_binary" isolation_tests environment isolation-leaked-descriptor job_a_leaked_descriptor_is_refused "${record_option[@]}"
+# The injection check (decision 0056, amendment of 2026-11-13): the repository's own preload
+# canary, named in LD_PRELOAD for this unit only, with LD_LIBRARY_PATH and BASH_ENV set too.
+command -v gcc > /dev/null || fail "gcc is missing, so the preload canary of the injection check cannot be built"
+gcc -shared -fPIC -O1 -o "$OUT/preload-canary.so" scripts/enforcement/preload-canary.c
+rm -f -- /tmp/artifree-enforcement-preload.log
+run_in_scenario "$lib_binary" isolation_tests environment isolation-environment job_the_environment_reaches_the_payload_empty \
+  --setenv="LD_PRELOAD=$PWD/$OUT/preload-canary.so" \
+  --setenv=LD_LIBRARY_PATH=/tmp/artifree-injected \
+  --setenv=BASH_ENV=/tmp/artifree-injected.sh \
+  "${record_option[@]}"
+run_in_scenario "$lib_binary" isolation_tests marker isolation-marker job_no_file_outlives_an_attempt
+# Rule 13: the environment record must hold the listener counters and the canaries' observations.
+# A record without them fails the run, so the artifact of the job is never missing them.
+grep -q '^listener\.' "$OUT/environment.txt" || fail "the environment record holds no listener counter"
+grep -q '^canary\.' "$OUT/environment.txt" || fail "the environment record holds no canary observation"
 sudo "$PREPARE" scenario exit
 
 say "restore the routing and the profile"

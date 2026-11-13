@@ -21,6 +21,9 @@ seccompiler.workspace = true
 # The payload example of the enforcement job only; no library code uses it.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 signal-hook.workspace = true
+# `kill(-1, SIGKILL)` for the payload's host scenario, which rustix does not offer (0056,
+# amendment of 2026-11-13). Only test targets enable the feature; the library keeps `sched`.
+nix = { workspace = true, features = ["signal"] }
 
 [lints]
 workspace = true

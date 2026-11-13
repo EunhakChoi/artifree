@@ -126,7 +126,7 @@ fn begins_a_line(text: &str, prefix: &str) -> bool {
 }
 
 /// The first output line that starts with `prefix`.
-fn line_with<'a>(text: &'a str, prefix: &str) -> Result<&'a str, Box<dyn Error>> {
+pub(super) fn line_with<'a>(text: &'a str, prefix: &str) -> Result<&'a str, Box<dyn Error>> {
     text.lines()
         .find(|line| line.starts_with(prefix))
         .ok_or_else(|| format!("the output has no line that starts with `{prefix}`").into())
@@ -271,7 +271,7 @@ fn check_refused_by_kill(
 
 /// Stops the boundary watcher when it is dropped, so that the watcher ends even when the launch
 /// panics.
-struct StopOnDrop<'a>(&'a AtomicBool);
+pub(super) struct StopOnDrop<'a>(pub(super) &'a AtomicBool);
 
 impl Drop for StopOnDrop<'_> {
     fn drop(&mut self) {
@@ -294,7 +294,7 @@ const ESRCH: i32 = 3;
 
 /// Whether a `/proc` read failed because the process or task ended: the file is gone
 /// (`ENOENT`) or the task was reaped between the listing and the read (`ESRCH`).
-fn process_ended(error: &io::Error) -> bool {
+pub(super) fn process_ended(error: &io::Error) -> bool {
     error.kind() == io::ErrorKind::NotFound || error.raw_os_error() == Some(ESRCH)
 }
 

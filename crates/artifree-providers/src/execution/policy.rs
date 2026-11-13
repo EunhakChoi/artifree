@@ -9,8 +9,12 @@
 //!
 //! The allowlist kills the process on any syscall it does not list. `clone` is allowed only when
 //! its flags carry no namespace flag, and `prlimit64` is allowed only as a query, so the payload
-//! cannot raise or lower its limits. On other architectures `fixture_filters` returns
-//! `PolicyError`, and its caller must refuse launch.
+//! cannot raise or lower its limits. `socket` is allowed only for the local forms of the fixture
+//! profile: `AF_UNIX` stream or datagram with protocol 0; `AF_INET` and `AF_INET6` stream with
+//! protocol 0 or TCP, and datagram with protocol 0 or UDP. The close-on-exec and non-blocking
+//! flags may be added to the type. `setsockopt` is allowed only for `SO_REUSEADDR` at the socket
+//! level (decision 0056, amendment of 2026-11-13, "files, descriptors and network"). On other
+//! architectures `fixture_filters` returns `PolicyError`, and its caller must refuse launch.
 
 #[cfg(target_arch = "x86_64")]
 use std::collections::BTreeMap;
@@ -31,7 +35,7 @@ pub(super) struct PolicyError;
 /// The names serve review and the table test; the numbers are what the filter uses. `clone3` is
 /// listed too, so that the refusal's `ENOSYS` is its result and not a kill (see `clone3_refusal`).
 #[cfg(target_arch = "x86_64")]
-pub(super) const ALLOWED: [(&str, i64); 40] = [
+pub(super) const ALLOWED: [(&str, i64); 48] = [
     ("read", 0),
     ("write", 1),
     ("close", 3),
@@ -47,6 +51,17 @@ pub(super) const ALLOWED: [(&str, i64); 40] = [
     ("pread64", 17),
     ("access", 21),
     ("madvise", 28),
+    // The fixture profile allows communication inside the attempt (decision 0056, amendment of
+    // 2026-11-13, "files, descriptors and network"). The attempt's network namespace, not the
+    // filter, keeps it inside. `socket` and `setsockopt` are allowed only in the forms of
+    // `socket_rules` and `setsockopt_rule`, so they are not listed here.
+    ("connect", 42),
+    ("sendto", 44),
+    ("recvfrom", 45),
+    ("shutdown", 48),
+    ("bind", 49),
+    ("listen", 50),
+    ("getsockname", 51),
     ("execve", 59),
     ("exit", 60),
     ("wait4", 61),
@@ -72,6 +87,8 @@ pub(super) const ALLOWED: [(&str, i64); 40] = [
     ("openat", 257),
     ("newfstatat", 262),
     ("set_robust_list", 273),
+    // Local networking, as above.
+    ("accept4", 288),
     ("getrandom", 318),
     ("statx", 332),
     ("rseq", 334),
@@ -90,6 +107,16 @@ pub(super) const CLONE: (&str, i64) = ("clone", 56);
 /// The `clone3` system call. The refusal answers it with `ENOSYS`; it is also in `ALLOWED`.
 #[cfg(target_arch = "x86_64")]
 pub(super) const CLONE3: (&str, i64) = ("clone3", 435);
+
+/// The `socket` system call. It is allowed only for the forms of `SOCKET_FORMS`, so it is not in
+/// `ALLOWED`.
+#[cfg(target_arch = "x86_64")]
+pub(super) const SOCKET: (&str, i64) = ("socket", 41);
+
+/// The `setsockopt` system call. It is allowed only for `SO_REUSEADDR` at the socket level, which
+/// std's `TcpListener::bind` sets, so it is not in `ALLOWED`.
+#[cfg(target_arch = "x86_64")]
+pub(super) const SETSOCKOPT: (&str, i64) = ("setsockopt", 54);
 
 /// The argument index of `prlimit64`'s new-limit pointer. Zero there means the call only reads.
 #[cfg(target_arch = "x86_64")]
@@ -148,6 +175,83 @@ pub(super) const NAMESPACE_FLAGS: u64 = CLONE_NEWTIME
     | CLONE_NEWPID
     | CLONE_NEWNET;
 
+/// `AF_UNIX`: the local (Unix domain) socket family.
+#[cfg(target_arch = "x86_64")]
+const AF_UNIX: u64 = 1;
+
+/// `AF_INET`: the `IPv4` socket family.
+#[cfg(target_arch = "x86_64")]
+const AF_INET: u64 = 2;
+
+/// `AF_INET6`: the IPv6 socket family.
+#[cfg(target_arch = "x86_64")]
+const AF_INET6: u64 = 10;
+
+/// `SOCK_STREAM`: a connection-oriented byte stream.
+#[cfg(target_arch = "x86_64")]
+const SOCK_STREAM: u64 = 1;
+
+/// `SOCK_DGRAM`: a datagram socket.
+#[cfg(target_arch = "x86_64")]
+const SOCK_DGRAM: u64 = 2;
+
+/// `IPPROTO_TCP`: the TCP protocol number.
+#[cfg(target_arch = "x86_64")]
+const IPPROTO_TCP: u64 = 6;
+
+/// `IPPROTO_UDP`: the UDP protocol number.
+#[cfg(target_arch = "x86_64")]
+const IPPROTO_UDP: u64 = 17;
+
+/// The type bits of `socket`'s second argument. `SOCK_CLOEXEC` (0x80000) and `SOCK_NONBLOCK`
+/// (0x800) lie outside the mask, so a type that carries either flag still matches its base type.
+#[cfg(target_arch = "x86_64")]
+const SOCK_TYPE_MASK: u64 = 0xF;
+
+/// `SOL_SOCKET`: the socket level of `setsockopt`.
+#[cfg(target_arch = "x86_64")]
+const SOL_SOCKET: u64 = 1;
+
+/// `SO_REUSEADDR`: the socket option that lets a listener rebind an address in `TIME_WAIT`.
+#[cfg(target_arch = "x86_64")]
+const SO_REUSEADDR: u64 = 2;
+
+/// The argument index of `socket`'s domain.
+#[cfg(target_arch = "x86_64")]
+const SOCKET_DOMAIN_ARGUMENT: u8 = 0;
+
+/// The argument index of `socket`'s type, whose type bits `SOCK_TYPE_MASK` selects.
+#[cfg(target_arch = "x86_64")]
+const SOCKET_TYPE_ARGUMENT: u8 = 1;
+
+/// The argument index of `socket`'s protocol.
+#[cfg(target_arch = "x86_64")]
+const SOCKET_PROTOCOL_ARGUMENT: u8 = 2;
+
+/// The argument index of `setsockopt`'s level.
+#[cfg(target_arch = "x86_64")]
+const SETSOCKOPT_LEVEL_ARGUMENT: u8 = 1;
+
+/// The argument index of `setsockopt`'s option name.
+#[cfg(target_arch = "x86_64")]
+const SETSOCKOPT_OPTION_ARGUMENT: u8 = 2;
+
+/// The `(domain, type, protocol)` forms that `socket` may take (decision 0056, amendment of
+/// 2026-11-13). Keep the order: the compiled program, and so the policy digest, depends on it.
+#[cfg(target_arch = "x86_64")]
+const SOCKET_FORMS: [(u64, u64, u64); 10] = [
+    (AF_UNIX, SOCK_STREAM, 0),
+    (AF_UNIX, SOCK_DGRAM, 0),
+    (AF_INET, SOCK_STREAM, 0),
+    (AF_INET, SOCK_STREAM, IPPROTO_TCP),
+    (AF_INET, SOCK_DGRAM, 0),
+    (AF_INET, SOCK_DGRAM, IPPROTO_UDP),
+    (AF_INET6, SOCK_STREAM, 0),
+    (AF_INET6, SOCK_STREAM, IPPROTO_TCP),
+    (AF_INET6, SOCK_DGRAM, 0),
+    (AF_INET6, SOCK_DGRAM, IPPROTO_UDP),
+];
+
 /// Build the fixture profile's two seccomp programs in installation order: the `clone3` refusal
 /// first, then the allowlist.
 ///
@@ -203,8 +307,8 @@ pub(super) fn allowlist() -> Result<BpfProgram, PolicyError> {
 }
 
 /// The allowlist's rules: every unconditional entry of `ALLOWED` with an empty rule vector, the
-/// query-only rule of `prlimit64`, and the rule of `clone` that admits only calls without a
-/// namespace flag.
+/// query-only rule of `prlimit64`, the rule of `clone` that admits only calls without a namespace
+/// flag, the rule of `socket` with one rule per allowed form, and the rule of `setsockopt`.
 ///
 /// # Errors
 /// Returns `PolicyError` when the compiler rejects a condition or a rule.
@@ -235,7 +339,61 @@ fn allowlist_rules() -> Result<BTreeMap<i64, Vec<SeccompRule>>, PolicyError> {
     .map_err(|_| PolicyError)?;
     let clone_rule = SeccompRule::new(vec![no_namespace_flags]).map_err(|_| PolicyError)?;
     rules.insert(clone_number, vec![clone_rule]);
+    let (_, socket_number) = SOCKET;
+    rules.insert(socket_number, socket_rules()?);
+    let (_, setsockopt_number) = SETSOCKOPT;
+    rules.insert(setsockopt_number, vec![setsockopt_rule()?]);
     Ok(rules)
+}
+
+/// The rules of `socket`: one rule per form in `SOCKET_FORMS`, each matching the domain, the type
+/// under `SOCK_TYPE_MASK`, and the protocol. A call that matches none of them is refused.
+///
+/// # Errors
+/// Returns `PolicyError` when the compiler rejects a condition or a rule.
+#[cfg(target_arch = "x86_64")]
+fn socket_rules() -> Result<Vec<SeccompRule>, PolicyError> {
+    let mut rules = Vec::new();
+    for (domain, kind, protocol) in SOCKET_FORMS {
+        let conditions = vec![
+            dword(SOCKET_DOMAIN_ARGUMENT, SeccompCmpOp::Eq, domain)?,
+            dword(
+                SOCKET_TYPE_ARGUMENT,
+                SeccompCmpOp::MaskedEq(SOCK_TYPE_MASK),
+                kind,
+            )?,
+            dword(SOCKET_PROTOCOL_ARGUMENT, SeccompCmpOp::Eq, protocol)?,
+        ];
+        rules.push(SeccompRule::new(conditions).map_err(|_| PolicyError)?);
+    }
+    Ok(rules)
+}
+
+/// The rule of `setsockopt`: the socket level and the option `SO_REUSEADDR` together.
+///
+/// # Errors
+/// Returns `PolicyError` when the compiler rejects a condition or the rule.
+#[cfg(target_arch = "x86_64")]
+fn setsockopt_rule() -> Result<SeccompRule, PolicyError> {
+    SeccompRule::new(vec![
+        dword(SETSOCKOPT_LEVEL_ARGUMENT, SeccompCmpOp::Eq, SOL_SOCKET)?,
+        dword(SETSOCKOPT_OPTION_ARGUMENT, SeccompCmpOp::Eq, SO_REUSEADDR)?,
+    ])
+    .map_err(|_| PolicyError)
+}
+
+/// One `Dword` condition: the low four bytes of argument `argument` compared with `value`.
+///
+/// # Errors
+/// Returns `PolicyError` when the compiler rejects the condition.
+#[cfg(target_arch = "x86_64")]
+fn dword(
+    argument: u8,
+    operator: SeccompCmpOp,
+    value: u64,
+) -> Result<SeccompCondition, PolicyError> {
+    SeccompCondition::new(argument, SeccompCmpArgLen::Dword, operator, value)
+        .map_err(|_| PolicyError)
 }
 
 /// Compile the rules into a program that kills the process on any syscall without a matching rule.
