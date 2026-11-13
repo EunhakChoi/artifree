@@ -61,6 +61,14 @@ implemented; no untrusted execution outside the enforcement job's tests**. Roadm
 > fixture profile allows local networking inside the attempt, as 0056's
 > amendment of 2026-11-13 says; the network namespace keeps it inside.
 
+> **Note, 2026-11-14 (R02b plan).** [0057](0057-connecting-execution-to-jobs.md)
+> plans R02b in three slices: the store (an untrusted kind `run_profile`
+> whose profiles exist only in a test build, the pinned generation, the
+> attempt table that is also the purge tombstone, cleanup before reclaim and
+> before a terminal state), the worker in its own delegated unit, and the
+> recovery matrix. It changes no rule of this record; R02ba adds the notes
+> that rule 6 asks for to the storage rules it changes.
+
 ## Context and evidence
 
 The existing worker runs only trusted `verify_revision` code and opens SQLite
