@@ -747,14 +747,23 @@ how; where the two could be read differently, 0042 holds.
 > for crashes after `fork` and `exec`, a weakened limit, pipe and socket
 > routes with counters, and a routing change that stops admission. It does
 > not say where a core would land, how the test looks there, or how a change
-> is noticed during an attempt. The runner's kernel is now `7.0.0-1014-aws`.
-> Its upstream source at tag `v7.0` (`fs/coredump.c`, `fs/binfmt_elf.c`) was
-> read, and the temporary branch `probe/r02ag` (deleted afterwards and never
-> merged) measured the rest on `ubuntu-24.04` with shell commands and
-> Bubblewrap 0.9.0 in workflow runs 43400815963 (commit `8fb1312`) and
-> 43400994555 (commit `5838e1c`). No payload of this repository ran. The
+> is noticed during an attempt. Temporary branches `probe/r02ag` and
+> `probe/r02ag-src` (deleted afterwards and never merged) measured this on
+> `ubuntu-24.04` with shell commands, Bubblewrap 0.9.0 and the archive's
+> source packages, in workflow runs 43400815963 (commit `8fb1312`),
+> 43400994555 (commit `5838e1c`), 43403602393 (commit `14ce0e3`) and
+> 43403783210 (commit `eacdf01`). No payload of this repository ran. The
 > shell's `ulimit -c` counts blocks of 512 bytes. The findings:
 >
+> - **The kernel's source.** The hosted runner boots either an `-aws` or an
+>   `-azure` build of Ubuntu's 7.0 kernel; the probes saw `7.0.0-1014-aws`
+>   and `7.0.0-1017-azure` (`Ubuntu 7.0.0-1017.17~24.04.1-azure 7.0.14`).
+>   The source packages of `linux-azure-7.0` (`7.0.0-1017.17~24.04.1`) and
+>   `linux-aws-7.0` (`7.0.0-1017.18~24.04.1`) are in source format 1.0. In
+>   both, `fs/coredump.c` and `fs/binfmt_elf.c` of the original tarball have
+>   the SHA-256 of upstream tag `v7.0`, and Ubuntu's diff, which touches
+>   5,832 files, touches neither. So the code read is the code those kernels
+>   build from these two files.
 > - **File routing.** `coredump_file` skips the dump when the core limit
 >   is below the format's `min_coredump`, which is `ELF_EXEC_PAGESIZE`
 >   (4,096 bytes) for ELF. With `kernel.core_pattern` set to `core`, limits
@@ -774,7 +783,8 @@ how; where the two could be read differently, 0042 holds.
 >   the collector, which read 466,944 bytes and was given the limit 0. The
 >   kernel sets the limit to infinity for the pipe. Only the limit of
 >   exactly one byte, the kernel's guard against a crashing collector,
->   stopped it.
+>   stopped it. A first counter in `/tmp` stayed empty: the kernel's
+>   protection of files in sticky directories refused the collector's write.
 > - **Socket routing.** With `@/tmp/core.sock`, a listener received 475,136
 >   bytes from a crash with limit 0, and the same with a limit of 512 KiB.
 > - **The runner as found.** `kernel.core_pattern` pipes to
@@ -786,106 +796,137 @@ how; where the two could be read differently, 0042 holds.
 > - **A unit's limit.** `systemd-run -p LimitCORE=1M` gave the unit's
 >   process soft and hard limits of 1 MiB; `LimitCORE=0` gave 0.
 >
-> So 0042's admission holds on this kernel: file routing with both limits
+> So 0042's admission holds on these kernels: file routing with both limits
 > at zero writes nothing, while pipe and socket routing receive the memory
 > whatever the limit. R02ag works as follows.
 >
-> - **The crash fixture.** New payload scenarios:
->   - `crash`: the payload prints its own core limits from
->     `/proc/self/limits`, writes 8 MiB of a synthetic pattern into memory,
->     makes the output root its working directory, and forks. The child
->     replaces itself with the payload in a child role (`exec`), prints its
->     limits again, writes 8 MiB of its own and raises `SIGSEGV`. The parent
->     waits, prints the child's signal and the kernel's core flag from the
->     wait status, and then raises `SIGABRT`.
->   - `crash-setter`: the same up to the fork. One child, after `exec`, asks
->     `prlimit64` to set its core limit to 1 MiB. Another asks `prctl` to
->     make it dumpable. The filter kills each with `SIGSYS`, which dumps
+> - **The payload's working directory.** After it mounts the scratch, the
+>   bootstrap makes the scratch root `/tmp` its working directory, and its
+>   readback requires that. The payload inherits it in every scenario. A
+>   core under file routing would land in the scratch, never on the host
+>   and never in the read-only root. The filter is unchanged: `chdir`,
+>   `fchdir` and `getpid` stay refused.
+> - **The crash fixture.** New payload scenarios. The payload learns its own
+>   PID from `/proc/self/stat`, since `getpid` is refused. It starts each
+>   child with the payload in a child role, which forks and `exec`s in one
+>   step. The parent knows the child's PID from that.
+>   - `crash`: the payload prints its core limits from `/proc/self/limits`,
+>     writes 8 MiB of a synthetic pattern into memory and starts a child.
+>     The child prints its limits again, writes 8 MiB of its own and sends
+>     itself `SIGSEGV` twice. Rust's runtime handles `SIGSEGV` to detect
+>     stack overflows; for a signal that is not a fault in a guard page its
+>     handler restores the default action and returns, so the second signal
+>     takes the default action. The parent waits, prints the child's signal
+>     and the kernel's core flag from the wait status, and then sends itself
+>     `SIGABRT`, which the runtime does not handle.
+>   - `crash-setter`: the same up to the children. One child, after `exec`,
+>     asks `prlimit64` to set its core limit to 1 MiB. Another asks `prctl`
+>     to make it dumpable. The filter kills each with `SIGSYS`, which dumps
 >     core when a limit allows it. The parent prints both children's
->     signals and core flags, then raises `SIGSEGV`.
->   - The signals are raised with `kill` on the process itself, since a
->     fault needs `unsafe` code. They take the same dump path as a fault.
->     The payload's working directory is the output root, so a core file
->     under file routing would land where the test looks.
-> - **The test's view.** A test-only step of the plan, like the planted
->   trees of R02af, lists the output root through the keeper after the group
->   is empty and before the keeper is dropped, whatever the verdict. The
->   attempt still yields no output, since its exit status is not 0. The
->   step reads names, types and sizes only.
-> - **Routing during the attempt.** The provider reads `kernel.core_pattern`
->   again at each poll of the stub, and once more after the group is empty.
->   It compares the value with the one admission read and checks it against
->   the same grammar. On a change, or a value that cannot be read or is no
->   longer admitted:
->   - it ends the group as at the wall deadline;
->   - it quarantines the provider in its process, so every later launch is
->     refused until the process restarts, which is the operator's
->     reconciliation (0042 rule 6);
->   - it yields no output, and refuses the attempt as
->     `CoreRoutingChanged` (or the routing refusal that names the new value).
->     Polling cannot close the interval between a change and a crash in it;
->     0042 already says so, and the operator drains execution before changing
->     the routing.
+>     signals and core flags, then sends itself `SIGSEGV` twice.
+>   - The signals are sent with `kill`, since a fault needs `unsafe` code.
+>     They take the same dump path as a fault. The test requires death by
+>     the named signal from the wait status, so a handler that kept a child
+>     alive fails the test.
+> - **The test's view.** The keeper keeps its handle on the scratch beside
+>   the output root, and drops both when the attempt ends, as R02af's
+>   release of the mount says. A test-only step of the plan, like the
+>   planted trees of R02af, lists the whole scratch through that handle after
+>   the group is empty and before the keeper is dropped, whatever the
+>   verdict. It reads names, types and sizes only, with R02af's resolve
+>   flags and bounds. The attempt still yields no output, since its exit
+>   status is not 0.
+> - **Routing during the attempt.** The provider keeps the exact bytes that
+>   admission read from `kernel.core_pattern` (not the report's text). It
+>   reads the file again at each poll of the stub and once more after the
+>   group is empty. Each read is fresh, so the one-second lifetime of
+>   admission's observation does not apply. A read that fails is
+>   `UnreadableCoreRouting`. Bytes that differ are `CoreRoutingChanged`,
+>   whatever the new value is. In either case:
+>   - the provider ends the group as at the wall deadline;
+>   - it quarantines the provider in its process, so every later launch in
+>     that process is refused;
+>   - the attempt yields no output and is refused with that reason.
+>     The in-process quarantine is not 0042 rule 6's. That one refuses
+>     admission for the data directory across restarts and reports that
+>     operator action is required; it is the persisted quarantine that is
+>     R02ah's, and R02ah takes this refusal into it. Polling cannot close the
+>     interval between a change and a crash in it; 0042 already says so, and
+>     the operator drains execution before changing the routing.
 > - **The counters.** The preparation gains two routings, each with a
->   counter only root can write:
->   - a pipe to a collector of the job's own (`/opt/artifree-enforcement/collector`,
->     root-owned), which adds a line to a count file for each run;
+>   counter in a root-owned directory outside `/tmp`, which only root can
+>   write:
+>   - a pipe to a collector of the job's own
+>     (`/opt/artifree-enforcement/collector`, root-owned), which adds a line
+>     to its count file for each run;
 >   - a socket that a listener started by `run.sh` serves, which adds a line
 >     for each connection.
->     The counters live in a root-owned directory outside `/tmp`, so the
->     kernel's protection of files in sticky directories does not drop their
->     writes, as it did in the first probe run.
 > - **The tests.** These run in the job, in a unit whose core limit is 1 MiB
 >   (`-p LimitCORE=1M`), so a missing guard cannot pass because the parent
 >   already had a limit of zero. Each test first reads its own limit and
 >   requires 1 MiB.
 >   - Crashes: the `crash` and `crash-setter` scenarios under file routing
->     (`core`). The test requires limits of 0 before and after `exec`, the
->     child's line after `exec`, the expected signals with the core flag
->     clear, an output root holding no entry, no new entry under
->     `/var/lib/systemd/coredump`, and cleanup observed.
+>     (`core`). The test checks, in this order: a scratch listing with no
+>     entry but the output root, which is empty; the core flag clear for
+>     every child; no new entry under `/var/lib/systemd/coredump`; the
+>     expected signals; limits of 0 before and after `exec`; the child's
+>     line after `exec`; and cleanup observed. A broken limit guard thus
+>     fails on the core file itself.
 >   - The counters' routes: under each of the pipe and the socket routing,
->     a launch is refused as `PipeCoreRouting` or `SocketCoreRouting` before
->     any group exists, and the counter stays at zero. `run.sh` then makes
->     one trusted crash with limit 0 and requires the counter to be one, so
->     the counter is shown to work, and to receive a dump that a limit of
->     zero did not stop.
+>     a launch with the `crash` scenario is refused as `PipeCoreRouting` or
+>     `SocketCoreRouting` before any group exists, and the counter stays at
+>     zero. With the refusal missing, the payload would crash with limit 0
+>     and the counter would move. `run.sh` then makes one trusted crash with
+>     limit 0 and requires the counter to be one, so the counter is shown
+>     to work, and to receive a dump that a limit of zero did not stop.
 >   - A routing that cannot be admitted: an absolute pattern
 >     (`/var/tmp/core`) is refused as `UnknownCoreRouting` before any group
 >     exists.
 >   - A change: a scenario `linger` sleeps 15 seconds and exits 0. While it
 >     sleeps, `run.sh` sets the pipe routing, once it sees the attempt group.
->     The attempt is refused as `CoreRoutingChanged`, its group is gone, and
->     the next launch in the same process is refused as quarantined. The
->     routing is set back to `core` afterwards.
+>     The attempt is refused as `CoreRoutingChanged` and its group is gone.
+>     The test then writes a marker, `run.sh` sets the routing back to
+>     `core` and answers with another, and the test's second launch in the
+>     same process is refused as quarantined. So the second refusal can come
+>     only from the quarantine.
 >   - An unreadable routing has unit tests through a failing reader. A real
 >     `/proc` entry cannot be made unreadable for the job.
 > - **Unit tests.** These run without the job: the comparison during the
->   attempt (same, changed, unreadable, unknown) through a fake reader, and
->   the parser of the payload's crash lines.
+>   attempt (same, changed, unreadable) through a fake reader, the
+>   bootstrap's working-directory check, and the parser of the payload's
+>   crash lines.
 > - **The mutations.** Each must fail its test in the job:
 >   - The core limit guard removed: the bootstrap neither sets nor checks
 >     the core limit, and the provider's check of it is bypassed. A core
->     appears in the output root and the core flag is set.
->   - The pipe refusal removed. The pipe launch is not refused.
->   - The socket refusal removed. The socket launch is not refused.
+>     appears in the scratch and the core flag is set.
+>   - The pipe refusal removed. The pipe launch is not refused, and the
+>     counter moves.
+>   - The socket refusal removed. The socket launch is not refused, and the
+>     counter moves.
 >   - The check during the attempt removed. The `linger` attempt passes.
->   - The quarantine on a change removed. The next launch is admitted.
+>   - The quarantine on a change removed. The second launch is admitted.
 >   - `prlimit64` allowed as a setter. The setter child is not killed by
 >     `SIGSYS` (its hard limit of zero still refuses the raise).
 >
 > The rules, reworded:
 >
+> - **Rule 3.** After the scratch, the bootstrap makes `/tmp` its working
+>   directory, and its readback requires it.
 > - **Rule 5.** The provider reads the routing again at each poll and after
->   the group is empty. A change ends the group, quarantines the provider
->   and refuses the attempt.
+>   the group is empty. A change or a failed read ends the group,
+>   quarantines the provider in its process and refuses the attempt; the
+>   persisted quarantine stays R02ah's.
 > - **Rule 9.** The preparation also sets the job's pipe and socket
 >   routings with their counters, and an absolute pattern, each taken back
 >   afterwards.
-> - **Rule 14.** The R02ag row names the crash fixture, the counters, the
->   change during an attempt, its tests and its mutations.
+> - **Rule 13.** The environment record also holds the pipe and socket
+>   counters, before and after the trusted crash, and the job fails
+>   without them.
+> - **Rule 14.** The R02ag row names the working directory, the crash
+>   fixture, the counters, the change during an attempt, its tests and its
+>   mutations.
 > - **Rule 17.** The R02ag point is settled by this amendment, for the
->   kernel `7.0.0-1014-aws` that the job now runs on.
+>   `-aws` and `-azure` 7.0 kernels whose source was read.
 
 > **Note, 2026-11-12 (R02aa).** The provider's admission and the job
 > `Linux enforcement` exist. On the runner the provider's own code did what
@@ -1326,7 +1367,7 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
 | R02ad | The public mapping from each system-call restriction to its filter entry, probe, independent observation and mutation, and the descriptor ceiling with its inheritance, setter and guard checks (the real-leak case of an inherited descriptor is R02ae's).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | 4, 8                  |
 | R02ae | Files, descriptors and network as amended on 2026-11-13: local networking in the fixture profile (with the mapping's network class, its guard mutations and the R02ad mutations run again), real host listeners whose counters do not change during the launch with the attempt's namespace read from outside and a mutation without the network namespace, host canaries and signals with a mutation exposing a host directory, `/proc` and the closed `/dev/pts` (the launcher's cover, required by the mount check, with `ENOENT` for `/dev/ptmx` and both paths through `/proc/1/root`, and a mutation without the cover with and without the check), a real descriptor leak refused by the bootstrap, and configuration injection with a live preload canary. | 4, 8                  |
 | R02af | Input and output as amended on 2026-11-13: a pinned input checked against its listing and bound read-only at `/input` from a fresh staging directory; the keeper opened through `/proc` before the release with its mount id checked; collection after a passing verdict, beneath the output root, with the bounds and refusals of the amendment and a bound manifest; the private mount tree with a `noexec` input; payload-made and planted hostile trees, the verdicts, the freed tmpfs, and the ten mutations.                                                                                                                                                                                                                                                 | 3 (input), 7, 8       |
-| R02ag | The crash acceptance as amended on 2026-11-13 (crashes): the `crash` and `crash-setter` fixtures under file routing with a 1 MiB parent limit, limits before and after `exec`, an empty output root and no stored core; the pipe and socket routes refused with their counters at zero and then shown live; an absolute pattern refused; a routing change during an attempt that ends it and quarantines the provider; and the six mutations.                                                                                                                                                                                                                                                                                                                      | 5 (cores), 8          |
+| R02ag | The crash acceptance as amended on 2026-11-13 (crashes): the scratch root as the payload's working directory, the `crash` and `crash-setter` fixtures under file routing with a 1 MiB parent limit, limits before and after `exec`, a scratch with no core and no stored core; the pipe and socket routes refused with their counters at zero and then shown live; an absolute pattern refused; a routing change during an attempt that ends it and quarantines the provider; and the six mutations.                                                                                                                                                                                                                                                               | 5 (cores), 8          |
 | R02ah | The guardian with its own deadline, death of the supervisor at each phase, the attempt registry and quarantine. Renewals run against a stand-in for the store, including one that keeps renewing after its fence is revoked and one that renews for the whole 120 seconds.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | 6, 8                  |
 
 15. **What R02a leaves to R02b.** R02ab to R02ag launch without the ownership
