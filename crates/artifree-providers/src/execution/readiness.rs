@@ -46,15 +46,15 @@ const DEV_MOUNT: &str = "/dev";
 /// The mount point of the launcher's terminals, which the bootstrap covers with an empty
 /// read-only tmpfs (the amendment of 2026-11-13, rule 3 as reworded).
 const DEV_PTS_MOUNT: &str = "/dev/pts";
-/// The size bound of the empty tmpfs over `/dev/pts` in the kernel's `size=<n>k` form: 4 KiB, as
-/// the bootstrap's `TERMINALS_DATA` sets it (the amendment of 2026-11-13, rule 3 as reworded).
-const TERMINALS_SIZE_KIB: u64 = 4;
+/// The size bound of the empty tmpfs over `/dev/pts` in the kernel's `size=<n>k` form: 4 KiB, which
+/// the bootstrap's `close_terminals` mounts (the amendment of 2026-11-13, rule 3 as reworded).
+pub(super) const TERMINALS_SIZE_KIB: u64 = 4;
 /// The inode bound of the empty tmpfs over `/dev/pts`: one inode, as the bootstrap's
-/// `TERMINALS_DATA` sets it.
-const TERMINALS_INODES: u64 = 1;
+/// `close_terminals` mounts it.
+pub(super) const TERMINALS_INODES: u64 = 1;
 /// The permission bits of the empty tmpfs over `/dev/pts`: read and search only, as the
-/// bootstrap's `TERMINALS_DATA` sets them.
-const TERMINALS_MODE: u32 = 0o555;
+/// bootstrap's `close_terminals` mounts them.
+pub(super) const TERMINALS_MODE: u32 = 0o555;
 
 // Field names of the mount checks. `mountinfo` names a failure of the text itself.
 const FIELD_SCRATCH: &str = "scratch";

@@ -640,10 +640,12 @@ how; where the two could be read differently, 0042 holds.
 > outside; canary files in `/var/tmp` and the runner's home and a canary
 > process stay intact while the payload reads, creates, sweeps every PID
 > with signal 0 and sends `kill(-1)`; `/proc/sys` writes fail and
-> `/dev/ptmx` gives `ENOENT`; a real leak of a directory, a connection and
+> `/dev/ptmx` gives `ENOENT`, and opening the launcher's masters through
+> `/proc/1/root` fails; a real leak of a directory, a connection and
 > a pipe is refused before READY; a live preload canary, built in the job,
-> logs the test binary and nothing that the provider starts, and the payload
-> sees no variable; and a marker written in one attempt is absent in the
+> logs the test binary and neither the stub nor the launcher, and the payload
+> sees no variable (inside the sandbox neither the canary nor the host's
+> `/tmp` is mounted, so the log cannot show the bootstrap or the payload); and a marker written in one attempt is absent in the
 > next. The tests append the listener counters and the canaries'
 > observations to the environment record, and the job fails without them.
 > The payload fixture's `kill(-1)` uses nix's `signal` feature, enabled

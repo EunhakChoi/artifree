@@ -540,7 +540,12 @@ fn read_payload_network(group: &Path) -> Result<Option<OutsideReading>, Box<dyn 
     for line in listing.lines() {
         let pid: u32 = line.trim().parse()?;
         if runs_payload(pid)? {
-            return Ok(Some(read_outside(pid)?));
+            // The payload may end between the two reads; the watcher then tries again.
+            return match read_outside(pid) {
+                Ok(reading) => Ok(Some(reading)),
+                Err(error) if process_ended(&error) => Ok(None),
+                Err(error) => Err(error.into()),
+            };
         }
     }
     Ok(None)
@@ -869,6 +874,11 @@ fn job_proc_and_dev_pts_stay_inside() -> Result<(), Box<dyn Error>> {
         require_line_starting(text, &format!("proc-dev {name} error="));
     }
     require_exact_line(text, "proc-dev ptmx error=2");
+    // The launcher's own mount namespace still has its devpts; the first process of the attempt's
+    // PID namespace runs there, so its root must not open a master either.
+    for name in ["ptmx-via-init", "pts-ptmx-via-init"] {
+        require_line_starting(text, &format!("proc-dev {name} error="));
+    }
     let pts = line_with(text, "proc-dev pts")?;
     assert!(
         pts.strip_prefix("proc-dev pts")
@@ -957,9 +967,10 @@ fn require_injection_is_live() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Requires that the payload starts with an empty environment, and that no program the provider
-/// starts loads the preload canary. The stub, the launcher, the bootstrap and the payload add no
-/// entry to the preload log, and the payload reports no variable.
+/// Requires that the stub and the launcher, which run on the host's file system, do not load the
+/// preload canary, and that the payload starts with an empty environment. The bootstrap and the
+/// payload run inside the sandbox, where neither the canary nor the host's `/tmp` is mounted, so
+/// the log cannot show them; for them the evidence is the payload's empty environment.
 #[test]
 #[ignore = "runs only in the Linux enforcement job"]
 fn job_the_environment_reaches_the_payload_empty() -> Result<(), Box<dyn Error>> {

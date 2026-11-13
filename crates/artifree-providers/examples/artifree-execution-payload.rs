@@ -164,6 +164,11 @@ mod linux {
     ];
     /// The pseudo-terminal master device that the `proc-dev` scenario opens.
     const DEV_PTMX: &str = "/dev/ptmx";
+    /// The pseudo-terminal masters as the launcher's own mount namespace shows them, reached through the root of the PID namespace's first process, which runs in that namespace and not in the bootstrap's.
+    const INIT_PTMX: [(&str, &str); 2] = [
+        ("ptmx-via-init", "/proc/1/root/dev/ptmx"),
+        ("pts-ptmx-via-init", "/proc/1/root/dev/pts/ptmx"),
+    ];
     /// The directory of the pseudo-terminal slaves, which the `proc-dev` scenario lists.
     const DEV_PTS: &str = "/dev/pts";
     /// The file that the `marker` scenario writes into its scratch, to see whether a previous attempt left it.
@@ -857,7 +862,7 @@ mod linux {
         Ok(names.join(" "))
     }
 
-    /// Runs the `proc-dev` scenario: tries each kernel-control write, opens `/dev/ptmx`, and lists `/dev/pts`.
+    /// Runs the `proc-dev` scenario: tries each kernel-control write, opens `/dev/ptmx` and the launcher's masters through `/proc/1/root`, and lists `/dev/pts`.
     fn proc_dev() -> io::Result<()> {
         for (name, path, text) in PROC_WRITES {
             let written = OpenOptions::new()
@@ -872,6 +877,15 @@ mod linux {
             "proc-dev ptmx {}",
             outcome_of_error(ptmx.as_ref().err())
         ))?;
+        let mut through_init = Vec::new();
+        for (name, path) in INIT_PTMX {
+            let opened = OpenOptions::new().read(true).write(true).open(path);
+            say(&format!(
+                "proc-dev {name} {}",
+                outcome_of_error(opened.as_ref().err())
+            ))?;
+            through_init.push(opened);
+        }
         match list_dev_pts() {
             Ok(names) => say(&format!("proc-dev pts {names}")),
             Err(error) => say(&format!("proc-dev pts error={}", error_word(Some(&error)))),

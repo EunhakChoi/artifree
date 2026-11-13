@@ -11,7 +11,7 @@
 //! payload.
 
 use std::convert::Infallible;
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::fs::{self, File};
 use std::io::Read;
 use std::mem::ManuallyDrop;
@@ -49,8 +49,6 @@ const PROC_LIMITS: &str = "/proc/self/limits";
 const PROC_MOUNTINFO: &str = "/proc/self/mountinfo";
 /// The launcher's terminal directory, which the bootstrap covers.
 const TERMINALS: &str = "/dev/pts";
-/// The options of the empty tmpfs over `/dev/pts`: one inode, no room, read and search only (measured on the runner on 2026-11-13).
-const TERMINALS_DATA: &CStr = c"size=4k,nr_inodes=1,mode=555";
 
 /// Why the stub or the bootstrap stopped before any payload instruction ran (decision 0056 rules 3 and 5).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -241,12 +239,19 @@ fn mount_scratch() -> Result<(), BootstrapFailure> {
 
 /// Step 5 (decision 0056 rule 3, as reworded on 2026-11-13): in the same mount namespace, still holding `CAP_SYS_ADMIN` of the sandbox's user namespace, mounts an empty read-only tmpfs over the launcher's `/dev/pts`, then reads the mount table back with the scratch. Unmounting the launcher's devpts fails with `EINVAL` (its mounts are locked) and a devpts with `max=0` still lets `/dev/ptmx` open; with this mount, opening `/dev/ptmx` fails with `ENOENT` and creation there with `EROFS` (measured on the runner on 2026-11-13). The provider checks the same table with the same parser before the release.
 fn close_terminals() -> Result<(), BootstrapFailure> {
+    let data = CString::new(format!(
+        "size={}k,nr_inodes={},mode={:o}",
+        readiness::TERMINALS_SIZE_KIB,
+        readiness::TERMINALS_INODES,
+        readiness::TERMINALS_MODE
+    ))
+    .map_err(|_| BootstrapFailure::Terminals)?;
     mount::mount(
         "tmpfs",
         TERMINALS,
         "tmpfs",
         MountFlags::RDONLY | MountFlags::NOSUID | MountFlags::NODEV | MountFlags::NOEXEC,
-        TERMINALS_DATA,
+        data.as_c_str(),
     )
     .map_err(|_| BootstrapFailure::Terminals)?;
     let limit = u64::try_from(readiness::PROC_FILE_BYTES).map_err(|_| BootstrapFailure::Scratch)?;
