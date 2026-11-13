@@ -301,6 +301,44 @@ fn a_leftover_with_read_only_directories_is_removed_before_staging() -> Result<(
     Ok(())
 }
 
+/// Makes a leftover at the staging path (the second argument); the first is a directory it may
+/// point to.
+type LeftoverStep = fn(&Path, &Path) -> io::Result<()>;
+
+#[test]
+fn a_leftover_file_or_link_is_unlinked_before_staging() -> Result<(), Box<dyn Error>> {
+    let tree = TempTree::new("leftover-entries")?;
+    let target = tree.path().join("target");
+    fs::create_dir(&target)?;
+    fs::write(target.join("kept.txt"), b"kept")?;
+    let input = tree.path().join("input");
+    let leftovers: [(&str, LeftoverStep); 2] = [
+        ("a file", |_, input| fs::write(input, b"stale")),
+        ("a link to a directory", |target, input| {
+            std::os::unix::fs::symlink(target, input)
+        }),
+    ];
+    for (kind, make) in leftovers {
+        make(&target, &input)?;
+        let package = sample_package()?;
+        let listing = InputListing::of(&package);
+        let verified = accepted(VerifiedInput::verify(package, listing), "verify")?;
+        let staged = accepted(verified.stage(tree.path()), kind)?;
+        assert_eq!(
+            entry_names(&input)?,
+            vec!["assets", "index.html"],
+            "{kind} at the staging path must be replaced by the staged files"
+        );
+        assert_eq!(staged.remove(), Ok(()), "remove must succeed after {kind}");
+    }
+    assert_eq!(
+        fs::read(target.join("kept.txt"))?,
+        b"kept".to_vec(),
+        "the link's target must be untouched"
+    );
+    Ok(())
+}
+
 #[test]
 fn dropping_a_staged_input_removes_it() -> Result<(), Box<dyn Error>> {
     let tree = TempTree::new("drop")?;

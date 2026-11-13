@@ -5,7 +5,6 @@
 //! Compiled only into the test build (0056 rule 16). Where the files come from (the store, access
 //! checks and the pinned revision) is R02b's (0056 rule 15); this module takes the package as given.
 
-use std::cmp::Reverse;
 use std::collections::BTreeSet;
 use std::fs::{self, DirBuilder, File};
 use std::io::{self, Write as _};
@@ -16,6 +15,8 @@ use std::path::{Path, PathBuf};
 use artifree_domain::package::{FilePackage, PackagePath};
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, ResolveFlags};
 use sha2::{Digest, Sha256};
+
+use super::report::hex;
 
 /// The staging directory's name inside the execution directory.
 const INPUT_DIR: &str = "input";
@@ -79,22 +80,11 @@ impl InputListing {
     pub(super) fn digest(&self) -> [u8; 32] {
         let mut text = format!("{LISTING_TAG}\n");
         for (path, length, sha256) in &self.0 {
-            let line = format!("{path}\t{length}\t{}\n", hex(sha256));
+            let line = format!("{path}\t{length}\t{}\n", hex(*sha256));
             text.push_str(&line);
         }
         Sha256::digest(text.as_bytes()).into()
     }
-}
-
-/// Lowercase hexadecimal of a SHA-256 digest, two digits per byte.
-#[must_use]
-pub(super) fn hex(digest: &[u8; 32]) -> String {
-    let mut text = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        let pair = format!("{byte:02x}");
-        text.push_str(&pair);
-    }
-    text
 }
 
 /// A package whose files match its listing, not yet staged.
@@ -150,8 +140,7 @@ impl VerifiedInput {
 /// Writes `package` beneath a new directory at `path`, then makes every directory read only.
 ///
 /// Files are created beneath a handle on the directory, without following links. Each directory
-/// is made read only through its own handle, deepest first, so that every ancestor is still
-/// searchable when it is opened.
+/// is then made read only through its own handle.
 ///
 /// # Errors
 ///
@@ -185,12 +174,14 @@ fn write_tree(path: &Path, package: FilePackage) -> io::Result<()> {
             FILE_MODE,
             RESOLVE,
         )?;
-        File::from(opened).write_all(&bytes)?;
+        let mut file = File::from(opened);
+        file.write_all(&bytes)?;
+        // The creation mode passes through the umask; the descriptor gets the mode itself.
+        rustix::fs::fchmod(&file, FILE_MODE)?;
     }
-    // Deepest first, and the root last: each directory is opened and changed through its handle.
-    let mut ordered: Vec<&String> = directories.iter().collect();
-    ordered.sort_by_key(|directory| Reverse(directory.matches('/').count()));
-    for directory in ordered {
+    // Each directory is opened and changed through its handle; `0555` keeps it searchable, so the
+    // order does not matter. The root is changed last.
+    for directory in &directories {
         let handle = rustix::fs::openat2(
             &root,
             directory.as_str(),
@@ -222,6 +213,8 @@ fn remove_tree(path: &Path) -> io::Result<()> {
     ) {
         Ok(root) => root,
         Err(rustix::io::Errno::NOENT) => return Ok(()),
+        // A leftover file or link is unlinked; `remove_file` does not follow a link.
+        Err(rustix::io::Errno::NOTDIR | rustix::io::Errno::LOOP) => return fs::remove_file(path),
         Err(error) => return Err(error.into()),
     };
     make_owner_writable(&root)?;

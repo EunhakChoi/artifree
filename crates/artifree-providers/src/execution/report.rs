@@ -121,7 +121,7 @@ pub(super) fn sha256_file_hex(path: &Path) -> io::Result<String> {
 
 /// Renders a SHA-256 digest as lowercase hexadecimal, two digits per byte.
 #[cfg(target_os = "linux")]
-fn hex(digest: [u8; 32]) -> String {
+pub(super) fn hex(digest: [u8; 32]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
 
     let mut text = String::with_capacity(digest.len() * 2);

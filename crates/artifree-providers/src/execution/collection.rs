@@ -21,7 +21,8 @@ use artifree_domain::package::{
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, Stat};
 use sha2::{Digest, Sha256};
 
-use super::staging::{RESOLVE, hex};
+use super::report::hex;
+use super::staging::RESOLVE;
 
 /// The most entries one traversal counts, directories included. A valid package has at most 256
 /// files, each under at most seven directories of its own, which is exactly this many entries
@@ -143,13 +144,13 @@ impl OutputManifest {
         let mut text = format!(
             "{MANIFEST_TAG}\nprofile\t{}\nprofile-manifest\t{}\ntool-root\t{}\nfilter\t{}\ninput\t{}\n",
             binding.profile,
-            hex(&binding.profile_manifest_sha256),
+            hex(binding.profile_manifest_sha256),
             binding.tool_root_sha256,
             binding.filter_sha256,
-            hex(&binding.input_digest),
+            hex(binding.input_digest),
         );
         for (path, length, sha256) in &self.files {
-            let line = format!("file\t{path}\t{length}\t{}\n", hex(sha256));
+            let line = format!("file\t{path}\t{length}\t{}\n", hex(*sha256));
             text.push_str(&line);
         }
         text
@@ -194,7 +195,7 @@ fn collect_with(
         entries: 0,
         total: 0,
         files: Vec::new(),
-        directories: BTreeSet::new(),
+        paths: BTreeSet::new(),
     };
     walk_directory(out, "", 0, &mut walk, hook)?;
     let package = FilePackage::new(walk.files)
@@ -211,9 +212,10 @@ struct Walk {
     total: usize,
     /// The files read so far, with their package paths.
     files: Vec<(PackagePath, Vec<u8>)>,
-    /// The directory paths entered so far, folded to lower case, so that two directories whose
-    /// names differ only in case are refused even when they hold no file.
-    directories: BTreeSet<String>,
+    /// The paths of the directories entered and the files read so far, folded to lower case, so
+    /// that two entries whose paths differ only in case are refused even when one is an empty
+    /// directory.
+    paths: BTreeSet<String>,
 }
 
 /// Visits the entries of `directory`, which is `level` levels below the output root and whose
@@ -280,7 +282,13 @@ fn walk_directory(
 fn check_directory_path(path: &str, walk: &mut Walk) -> Result<(), CollectionRefusal> {
     let placeholder = format!("{path}/{DIRECTORY_PLACEHOLDER}");
     PackagePath::from_str(&placeholder).map_err(|_| CollectionRefusal::InvalidPath)?;
-    if walk.directories.insert(path.to_ascii_lowercase()) {
+    record_path(path, walk)
+}
+
+/// Records an entry's path, folded to lower case, and refuses it when an earlier directory or
+/// file has the same folded path.
+fn record_path(path: &str, walk: &mut Walk) -> Result<(), CollectionRefusal> {
+    if walk.paths.insert(path.to_ascii_lowercase()) {
         Ok(())
     } else {
         Err(CollectionRefusal::Package(PackageReason::CaseCollision))
@@ -288,8 +296,9 @@ fn check_directory_path(path: &str, walk: &mut Walk) -> Result<(), CollectionRef
 }
 
 /// The file name that `check_directory_path` appends to a directory's path. It is valid in every
-/// position, so only the directory's own segments decide.
-const DIRECTORY_PLACEHOLDER: &str = "a.txt";
+/// position, and no valid file name is shorter, so only the directory's own segments decide and a
+/// directory that can hold a valid file is never refused for its length.
+const DIRECTORY_PLACEHOLDER: &str = "a.js";
 
 /// Classifies the entry `name` of `directory` by `statat`, without following links. A directory
 /// or a regular file is returned; any other type is the refusal that names it.
@@ -320,6 +329,9 @@ fn read_file(
     if stat.st_nlink != 1 {
         return Err(CollectionRefusal::HardLink);
     }
+    // The name is checked before any byte is read.
+    let package_path: PackagePath = path.parse().map_err(|_| CollectionRefusal::InvalidPath)?;
+    record_path(path, walk)?;
     let bound = u64::try_from(MAX_FILE_BYTES)
         .map_err(|_| CollectionRefusal::FileTooLarge)?
         .saturating_add(1);
@@ -338,8 +350,7 @@ fn read_file(
     if walk.total > MAX_PACKAGE_BYTES {
         return Err(CollectionRefusal::TooLarge);
     }
-    let path: PackagePath = path.parse().map_err(|_| CollectionRefusal::InvalidPath)?;
-    walk.files.push((path, bytes));
+    walk.files.push((package_path, bytes));
     Ok(())
 }
 

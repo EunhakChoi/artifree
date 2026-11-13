@@ -29,7 +29,8 @@ sha2 = "0.11"
 rusqlite = { version = "0.41", features = ["bundled"] }
 getrandom = "0.4"
 # Decision 0056 rule 7: the Linux execution provider's system calls, through safe
-# interfaces only, pinned, with the features reduced to what the bootstrap uses.
+# interfaces only, pinned, with the features reduced to what the bootstrap uses, plus
+# `fs` for the keeper, staging and collection (rule 7 as reworded on 2026-11-13).
 rustix = { version = "=1.1.6", default-features = false, features = ["std", "process", "thread", "stdio", "mount", "fs"] }
 seccompiler = { version = "=0.5.0", default-features = false }
 # `unshare` alone: rustix offers it only as an unsafe function (0056, amendment of 2026-11-12).

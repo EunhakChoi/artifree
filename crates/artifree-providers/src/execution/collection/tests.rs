@@ -373,6 +373,24 @@ fn tree_directory_case_collision(root: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn tree_file_and_directory_case_collision(root: &Path) -> io::Result<()> {
+    write_index(root)?;
+    fs::write(root.join("a.txt"), b"file")?;
+    fs::create_dir(root.join("A.txt"))
+}
+
+/// A file whose path has the package path's full length, 240 bytes, under three directories: the
+/// directories' own check must not refuse it.
+fn tree_longest_path(root: &Path) -> io::Result<()> {
+    write_index(root)?;
+    let directory = root
+        .join("d".repeat(100))
+        .join("e".repeat(100))
+        .join("f".repeat(33));
+    fs::create_dir_all(&directory)?;
+    fs::write(directory.join("a.js"), b"x")
+}
+
 fn tree_too_many_files(root: &Path) -> io::Result<()> {
     write_index(root)?;
     // The entry document and MAX_FILES more files make one file more than the bound.
@@ -528,6 +546,11 @@ fn hostile_trees_are_refused_by_reason() -> TestResult {
             CollectionRefusal::Package(PackageReason::CaseCollision),
         ),
         Tree::refused(
+            "file-and-empty-directory-colliding-in-case",
+            tree_file_and_directory_case_collision,
+            CollectionRefusal::Package(PackageReason::CaseCollision),
+        ),
+        Tree::refused(
             "too-many-files",
             tree_too_many_files,
             CollectionRefusal::Package(PackageReason::TooManyFiles),
@@ -557,6 +580,7 @@ fn bounds_are_exact() -> TestResult {
             "d1/d2/d3/d4/d5/d6/d7/x.txt",
         ),
         Tree::collected("max-file", tree_max_file, "big.txt"),
+        Tree::collected("longest-path", tree_longest_path, "index.html"),
         Tree::collected("max-files", tree_max_files, "index.html"),
         Tree::collected("max-package", tree_exact_package, "b4.txt"),
     ];

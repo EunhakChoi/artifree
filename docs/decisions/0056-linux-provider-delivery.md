@@ -937,13 +937,24 @@ how; where the two could be read differently, 0042 holds.
 > manifest and `Shmem` after 64 MiB, the input's `EROFS` and `EACCES` both
 > directly and through `/proc/1/root`, ten payload-made hostile trees, a
 > planted link, hard link and FIFO, a failed attempt and a fresh one after a
-> refusal. The amendment expected the `--bind` mutation with the mount
+> refusal. The output root takes one of the scratch's 4,096 inodes, so
+> R02ac's inode test now expects 4,094 files beside the root and `out`.
+> The amendment expected the `--bind` mutation with the mount
 > checks kept to be refused before the release. The bootstrap's remount
 > makes `/input` read-only in its own namespace whatever the launcher
 > binds, so both checks pass; the input test fails instead, because a
 > creation through `/proc/1/root/input` gives `EACCES` from the `0555`
-> directory rather than `EROFS`. The mutations ran on a temporary branch,
-> never in the product.
+> directory rather than `EROFS`. Under the depth mutation the deep empty
+> directories are not admitted either: the directory-name check refuses them
+> as `InvalidPath`, since their placeholder path has more than eight
+> segments, so the deep test still fails. The ten mutations ran on the
+> temporary branch `mutation/r02af` (run 43394408071, deleted afterwards and
+> never merged), never in the product, and each failed its test: following
+> links, the link count, the type check and the entry bound through the
+> planted and bomb trees; the depth bound as above; both `--bind` mutations
+> through the input test (the unchecked one already at a direct creation);
+> the keeper dropped early (no output); the handles kept (`Shmem` grew by
+> 65,456 KiB); and collection after a nonzero exit.
 
 ## Context
 
