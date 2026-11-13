@@ -6,7 +6,7 @@ enforcement job), R02ab (the first launch, only from the job's tests), R02ac
 and R02ad (the syscall mapping, as amended on 2026-11-13; its x32 class
 fails acceptance on the reviewed kernel) are implemented; R02ae (files,
 descriptors and network) is planned in the second amendment of
-2026-11-13**.
+2026-11-13, with the launcher's `/dev/pts` covered by the third**.
 Roadmap: R02a. Builds on
 [0042](0042-linux-untrusted-execution.md) and
 [0055](0055-operating-background-work.md).
@@ -476,6 +476,33 @@ how; where the two could be read differently, 0042 holds.
 > in the job's test unit on the disposable runner; nothing of this runs on
 > a contributor's host.
 
+> **Amendment, 2026-11-13 (the launcher's `/dev/pts`).** The R02ae
+> implementation's job run (PR #197, before merging) found a path that the
+> second amendment missed. The launcher's init is the first process of the
+> attempt's PID namespace (rule 2) and runs in the launcher's mount
+> namespace, not in the bootstrap's. The payload can open
+> `/proc/1/root/dev/ptmx` and `/proc/1/root/dev/pts/ptmx`: both opened, while
+> `/dev/ptmx` gave `ENOENT`. The bootstrap's over-mount covers only its own
+> mount namespace, so `/dev/pts` was not closed.
+>
+> A temporary branch, deleted afterwards and never merged, measured the fix
+> on `ubuntu-24.04` (kernel 7.0, Bubblewrap 0.9.0). The attempt's
+> arguments also mount an empty tmpfs over `/dev/pts` in the launcher's
+> namespace (`--perms 0555 --size 4096 --tmpfs /dev/pts`, then
+> `--remount-ro /dev/pts`). With that, `/dev/ptmx` and both paths through
+> `/proc/1/root` gave `ENOENT`, and every other job test passed unchanged.
+>
+> So R02ae works as follows. The attempt's arguments cover `/dev/pts` as
+> above, and the bootstrap's over-mount and its mount check stay as the
+> second amendment says. The payload also opens both paths through
+> `/proc/1/root`, and the test requires each open to fail. Its mutation:
+> the launcher's cover removed, with the bootstrap's kept, which must fail
+> the test on those opens. The arguments test pins the new options. Rule 2
+> is reworded; nothing else changes.
+>
+> - **Rule 2.** The fixed argument list also mounts an empty read-only
+>   tmpfs over the minimal `/dev`'s `/dev/pts`.
+
 > **Note, 2026-11-12 (R02aa).** The provider's admission and the job
 > `Linux enforcement` exist. On the runner the provider's own code did what
 > the second measurement did with shell commands, which settles the first
@@ -700,8 +727,10 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
    `bwrap` of the tool root (rule 6) with a fixed argument list built from the
    profile: every namespace unshared, the parent-death kill, a new session, a
    cleared environment, read-only binds of the tool root and the staged input,
-   the mount point of the scratch, a private `/proc` and a minimal `/dev`,
-   the sandbox's root and `/dev` remounted read-only, further user namespaces
+   the mount point of the scratch, a private `/proc` and a minimal `/dev`
+   with an empty tmpfs over its `/dev/pts` (the amendment of 2026-11-13, the
+   launcher's `/dev/pts`), the sandbox's root, `/dev` and `/dev/pts` remounted
+   read-only, further user namespaces
    disabled inside, and the two capabilities the bootstrap needs for the
    scratch (`CAP_SYS_ADMIN` and `CAP_SETPCAP`, held in the innermost user
    namespace, which owns none of the launcher's mounts). The launcher keeps its own reaping init
