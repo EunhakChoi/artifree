@@ -115,7 +115,14 @@ pub(super) fn launcher_arguments(root: &Path) -> Vec<OsString> {
     arguments
 }
 
-/// The attempt's fixed argument list, in launch order (0056 rule 2 with its amendment of 2026-11-12): the shared prefix, the two capabilities, the scratch's mount point, the read-only remounts, then the fixture's `bootstrap` mode with the fixture profile's identity.
+/// The permission bits of the empty tmpfs that the attempt's launcher mounts over `/dev/pts`: read and search only (0056, amendment of 2026-11-13, the launcher's `/dev/pts`).
+const TERMINALS_MODE: &str = "0555";
+/// The size bound of that tmpfs in bytes, the smallest the kernel rounds to: one page.
+const TERMINALS_BYTES: &str = "4096";
+
+/// The attempt's fixed argument list, in launch order (0056 rule 2 with its amendments of 2026-11-12 and 2026-11-13): the shared prefix, the two capabilities, the scratch's mount point, an empty tmpfs over the minimal `/dev`'s `/dev/pts`, the read-only remounts, then the fixture's `bootstrap` mode with the fixture profile's identity.
+///
+/// The launcher's init is the first process of the attempt's PID namespace and stays in the launcher's mount namespace, so `/proc/1/root` shows that namespace to the payload. The bootstrap covers `/dev/pts` in its own namespace; this tmpfs covers the launcher's, so neither path opens a pseudo-terminal master (measured on the runner on 2026-11-13).
 ///
 /// The launcher no longer mounts the scratch. It makes the mount point, remounts the sandbox's root and `/dev` read-only, and hands the bootstrap two capabilities inside the sandbox's user namespace, `CAP_SYS_ADMIN` and `CAP_SETPCAP`. The bootstrap mounts the scratch in its own mount namespace with the size and inode bounds of 0042 rule 5, and it removes both capabilities from every set, the bounding set included, before the seccomp filter (0056 rule 3). The capabilities are over the sandbox's own namespaces only: they belong to the user namespace that `--unshare-user` creates, which owns the other namespaces of the sandbox, and they grant nothing over the host.
 ///
@@ -133,10 +140,18 @@ pub(super) fn attempt_arguments(root: &Path) -> Vec<OsString> {
             "CAP_SETPCAP",
             "--dir",
             "/tmp",
+            "--perms",
+            TERMINALS_MODE,
+            "--size",
+            TERMINALS_BYTES,
+            "--tmpfs",
+            "/dev/pts",
             "--remount-ro",
             "/",
             "--remount-ro",
             "/dev",
+            "--remount-ro",
+            "/dev/pts",
             "--chdir",
             "/",
             FIXTURE_COMMAND,

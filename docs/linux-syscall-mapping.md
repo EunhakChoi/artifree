@@ -231,3 +231,12 @@ Run on 2026-11-13 by `scripts/enforcement/mutate.py` on the temporary branch `mu
 - `job_descriptors_stop_at_the_ceiling`: the ceiling raised to 512, and the initial limit guard removed with the readiness check of that limit bypassed, so the payload kept the unit's limit (the payload's soft descriptor limit differed in both).
 
 No mutation is possible for the x32 rows on this kernel.
+
+Run again on 2026-11-13 for R02ae, because the filter changed, on the temporary branch `mutation/r02ae` (never merged), workflow run 43369050636 on `ubuntu-24.04`, the same way. The unmutated baseline passed. All 91 mutations failed their test: the 71 above again, and these 20:
+
+- `job_probes_are_refused_with_their_records`: the socket rule's domain condition removed (`net_socket_netlink`), its type condition removed (`net_socket_inet_seqpacket`), its protocol condition removed (`net_socket_inet_sctp`), `socket` allowed without conditions (`net_socket_netlink`), the `setsockopt` rule's level condition removed (`net_setsockopt_ip_level`), its option condition removed (`net_setsockopt_sndbuf`), `setsockopt` allowed without conditions (`net_setsockopt_sndbuf`), and each of the eight refused network numbers allowed alone (the probe with that number). The test stops at the first missing record, so the probe named is the first of the class that the mutation admits.
+- `job_the_network_reaches_no_host_listener`: `--unshare-net` removed from the attempt's arguments only (the host listener `tcp-loopback4` counted a connection during the launch).
+- `job_host_files_and_processes_stay_intact`: the host's `/var/tmp` bound read-only into the attempt (the payload read the canary in `/var/tmp`).
+- `job_proc_and_dev_pts_stay_inside`: the bootstrap's mount over `/dev/pts` removed with its mount check (the payload opened `/dev/ptmx`).
+- `job_a_leaked_descriptor_is_refused`: the bootstrap's descriptor check removed (the attempt ran and exited with status 0).
+- `job_the_environment_reaches_the_payload_empty`: the provider's `env_clear` on the stub removed (the preload log gained an entry during the launch).

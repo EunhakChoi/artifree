@@ -166,8 +166,8 @@ mod linux {
     const DEV_PTMX: &str = "/dev/ptmx";
     /// The pseudo-terminal masters as the launcher's own mount namespace shows them, reached through the root of the PID namespace's first process, which runs in that namespace and not in the bootstrap's.
     const INIT_PTMX: [(&str, &str); 2] = [
-        ("ptmx-via-init", "/proc/1/root/dev/ptmx"),
-        ("pts-ptmx-via-init", "/proc/1/root/dev/pts/ptmx"),
+        ("init-ptmx", "/proc/1/root/dev/ptmx"),
+        ("init-pts-ptmx", "/proc/1/root/dev/pts/ptmx"),
     ];
     /// The directory of the pseudo-terminal slaves, which the `proc-dev` scenario lists.
     const DEV_PTS: &str = "/dev/pts";

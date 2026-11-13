@@ -874,12 +874,12 @@ fn job_proc_and_dev_pts_stay_inside() -> Result<(), Box<dyn Error>> {
         require_line_starting(text, &format!("proc-dev {name} error="));
     }
     require_exact_line(text, "proc-dev ptmx error=2");
-    // The launcher's own mount namespace still has its devpts; the first process of the attempt's
-    // PID namespace runs there, so its root must not open a master either.
-    for name in ["ptmx-via-init", "pts-ptmx-via-init"] {
-        require_line_starting(text, &format!("proc-dev {name} error="));
+    // The first process of the attempt's PID namespace, the launcher's init, runs in the launcher's
+    // mount namespace, whose /dev/pts the launcher covers; its root must not open a master either.
+    for name in ["init-ptmx", "init-pts-ptmx"] {
+        require_exact_line(text, &format!("proc-dev {name} error=2"));
     }
-    let pts = line_with(text, "proc-dev pts")?;
+    let pts = line_with(text, "proc-dev pts ")?;
     assert!(
         pts.strip_prefix("proc-dev pts")
             .is_some_and(|names| names.trim().is_empty()),
