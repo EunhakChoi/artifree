@@ -4,13 +4,14 @@
 //! Compiled only into the test build (0056 rule 16). Between its observation and the release, the
 //! provider opens the keeper, checks it and makes the output root. It collects only after a passing
 //! verdict, and drops the keeper on every path (0056 rule 5). The keeper opens the scratch through
-//! `/proc/<bootstrap>/root/tmp`, close-on-exec, and keeps only the output root's handle: the
-//! descriptor that holds the tmpfs mounted until collection or rejection ends.
+//! `/proc/<bootstrap>/root/tmp`, close-on-exec, and keeps that handle beside the output root's:
+//! both hold the tmpfs mounted until collection or rejection ends, and both are dropped then.
 
+use std::io;
 use std::os::fd::OwnedFd;
 use std::path::Path;
 
-use rustix::fs::{self, AtFlags, Mode, OFlags, StatxFlags};
+use rustix::fs::{self, AtFlags, Dir, FileType, Mode, OFlags, StatxFlags};
 
 use super::super::collection::{self, CollectedOutput, CollectionRefusal, ManifestBinding};
 use super::super::readiness::{self, GroupObservation};
@@ -23,10 +24,21 @@ const TMPFS_MAGIC: i64 = 0x0102_1994;
 /// The output root's name in the scratch, which the payload sees as `/tmp/out`.
 const OUTPUT_ROOT: &str = "out";
 
-/// The provider's handle on the output root of one attempt. Dropping it, after collection or
-/// instead of it, frees the scratch's tmpfs (0056, amendment of 2026-11-13, input and output).
+/// The most entries that `list_scratch` reads: the scratch's inode bound (decision 0042 rule 5).
+const LIST_ENTRIES: usize = 4_096;
+
+/// The deepest directory level below the scratch root that `list_scratch` enters.
+const LIST_DEPTH: usize = 8;
+
+/// The provider's handles on the scratch and on the output root of one attempt. The provider drops
+/// both handles when the attempt ends, which frees the tmpfs (0056, amendment of 2026-11-13, input
+/// and output; crashes).
 #[derive(Debug)]
 pub(super) struct Keeper {
+    /// The scratch root, opened through `/proc/<bootstrap>/root/tmp` and checked; kept so that the
+    /// test-only listing can read it after the group is empty (0056, amendment of 2026-11-13,
+    /// crashes).
+    scratch: OwnedFd,
     /// The output root, opened beneath the scratch with the four resolve flags.
     output_root: OwnedFd,
 }
@@ -38,8 +50,9 @@ impl Keeper {
     /// The scratch is opened as `<proc_root>/<bootstrap_pid>/root/tmp`, close-on-exec. It must be a
     /// tmpfs whose mount id is the one that `observation` read from the scratch line. The group's
     /// members are then read again, and the bootstrap must still be among them in filter mode. The
-    /// output root `out` is made with mode `0700` through the scratch handle, which is dropped
-    /// after that. The keeper keeps only a handle on the output root.
+    /// output root `out` is made with mode `0700` through the scratch handle, and the keeper keeps
+    /// the scratch handle beside the output root's. The provider drops both handles when the
+    /// attempt ends, which frees the tmpfs.
     ///
     /// # Errors
     ///
@@ -75,17 +88,18 @@ impl Keeper {
         readiness::confirm_member(group, proc_root, observation.bootstrap_pid)
             .map_err(|_| not_held)?;
         fs::mkdirat(&scratch, OUTPUT_ROOT, Mode::RWXU).map_err(|_| not_held)?;
-        // The scratch handle is the last use of `scratch`, so it is moved here and closed when
-        // this call returns; the output root's handle is the only one that the keeper keeps.
         let output_root = fs::openat2(
-            scratch,
+            &scratch,
             OUTPUT_ROOT,
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
             Mode::empty(),
             RESOLVE,
         )
         .map_err(|_| not_held)?;
-        Ok(Self { output_root })
+        Ok(Self {
+            scratch,
+            output_root,
+        })
     }
 
     /// The output root's handle, which the plan's test-only plant step writes through before the
@@ -110,12 +124,105 @@ impl Keeper {
         drop(self);
         output
     }
+
+    /// Lists the whole scratch through the kept handle, after the group is empty and before the
+    /// keeper is dropped (0056, amendment of 2026-11-13, crashes). Each entry is one line
+    /// `<path relative to the scratch>\t<kind>\t<size>`, and the lines are sorted by path. The kind
+    /// is `directory`, `file`, `link`, `socket`, `fifo`, `device` or `other`, and the size is the
+    /// `st_size` of the entry itself. Only names, types and sizes are read, never file contents,
+    /// and the walk uses the staging's `RESOLVE` flags.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first I/O error, or an error when the scratch holds more than `LIST_ENTRIES`
+    /// entries or a directory deeper than `LIST_DEPTH`.
+    pub(super) fn list_scratch(&self) -> io::Result<Vec<String>> {
+        let mut entries = Vec::new();
+        list_directory(&self.scratch, "", 0, &mut entries)?;
+        // A pair sorts by its path first; the line only breaks a tie between names that show alike.
+        entries.sort();
+        Ok(entries.into_iter().map(|(_, line)| line).collect())
+    }
 }
 
 /// Whether a descriptor is on a tmpfs with the mount id that the observation read from the scratch
 /// line. A reused PID or a reused mount id fails here or at the member check.
 fn is_checked_scratch(filesystem_type: i64, mount_id: u64, scratch_mount_id: u64) -> bool {
     filesystem_type == TMPFS_MAGIC && mount_id == scratch_mount_id
+}
+
+/// Adds one entry for each name in `directory`, a directory `level` levels below the scratch root
+/// whose path is `prefix` (empty at the root), and walks each subdirectory depth first.
+///
+/// # Errors
+///
+/// Returns the first I/O error, or an error when the listing exceeds `LIST_ENTRIES` or
+/// `LIST_DEPTH`.
+fn list_directory(
+    directory: &OwnedFd,
+    prefix: &str,
+    level: usize,
+    entries: &mut Vec<(String, String)>,
+) -> io::Result<()> {
+    // The duplicate shares its file offset with `directory`, which the keeper keeps for the next
+    // walk, so the stream starts again from the first name.
+    let mut names = Dir::new(directory.try_clone()?)?;
+    names.rewind();
+    for entry in names {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == c"." || name == c".." {
+            continue;
+        }
+        if entries.len() >= LIST_ENTRIES {
+            return Err(io::Error::other(
+                "the scratch holds more entries than the listing bound",
+            ));
+        }
+        let stat = fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)?;
+        let text = name.to_string_lossy();
+        let path = if prefix.is_empty() {
+            text.into_owned()
+        } else {
+            format!("{prefix}/{text}")
+        };
+        let kind = FileType::from_raw_mode(stat.st_mode);
+        let word = kind_word(kind);
+        let size = stat.st_size;
+        let line = format!("{path}\t{word}\t{size}");
+        // Pushed before its children, so the bound checked above counts every entry.
+        entries.push((path.clone(), line));
+        if kind == FileType::Directory {
+            let child_level = level + 1;
+            if child_level > LIST_DEPTH {
+                return Err(io::Error::other(
+                    "the scratch is deeper than the listing bound",
+                ));
+            }
+            let child = fs::openat2(
+                directory,
+                name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                Mode::empty(),
+                RESOLVE,
+            )?;
+            list_directory(&child, &path, child_level, entries)?;
+        }
+    }
+    Ok(())
+}
+
+/// The word that a scratch listing gives a file type.
+fn kind_word(kind: FileType) -> &'static str {
+    match kind {
+        FileType::Directory => "directory",
+        FileType::RegularFile => "file",
+        FileType::Symlink => "link",
+        FileType::Socket => "socket",
+        FileType::Fifo => "fifo",
+        FileType::BlockDevice | FileType::CharacterDevice => "device",
+        FileType::Unknown => "other",
+    }
 }
 
 #[cfg(test)]

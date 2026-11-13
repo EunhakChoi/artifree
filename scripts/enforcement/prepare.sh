@@ -17,6 +17,15 @@ readonly CORE_PATTERN=/proc/sys/kernel/core_pattern
 readonly PROFILE=/etc/apparmor.d/artifree-enforcement-launcher
 readonly SLICE=/run/systemd/system/artifree-enforcement-nomem.slice
 readonly BUBBLEWRAP_VERSION=0.9.0-1ubuntu0.3
+# The counters are root-owned and outside /tmp, which only root can write (decision 0056,
+# amendment of 2026-11-13, crashes).
+readonly COUNTERS_DIR=/var/lib/artifree-enforcement
+readonly COLLECTOR_DIR=/opt/artifree-enforcement
+readonly COLLECTOR="$COLLECTOR_DIR/collector"
+# The listener's socket lives in the saved directory, which is root-only (0700).
+readonly SOCKET_DIR="$SAVED_DIR"
+readonly SOCKET="$SOCKET_DIR/core.sock"
+readonly LISTENER_UNIT=artifree-core-listener
 
 usage() {
   cat >&2 <<'EOF'
@@ -25,6 +34,13 @@ usage: prepare.sh VERB [ARGUMENT]
   save-routing        save kernel.core_pattern once, before the job changes it
   routing-file        set kernel.core_pattern to the plain file name core
   routing-pipe        restore the saved kernel.core_pattern
+  counters-install    install the root-owned collector copy and empty pipe and socket counters
+  listener-start      start the core listener unit and wait up to 5 s for its socket
+  listener-stop       stop the core listener unit and remove its socket; never fails if absent
+  routing-counter-pipe    set kernel.core_pattern to the counting collector pipe
+  routing-counter-socket  set kernel.core_pattern to the listener's socket
+  routing-absolute    set kernel.core_pattern to /var/tmp/core
+  counters-show       print core.pipe=<count> and core.socket=<count>
   profile-on          load the AppArmor profile for the tool root's launcher
   profile-off         unload and remove that profile
   launcher-away       move the launcher aside (rule 10 removal)
@@ -50,7 +66,8 @@ usage: prepare.sh VERB [ARGUMENT]
                       network host proc-dev environment marker
                       copy input-write out-socket out-many out-big-file out-big-total
                       out-bomb out-deep out-invalid-name out-collision out-extension
-                      out-no-entry out-fail out-plain)
+                      out-no-entry out-fail out-plain
+                      crash crash-setter linger)
   kernel-log          print the last 20 kernel log lines about seccomp (type=1326) or oom
   kernel-log-access   let the runner read the kernel log and lift its rate limit; refuse while an audit daemon runs
 EOF
@@ -209,8 +226,7 @@ save_routing() {
 }
 
 routing_file() {
-  sysctl -w kernel.core_pattern=core
-  [[ "$(cat -- "$CORE_PATTERN")" == core ]] || fail "kernel.core_pattern does not read back as core"
+  set_routing core
 }
 
 routing_pipe() {
@@ -220,6 +236,80 @@ routing_pipe() {
   # different sizes different without reading them.
   [[ "$(cat -- "$CORE_PATTERN")" == "$(cat -- "$SAVED_ROUTING")" ]] \
     || fail "kernel.core_pattern does not match the saved value"
+}
+
+# Decision 0056 rule 9 (as reworded) and its amendment of 2026-11-13 (crashes): writes VALUE to
+# kernel.core_pattern and requires it to read back.
+set_routing() {
+  local value=$1
+  sysctl -w "kernel.core_pattern=$value" > /dev/null
+  [[ "$(cat -- "$CORE_PATTERN")" == "$value" ]] \
+    || fail "kernel.core_pattern does not read back as $value"
+}
+
+# Decision 0056 rule 9 (as reworded) and its amendment of 2026-11-13 (crashes): creates the
+# root-owned collector copy and the two counters, emptied. The copy lives outside the tool root,
+# so the manifest does not cover it.
+counters_install() {
+  install -d -o root -g root -m 0755 "$COUNTERS_DIR" "$COLLECTOR_DIR"
+  install -o root -g root -m 0755 "$ROOT/bin/artifree-execution-fixture" "$COLLECTOR"
+  install -o root -g root -m 0644 /dev/null "$COUNTERS_DIR/pipe.count"
+  install -o root -g root -m 0644 /dev/null "$COUNTERS_DIR/socket.count"
+}
+
+# Decision 0056 rule 9 (as reworded) and its amendment of 2026-11-13 (crashes): starts the socket
+# listener as a transient unit and waits for its socket. An existing path is refused first: the
+# listener refuses it too, and a stale socket would satisfy the wait.
+listener_start() {
+  ensure_saved_dir
+  [[ -x "$COLLECTOR" ]] || fail "no collector at $COLLECTOR; run counters-install first"
+  [[ ! -e "$SOCKET" && ! -L "$SOCKET" ]] || fail "$SOCKET already exists"
+  systemd-run --quiet --unit="$LISTENER_UNIT" --collect \
+    "$COLLECTOR" core-listener "$SOCKET" "$COUNTERS_DIR/socket.count"
+  local tries
+  for ((tries = 0; tries < 50; tries++)); do
+    [[ -S "$SOCKET" ]] && return 0
+    sleep 0.1
+  done
+  fail "the core listener did not create $SOCKET within 5 s"
+}
+
+# Decision 0056 rule 9 (as reworded) and its amendment of 2026-11-13 (crashes): stops the listener
+# if it runs and removes its socket. Both steps tolerate absence.
+listener_stop() {
+  if systemctl is-active --quiet "$LISTENER_UNIT"; then
+    systemctl stop "$LISTENER_UNIT"
+  fi
+  rm -f -- "$SOCKET"
+}
+
+# Decision 0056 rule 9 (as reworded) and its amendment of 2026-11-13 (crashes): points
+# kernel.core_pattern at the counting collector, so that each dump adds a line to pipe.count.
+routing_counter_pipe() {
+  [[ -x "$COLLECTOR" ]] || fail "no collector at $COLLECTOR; run counters-install first"
+  set_routing "|$COLLECTOR core-collector $COUNTERS_DIR/pipe.count"
+}
+
+# Decision 0056 rule 9 (as reworded) and its amendment of 2026-11-13 (crashes): points
+# kernel.core_pattern at the listener's socket, so that each dump adds a line to socket.count.
+routing_counter_socket() {
+  [[ -S "$SOCKET" ]] || fail "no listener socket at $SOCKET; run listener-start first"
+  set_routing "@$SOCKET"
+}
+
+# Decision 0056 rule 9 (as reworded) and its amendment of 2026-11-13 (crashes): points
+# kernel.core_pattern at an absolute path, which the provider must refuse.
+routing_absolute() {
+  set_routing /var/tmp/core
+}
+
+# Decision 0056 rule 9 (as reworded) and its amendment of 2026-11-13 (crashes): prints the line
+# counts of the two counters, which run.sh records.
+counters_show() {
+  local pipe socket
+  pipe="$(wc -l < "$COUNTERS_DIR/pipe.count")"
+  socket="$(wc -l < "$COUNTERS_DIR/socket.count")"
+  printf 'core.pipe=%s\ncore.socket=%s\n' "$pipe" "$socket"
 }
 
 profile_on() {
@@ -349,6 +439,7 @@ is_scenario() {
       lower | descriptors | watch | network | host | proc-dev | environment | marker) return 0 ;;
     copy | input-write | out-socket | out-many | out-big-file | out-big-total | out-bomb | out-deep | \
       out-invalid-name | out-collision | out-extension | out-no-entry | out-fail | out-plain) return 0 ;;
+    crash | crash-setter | linger) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -409,6 +500,8 @@ main() {
       tool-extra-on | tool-extra-off | tool-missing-on | tool-missing-off | \
       manifest-away | manifest-back | payload-break | payload-restore | \
       kernel-log | kernel-log-access) (( $# == 1 )) || usage ;;
+    counters-install | listener-start | listener-stop | routing-counter-pipe | \
+      routing-counter-socket | routing-absolute | counters-show) (( $# == 1 )) || usage ;;
     *) usage ;;
   esac
   if (( EUID != 0 )); then
@@ -419,6 +512,13 @@ main() {
     save-routing) save_routing ;;
     routing-file) routing_file ;;
     routing-pipe) routing_pipe ;;
+    counters-install) counters_install ;;
+    listener-start) listener_start ;;
+    listener-stop) listener_stop ;;
+    routing-counter-pipe) routing_counter_pipe ;;
+    routing-counter-socket) routing_counter_socket ;;
+    routing-absolute) routing_absolute ;;
+    counters-show) counters_show ;;
     profile-on) profile_on ;;
     profile-off) profile_off ;;
     launcher-away) move_away "$ROOT/bin/bwrap" ;;

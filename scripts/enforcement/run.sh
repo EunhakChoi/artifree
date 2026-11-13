@@ -31,6 +31,30 @@ require_one_passed() {
     || fail "$1 did not record exactly one passed test"
 }
 
+# counter NAME prints the line count that counters-show reports for core.NAME.
+counter() {
+  sudo "$PREPARE" counters-show | awk -F= -v key="core.$1" '$1 == key { print $2 }'
+}
+
+# trusted_crash NAME makes one crash with a core limit of 0 as the runner, outside any attempt,
+# and requires the counter core.NAME to go from 0 to 1. The collector counts asynchronously, so the
+# counter is polled for up to 5 s (50 tries of 0.1 s) instead of being read after a fixed wait.
+# It records both values (rule 13).
+trusted_crash() {
+  local name=$1 before after tries
+  before="$(counter "$name")"
+  [[ $before == 0 ]] || fail "the $name counter is $before before the trusted crash, not 0"
+  (cd "$(mktemp -d)" && sh -c 'ulimit -c 0; kill -SEGV $$') || true
+  after="$(counter "$name")"
+  for ((tries = 0; tries < 50; tries++)); do
+    [[ $after == 1 ]] && break
+    sleep 0.1
+    after="$(counter "$name")"
+  done
+  [[ $after == 1 ]] || fail "the $name counter is $after after 5 s of polling following the trusted crash, not 1"
+  printf 'core.%s.before=%s\ncore.%s.after=%s\n' "$name" "$before" "$name" "$after" >> "$OUT/environment.txt"
+}
+
 # run_direct BINARY LABEL TEST runs one ignored test as the runner, without privilege.
 run_direct() {
   local binary=$1 label=$2 name=$3
@@ -99,9 +123,9 @@ run_scenario() {
   || fail "this script prepares a disposable CI runner; it does not run on any other host"
 
 # After a failed step the conditions it removed are put back, so the host is not left with
-# the job's routing, its profile, a changed, extra, missing or moved tool file, or a payload
-# scenario other than exit. Each restore may fail on its own. The kernel log lines about the
-# failure are printed first, for diagnosis.
+# the job's routing, its profile, a changed, extra, missing or moved tool file, a payload
+# scenario other than exit, or the core listener. Each restore may fail on its own. The kernel
+# log lines about the failure are printed first, for diagnosis.
 restore_host() {
   local status=$?
   if ((status != 0)); then
@@ -115,6 +139,7 @@ restore_host() {
     sudo "$PREPARE" manifest-back 2> /dev/null || true
     sudo "$PREPARE" payload-restore 2> /dev/null || true
     sudo "$PREPARE" scenario exit 2> /dev/null || true
+    sudo "$PREPARE" listener-stop 2> /dev/null || true
     sudo "$PREPARE" profile-off 2> /dev/null || true
     sudo "$PREPARE" routing-pipe 2> /dev/null || true
   fi
@@ -316,6 +341,60 @@ done
 run_in_scenario "$lib_binary" io_tests out-plain io-planted job_planted_entries_are_refused "${record_option[@]}"
 run_in_scenario "$lib_binary" io_tests out-fail io-failed job_a_failed_attempt_is_not_collected "${record_option[@]}"
 run_in_scenario "$lib_binary" io_tests copy io-fresh job_a_fresh_attempt_succeeds_after_a_refused_one "${record_option[@]}"
+sudo "$PREPARE" scenario exit
+
+say "part 10: crashes"
+# R02ag (decision 0056, amendment of 2026-11-13, crashes). Every test runs in a unit whose core limit
+# is 1 MiB, so a missing guard cannot pass because the parent already had a limit of zero.
+sudo "$PREPARE" counters-install
+sudo "$PREPARE" listener-start
+sudo "$PREPARE" routing-file
+run_in_scenario "$lib_binary" crash_tests crash crash-crash job_crashes_leave_no_core -p LimitCORE=1M "${record_option[@]}"
+run_in_scenario "$lib_binary" crash_tests crash-setter crash-setter job_setter_crashes_leave_no_core -p LimitCORE=1M "${record_option[@]}"
+# Pipe routing: the launch is refused before any group exists, so the counter stays at 0; one trusted crash then moves it.
+sudo "$PREPARE" routing-counter-pipe
+run_in_scenario "$lib_binary" crash_tests crash crash-pipe job_pipe_routing_reaches_no_collector -p LimitCORE=1M "${record_option[@]}"
+trusted_crash pipe
+sudo "$PREPARE" routing-file
+sudo "$PREPARE" routing-counter-socket
+run_in_scenario "$lib_binary" crash_tests crash crash-socket job_socket_routing_reaches_no_collector -p LimitCORE=1M "${record_option[@]}"
+trusted_crash socket
+sudo "$PREPARE" routing-file
+sudo "$PREPARE" routing-absolute
+run_in_scenario "$lib_binary" crash_tests exit crash-absolute job_absolute_routing_is_refused -p LimitCORE=1M "${record_option[@]}"
+sudo "$PREPARE" routing-file
+# A change during an attempt: the test's linger attempt runs while this script sets the pipe routing.
+markers="$OUT/routing-change"
+mkdir -p -- "$markers"
+# The wait below takes the first attempt group it finds, so none may be left from an earlier test.
+leftover="$(find /sys/fs/cgroup -maxdepth 8 -type d -name 'attempt-*' -print -quit 2> /dev/null || true)"
+[[ -z $leftover ]] || fail "an attempt group is left before the routing change: $leftover"
+run_in_scenario "$lib_binary" crash_tests linger crash-change job_a_routing_change_stops_the_attempt -p LimitCORE=1M \
+  --setenv="ARTIFREE_ROUTING_MARKERS=$PWD/$markers" "${record_option[@]}" &
+change_pid=$!
+seen=""
+for ((tries = 0; tries < 300; tries++)); do
+  seen="$(find /sys/fs/cgroup -maxdepth 8 -type d -name 'attempt-*' -print -quit 2> /dev/null || true)"
+  [[ -n $seen ]] && break
+  kill -0 "$change_pid" 2> /dev/null || break
+  sleep 0.1
+done
+[[ -n $seen ]] || fail "no attempt group appeared within 30 s for the routing change"
+sudo "$PREPARE" routing-counter-pipe
+for ((tries = 0; tries < 600; tries++)); do
+  [[ -e "$markers/first" ]] && break
+  kill -0 "$change_pid" 2> /dev/null || break
+  sleep 0.1
+done
+[[ -e "$markers/first" ]] || fail "the routing change test wrote no first marker within 60 s"
+sudo "$PREPARE" routing-file
+touch -- "$markers/restored"
+wait "$change_pid" || fail "the routing change test failed"
+sudo "$PREPARE" listener-stop
+# Rule 13: the environment record must hold both counters before and after the trusted crash.
+for key in core.pipe.before core.pipe.after core.socket.before core.socket.after; do
+  grep -q "^${key}=" "$OUT/environment.txt" || fail "the environment record holds no $key"
+done
 sudo "$PREPARE" scenario exit
 
 say "restore the routing and the profile"

@@ -152,6 +152,7 @@ pub(super) fn admit_with(
         core_routing: String::from_utf8_lossy(&routing.pattern)
             .trim_end()
             .to_owned(),
+        core_routing_bytes: routing.pattern.clone(),
         delegated_controllers,
         effective_limits: evidence.limits,
         peak_memory_bytes: evidence.peak_memory_bytes,

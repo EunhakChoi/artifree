@@ -17,6 +17,11 @@
 //! lock, before the group exists, and removed when the attempt ends. The keeper holds the output
 //! root from the observation to the release, and is dropped unread on every path but a collected
 //! one.
+//!
+//! R02ag (0056 rule 14, amendment of 2026-11-13, crashes) reads `kernel.core_pattern` again at
+//! each poll of the stub and once after the group is empty. A change or a failed read ends the
+//! group, quarantines the provider in its process and refuses the attempt as `Routing`. A
+//! test-only step of the plan lists the scratch through the keeper.
 
 use std::fmt;
 use std::fs;
@@ -71,7 +76,9 @@ const FIXTURE_STUB: &[&str] = &["stub", FIXTURE.identity];
 /// The bytes of the fixture input's one page, `index.html`.
 const FIXTURE_PAGE: &[u8] = b"<!doctype html><title>fixture</title>";
 
-/// Set once a cleanup was not observed. The group then stays in place and launches are refused.
+/// Set once a cleanup was not observed, or once the routing changed or could not be read during an
+/// attempt (0056 rule 5, as reworded). The group of a failed cleanup stays in place; launches in
+/// this process are refused.
 static QUARANTINED: AtomicBool = AtomicBool::new(false);
 /// Numbers the attempt groups of this process, so that no two attempts share a name.
 static ATTEMPT_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -92,6 +99,10 @@ pub(super) struct AttemptPlan {
     /// checks and before the release (0056, amendment of 2026-11-13: planted trees). `None` in
     /// `fixture()`; a failure is `KeeperNotHeld`.
     pub(super) plant: Option<fn(&OwnedFd) -> io::Result<()>>,
+    /// A test-only step: after the group is ended, whatever the verdict, list the whole
+    /// scratch through the keeper into `AttemptEvidence::scratch` (0056,
+    /// amendment of 2026-11-13, crashes). `false` in `fixture()`.
+    pub(super) list_scratch: bool,
 }
 
 impl AttemptPlan {
@@ -104,6 +115,7 @@ impl AttemptPlan {
             readiness_deadline: READINESS_DEADLINE,
             release_record: &RELEASE,
             plant: None,
+            list_scratch: false,
         }
     }
 }
@@ -163,6 +175,11 @@ pub(super) enum AttemptFailure {
     OutputLimitExceeded,
     /// The group, the stub or a reader was not observed gone, so the attempt is quarantined.
     CleanupNotObserved,
+    /// `kernel.core_pattern` changed or could not be read during the attempt, at a poll of the
+    /// stub or after the group was empty (0056 rule 5, as reworded by the amendment of
+    /// 2026-11-13, crashes). The group was ended as at the wall deadline, and the provider is
+    /// quarantined in its process; the persisted quarantine is R02ah's.
+    Routing(AdmissionRefusal),
 }
 
 /// Why a launch produced no evidence of a run, with the group's counters when they were read.
@@ -221,6 +238,9 @@ pub(super) struct AttemptEvidence {
     /// The collected output with its manifest, or why there is none. Collected only after a
     /// passing verdict with exit status 0 (0042 rule 7).
     pub(super) output: Result<CollectedOutput, OutputRefusal>,
+    /// The scratch listing of the plan's test-only step, or the kind of the error that ended it;
+    /// `None` when the plan did not ask for it or no keeper was held. Not printed.
+    pub(super) scratch: Option<Result<Vec<String>, io::ErrorKind>>,
 }
 
 impl fmt::Display for AttemptEvidence {
@@ -355,6 +375,32 @@ fn await_empty_listing(
     }
 }
 
+/// The routing check of one attempt: the exact bytes that its admission read and the routing file
+/// to read again (0056, amendment of 2026-11-13, crashes). The default holds no bytes and no path,
+/// so its check fails closed.
+#[derive(Debug, Default)]
+struct RoutingWatch {
+    /// The bytes that admission read from `kernel.core_pattern`.
+    admitted: Vec<u8>,
+    /// The routing file, `kernel.core_pattern` of the admission's roots.
+    core_pattern: PathBuf,
+}
+
+impl RoutingWatch {
+    /// The watch of one attempt: the bytes in `report` and the routing file of `roots`.
+    fn of(report: &HostReport, roots: &AdmissionRoots<'_>) -> Self {
+        Self {
+            admitted: report.core_routing_bytes.clone(),
+            core_pattern: roots.core_pattern.to_path_buf(),
+        }
+    }
+
+    /// Reads the routing again, fresh, and compares it with the admitted bytes.
+    fn check(&self) -> Result<(), AdmissionRefusal> {
+        super::routing_unchanged(&self.admitted, fs::File::open(&self.core_pattern))
+    }
+}
+
 /// What one launch holds while its group exists. `settle` ends every part of it.
 #[derive(Debug, Default)]
 struct Session {
@@ -375,6 +421,8 @@ struct Session {
     exceeded: Arc<AtomicBool>,
     /// The keeper, once `release` opened it. Every path but a collected one drops it unread.
     keeper: Option<Keeper>,
+    /// The routing that every poll and the last check compare against.
+    routing: RoutingWatch,
 }
 
 /// What the group phase measured before the group was ended.
@@ -474,7 +522,10 @@ pub(super) fn launch_with(
     let group_path = delegated.join(&name);
 
     // From here on every path ends the group in `settle`, whatever the group phase returned.
-    let mut session = Session::default();
+    let mut session = Session {
+        routing: RoutingWatch::of(&report, roots),
+        ..Session::default()
+    };
     let phase = run_group(
         plan,
         roots,
@@ -490,6 +541,14 @@ pub(super) fn launch_with(
     let keeper = session.keeper.take();
     let usage = settled.usage;
     let refused = |failure: AttemptFailure| AttemptRefusal { failure, usage };
+    let scratch = scratch_listing(plan, keeper.as_ref());
+    // The last routing check runs once the group is empty, before the verdict (0056 rule 5, as
+    // reworded by the amendment of 2026-11-13, crashes). A refusal ends the attempt here. A group
+    // that was not observed gone is not empty: `settle` has quarantined the provider already, and
+    // the verdict names `CleanupNotObserved` first, whatever a poll saw.
+    if settled.cleanup_observed {
+        routing_after(&phase, &session.routing).map_err(refused)?;
+    }
     let outcome = Outcome {
         cleanup_observed: settled.cleanup_observed,
         output_exceeded: session.exceeded.load(Ordering::SeqCst),
@@ -523,6 +582,7 @@ pub(super) fn launch_with(
         filter_sha256,
         report,
         output,
+        scratch,
     })
 }
 
@@ -556,6 +616,40 @@ fn collect_output(
     keeper.collect(binding).map_err(OutputRefusal::Refused)
 }
 
+/// The last routing check, once the group is empty (0056 rule 5, as reworded by the amendment of
+/// 2026-11-13, crashes): a change or a failed read ends the group, quarantines the provider in its
+/// process and refuses the attempt. A routing refusal that a poll saw comes first; the check still
+/// runs once more.
+fn routing_after(
+    phase: &Result<Passed, AttemptFailure>,
+    watch: &RoutingWatch,
+) -> Result<(), AttemptFailure> {
+    let last = watch.check();
+    let refusal = match phase {
+        Err(AttemptFailure::Routing(refusal)) => Some(*refusal),
+        _ => last.err(),
+    };
+    if let Some(refusal) = refusal {
+        quarantine();
+        return Err(AttemptFailure::Routing(refusal));
+    }
+    Ok(())
+}
+
+/// The plan's test-only scratch listing through the keeper, taken after `settle`, whatever the
+/// verdict (0056, amendment of 2026-11-13, crashes). `None` when the plan does not ask for it or
+/// no keeper is held. It reaches the test in the evidence; a refused attempt carries none, and the
+/// crash tests require evidence.
+fn scratch_listing(
+    plan: &AttemptPlan,
+    keeper: Option<&Keeper>,
+) -> Option<Result<Vec<String>, io::ErrorKind>> {
+    if !plan.list_scratch {
+        return None;
+    }
+    keeper.map(|keeper| keeper.list_scratch().map_err(|error| error.kind()))
+}
+
 /// Maps the lock's refusal: contention is `Busy`, and nothing else is then done.
 fn lock_failure(refusal: LockRefusal) -> AttemptFailure {
     match refusal {
@@ -565,7 +659,9 @@ fn lock_failure(refusal: LockRefusal) -> AttemptFailure {
 }
 
 /// Records that a cleanup was not observed, so that later launches in this process are refused
-/// (decision 0042 rule 6). The attempt's verdict then names `CleanupNotObserved`.
+/// (decision 0042 rule 6), or that the routing changed during an attempt (0056 rule 5, as reworded
+/// by the amendment of 2026-11-13, crashes). The attempt's verdict then names `CleanupNotObserved`
+/// or `Routing`. It lives in this process only; the persisted quarantine is R02ah's.
 fn quarantine() {
     QUARANTINED.store(true, Ordering::SeqCst);
 }
@@ -789,8 +885,9 @@ fn read_ready(
     }
 }
 
-/// Polls the stub until it exits, the wall deadline passes or the output budget is exceeded.
-/// Returns the exit and the time from `start` to the observed exit.
+/// Polls the stub until it exits, the wall deadline passes, the output budget is exceeded or the
+/// routing is no longer the admitted one. Returns the exit and the time from `start` to the
+/// observed exit.
 fn await_exit(
     plan: &AttemptPlan,
     session: &mut Session,
@@ -798,14 +895,21 @@ fn await_exit(
 ) -> Result<(ExitStatus, Duration), AttemptFailure> {
     let child = session.child.as_mut().ok_or(AttemptFailure::Unobserved)?;
     loop {
-        match child.try_wait() {
+        let polled = child.try_wait();
+        let elapsed = start.elapsed();
+        if let Ok(Some(status)) = polled {
+            // The stub is reaped now, so `settle` must know it whatever the verdict below: a kill
+            // of a reaped child is not a failed cleanup.
+            session.exit = Some(status);
+        }
+        // The routing is read again at each poll, also at the poll that sees the exit (0056 rule
+        // 5, as reworded by the amendment of 2026-11-13, crashes). A change ends the group as at
+        // the wall deadline.
+        session.routing.check().map_err(AttemptFailure::Routing)?;
+        match polled {
             Ok(Some(status)) => {
-                // The stub is reaped now, so `settle` must know it whatever the verdict below:
-                // a kill of a reaped child is not a failed cleanup.
-                session.exit = Some(status);
                 // An exit that is first seen at or after the deadline is past it too: the
                 // deadline is absolute, whatever the polling interval.
-                let elapsed = start.elapsed();
                 running_verdict(
                     elapsed,
                     plan.wall_deadline,
@@ -817,7 +921,7 @@ fn await_exit(
             Err(_) => return Err(AttemptFailure::Unobserved),
         }
         running_verdict(
-            start.elapsed(),
+            elapsed,
             plan.wall_deadline,
             session.exceeded.load(Ordering::SeqCst),
         )?;
@@ -997,6 +1101,8 @@ fn join_reader(reader: Option<Capture>, within: Duration) -> Option<io::Result<V
     reader.join().ok()
 }
 
+#[cfg(test)]
+mod crash_tests;
 #[cfg(test)]
 mod io_tests;
 #[cfg(test)]
