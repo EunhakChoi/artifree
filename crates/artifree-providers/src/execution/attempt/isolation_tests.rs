@@ -874,6 +874,12 @@ fn job_proc_and_dev_pts_stay_inside() -> Result<(), Box<dyn Error>> {
     for name in PROC_WRITE_NAMES {
         require_line_starting(text, &format!("proc-dev {name} error="));
     }
+    for line in text
+        .lines()
+        .filter(|line| line.starts_with("proc-dev mount "))
+    {
+        record("canary.dev-pts.mount_in_attempt", line)?;
+    }
     require_exact_line(text, "proc-dev ptmx error=2");
     // The first process of the attempt's PID namespace, the launcher's init, runs in the launcher's
     // mount namespace, whose /dev/pts the launcher covers; its root must not open a master either.
