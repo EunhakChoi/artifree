@@ -5,10 +5,11 @@
 //! manifest, runs one trusted namespace check through the tool root's launcher and one
 //! trusted probe child in a probe cgroup. Every caller outside the tests receives a refusal,
 //! at best `IncompleteEnforcement` (0056 rule 16), and no host is called supported.
-//! `run_stub` and `run_bootstrap` exist for the test-support program only (0056 rule 4).
+//! `run_stub`, `run_bootstrap` and `write_probe_programs` exist for the test-support program only
+//! (0056 rule 4); the probe programs are of use only under the launch.
 //! The launch (0056 rule 14, R02ab and R02ac) is compiled only into this crate's tests, and its
-//! test payload runs the fixed resource and cleanup scenarios of R02ac; no caller outside them
-//! can start an attempt.
+//! test payload runs the fixed resource and cleanup scenarios of R02ac and the syscall-mapping
+//! and descriptor scenarios of R02ad; no caller outside them can start an attempt.
 //!
 //! Admission order; the first missing facility is reported (0056 rule 10):
 //! 1. Linux (`UnsupportedOperatingSystem`).
@@ -59,6 +60,9 @@ mod manifest;
 mod policy;
 #[cfg(target_os = "linux")]
 mod probe_group;
+// The generated probe programs of the enforcement job (decision 0056, amendment of 2026-11-13).
+#[cfg(target_os = "linux")]
+mod probes;
 #[cfg(target_os = "linux")]
 mod readiness;
 mod report;
@@ -69,6 +73,8 @@ mod usage;
 
 #[cfg(target_os = "linux")]
 pub use bootstrap::{BootstrapFailure, run_bootstrap, run_stub};
+#[cfg(target_os = "linux")]
+pub use probes::write_probe_programs;
 pub use report::HostReport;
 
 const CORE_PATTERN: &str = "/proc/sys/kernel/core_pattern";

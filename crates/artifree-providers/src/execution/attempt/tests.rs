@@ -341,7 +341,7 @@ impl Drop for ExecutionDir {
 
 /// The attempt groups under the delegated group. Once an admission has run, the test process is
 /// inside its `supervisor` child, so the delegated group is that child's parent.
-fn attempt_groups() -> Result<Vec<PathBuf>, Box<dyn Error>> {
+pub(super) fn attempt_groups() -> Result<Vec<PathBuf>, Box<dyn Error>> {
     let own = super::super::cgroup::discover_own_group(
         Path::new("/proc/self/cgroup"),
         Path::new("/sys/fs/cgroup"),

@@ -45,8 +45,10 @@ usage: prepare.sh VERB [ARGUMENT]
   payload-restore     restore the payload and rewrite the manifest
   scenario NAME       write NAME to etc/scenario and rewrite the manifest
                       (exit threads processes memory scratch-bytes scratch-inodes
-                      flood hang cpu survivors survivors-hang)
+                      flood hang cpu survivors survivors-hang probes clone3
+                      thread-refusal descendant-refusal lower descriptors watch)
   kernel-log          print the last 20 kernel log lines about seccomp (type=1326) or oom
+  kernel-log-access   let the runner read the kernel log and lift its rate limit; refuse while an audit daemon runs
 EOF
   exit 2
 }
@@ -61,7 +63,10 @@ fail() {
 # the scenario file that starts as `exit`, and the manifest last (decision 0056 rule 6). The
 # sandbox binds the tool root's lib and lib64 as /lib and /lib64 and nothing else, so a
 # library that ldd reports under /usr/lib (usrmerged hosts such as ubuntu-24.04) is copied to
-# the path it has inside the sandbox.
+# the path it has inside the sandbox. The fixture's write-probes mode writes the probe programs
+# under probes/ before the manifest, which covers them like every other file: "The fixture's
+# tool root also holds its generated probe programs, under the same manifest" (decision 0056
+# rule 6, as amended 2026-11-13).
 install_tool_root() {
   local fixture=$1 payload=$2
   [[ -f "$fixture" && -x "$fixture" ]] || fail "the fixture is not an executable file: $fixture"
@@ -79,6 +84,9 @@ install_tool_root() {
   install -o root -g root -m 0755 "$payload" "$ROOT/bin/artifree-execution-payload"
   copy_libraries "$payload"
   write_root_text 0644 "$ROOT/etc/scenario" exit
+  "$ROOT/bin/artifree-execution-fixture" write-probes "$ROOT/probes"
+  chown -R root:root "$ROOT/probes"
+  chmod -R 0755 "$ROOT/probes"
   write_manifest
 }
 
@@ -316,7 +324,8 @@ nomem_slice_off() {
 is_scenario() {
   case "$1" in
     exit | threads | processes | memory | scratch-bytes | scratch-inodes | flood | hang | \
-      cpu | survivors | survivors-hang) return 0 ;;
+      cpu | survivors | survivors-hang | probes | clone3 | thread-refusal | descendant-refusal | \
+      lower | descriptors | watch) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -336,6 +345,32 @@ kernel_log() {
   dmesg | { grep -E 'type=1326|oom' || true; } | tail -n 20
 }
 
+# Decision 0056 rule 9, part 3 as amended: this "lets the runner's account read the kernel log
+# (`kernel.dmesg_restrict` 0) and lifts the kernel's message rate limit (`kernel.printk_ratelimit`
+# 0), on the job's disposable runner only". Seccomp records reach the kernel log only while no
+# audit daemon holds the kernel's audit channel, so a running daemon is refused by name. The verb
+# prints one line, which run.sh records among the environment.
+kernel_log_access() {
+  local status=0 dmesg_restrict printk_ratelimit
+  pgrep -x auditd > /dev/null || status=$?
+  case "$status" in
+    0) fail "an audit daemon (auditd) is running, so seccomp records do not reach the kernel log" ;;
+    1) ;;
+    *) fail "the audit daemon check failed with status $status" ;;
+  esac
+  if systemctl is-active --quiet auditd; then
+    fail "the auditd service is active, so seccomp records do not reach the kernel log"
+  fi
+  sysctl -w kernel.dmesg_restrict=0 > /dev/null
+  sysctl -w kernel.printk_ratelimit=0 > /dev/null
+  dmesg_restrict="$(cat -- /proc/sys/kernel/dmesg_restrict)"
+  printk_ratelimit="$(cat -- /proc/sys/kernel/printk_ratelimit)"
+  [[ "$dmesg_restrict" == 0 ]] || fail "kernel.dmesg_restrict does not read back as 0"
+  [[ "$printk_ratelimit" == 0 ]] || fail "kernel.printk_ratelimit does not read back as 0"
+  printf 'kernel-log-access dmesg_restrict=%s printk_ratelimit=%s auditd=absent\n' \
+    "$dmesg_restrict" "$printk_ratelimit"
+}
+
 main() {
   local verb=${1:-}
   case "$verb" in
@@ -350,7 +385,7 @@ main() {
       nomem-slice-on | nomem-slice-off | tool-modify | tool-restore | \
       tool-extra-on | tool-extra-off | tool-missing-on | tool-missing-off | \
       manifest-away | manifest-back | payload-break | payload-restore | \
-      kernel-log) (( $# == 1 )) || usage ;;
+      kernel-log | kernel-log-access) (( $# == 1 )) || usage ;;
     *) usage ;;
   esac
   if (( EUID != 0 )); then
@@ -381,6 +416,7 @@ main() {
     payload-restore) payload_restore ;;
     scenario) set_scenario "$2" ;;
     kernel-log) kernel_log ;;
+    kernel-log-access) kernel_log_access ;;
   esac
 }
 

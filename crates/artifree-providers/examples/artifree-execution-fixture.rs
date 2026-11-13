@@ -12,23 +12,30 @@
 //! - `stub <identity>` runs the launch stub and `bootstrap <identity>` runs the
 //!   bootstrap (decision 0056 rule 3). On success each one replaces this process
 //!   with the next program, so they return only on failure.
+//! - `write-probes <directory>` writes the generated probe programs of decision
+//!   0056 (amendment of 2026-11-13) into the directory, one file per probe with
+//!   mode 0o755, and exits 0. The job's `prepare.sh` runs it while it assembles
+//!   the tool root.
 //!
-//! `false-ready`, `stub` and `bootstrap` exist on Linux only. Elsewhere, and for
-//! any other argument list (including an identity that is not UTF-8), the exit
-//! status is 2. A failing `false-ready` writes its error to stderr and exits
-//! with status 1. A failing `stub` or `bootstrap` writes its failure to stderr
-//! and exits with status 70. Status 3 means that a failing mode could not write
-//! its error to stderr at all.
+//! `false-ready`, `stub`, `bootstrap` and `write-probes` exist on Linux only.
+//! Elsewhere, and for any other argument list (including an identity that is
+//! not UTF-8), the exit status is 2. A failing `false-ready` writes its error
+//! to stderr and exits with status 1. A failing `stub`, `bootstrap` or
+//! `write-probes` writes its failure to stderr and exits with status 70. Status
+//! 3 means that a failing mode could not write its error to stderr at all.
 
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Display;
 use std::fs;
 use std::io::{self, Write};
+use std::path::Path;
 use std::process::ExitCode;
 
 #[cfg(target_os = "linux")]
-use artifree_providers::execution::{BootstrapFailure, run_bootstrap, run_stub};
+use artifree_providers::execution::{
+    BootstrapFailure, run_bootstrap, run_stub, write_probe_programs,
+};
 #[cfg(target_os = "linux")]
 use std::convert::Infallible;
 
@@ -39,6 +46,7 @@ fn main() -> ExitCode {
     let arguments: Vec<OsString> = env::args_os().skip(1).collect();
     match arguments.as_slice() {
         [mode] => run_mode(mode),
+        [mode, directory] if mode == "write-probes" => write_probes(Path::new(directory)),
         [mode, identity] => match (mode.to_str(), identity.to_str()) {
             (Some(name), Some(value)) => run_identity_mode(name, value),
             _ => ExitCode::from(2),
@@ -71,6 +79,23 @@ fn run_identity_mode(mode: &str, identity: &str) -> ExitCode {
 /// Other systems have no launch stub or bootstrap, so both modes exit with status 2.
 #[cfg(not(target_os = "linux"))]
 fn run_identity_mode(_mode: &str, _identity: &str) -> ExitCode {
+    ExitCode::from(2)
+}
+
+/// Writes the generated probe programs into `directory`.
+///
+/// A failure is written to stderr and exits with status 70.
+#[cfg(target_os = "linux")]
+fn write_probes(directory: &Path) -> ExitCode {
+    match write_probe_programs(directory) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => report_failure(&error, ExitCode::from(70)),
+    }
+}
+
+/// Other systems have no generated probe programs, so the mode exits with status 2.
+#[cfg(not(target_os = "linux"))]
+fn write_probes(_directory: &Path) -> ExitCode {
     ExitCode::from(2)
 }
 
