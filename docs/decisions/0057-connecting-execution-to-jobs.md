@@ -1,13 +1,50 @@
 # 0057: Connecting the Linux provider to jobs
 
-Date: 2026-11-14. Status: **accepted as a plan; not implemented**. Roadmap:
-R02b.
+Date: 2026-11-14. Status: **accepted as a plan; R02ba (the store) is
+implemented; R02bb and R02bc are not**. Roadmap: R02b.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider, R02aa to R02ai),
 > [0030](0030-persistent-jobs-and-worker.md) (jobs and the worker),
 > [0036](0036-multi-user-identity.md) (users and `state_generation`) and
 > [0055](0055-operating-background-work.md) (the supervised worker).
+
+> **Note, 2026-11-14 (R02ba).** The store of rules 1, 3 and 5 to 14 exists.
+> Schema 14 rebuilds `jobs` with the kind `run_profile`, its `profile`
+> column and the failure `execution_unavailable`, and adds
+> `execution_attempts`. A database of version 8 to 13 is upgraded with
+> foreign keys switched off before the transaction and back on after it,
+> since they cannot change inside it and deferring them is not enough: the
+> implicit delete of the old table leaves a deferred violation. A row count
+> runs before the commit, and a full foreign key check runs before and after
+> the steps: the upgrade refuses only a violation the steps added, so a
+> dangling row an earlier version already left behind is kept, not a reason
+> to refuse the file. A
+> claim that knows no profile of a due `run_profile` job ends it as
+> `execution_unavailable` with no attempt; the worker of this build knows
+> none, so it ends every such job. The job reads, the change feed and the
+> open-job bound leave the kind out, and the API answers such a job as not
+> found. Four choices the rules left open: a checkpoint of a
+> `verify_revision` lease is `NotFound`, since such a job has no attempt;
+> `authority` is the store's mirror of the owner check, which only a raw edit
+> reaches while ownership is fixed; an attempt whose fence is lower than the
+> highest of its job's attempts was replaced by a later claim, so it answers
+> `fence`, stores nothing and moves no job, and no job moves while one of its
+> attempts is unsettled; and trash and purge revoke every unsettled attempt,
+> not only a live one, replacing a `lease` or `shutdown` reason, which would
+> otherwise retry a trashed or purged job at settlement. Trash also revokes the
+> settled attempt of a job still waiting for publication and ends that job
+> cancelled with a raised fence, since no later settlement would end it and a
+> recovery must not let the old request publish. Publication refuses a binding
+> whose profile or tool digest differs from the attempt row's, and stores the
+> counts with no mismatch count: a `run_profile` result is the counts
+> `JobRecord.counts` carries, never a verify report. Real SQLite tests cover each transition and race of the R02ba row,
+> and mutations of the generation check, the trash revocation, the reason
+> order, the reclaim gate, the terminal gate, the purge tombstone, the
+> replaced-attempt check, the replaced `lease` reason, the binding check, the
+> settled-attempt trash, the empty mismatch count and the before-and-after
+> foreign key comparison each fail their case. 0030 rule 15 and 0042 rule 6 have the notes rule 14
+> asks for. Nothing executes yet: R02bb adds the worker.
 
 ## Context
 

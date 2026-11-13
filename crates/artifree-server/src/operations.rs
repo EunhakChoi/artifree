@@ -1543,7 +1543,7 @@ pub(crate) async fn enqueue_job(
         state.feed().committed();
     }
     Ok(EnqueueJobResponse {
-        job: job_dto(&receipt.job),
+        job: job_dto(&receipt.job)?,
         replayed: receipt.delivery == Delivery::Replayed,
     })
 }
@@ -1557,7 +1557,7 @@ pub(crate) async fn show_job(
     let job = state
         .run(move |artifacts| artifacts.job(&actor, &id))
         .await?;
-    Ok(job_dto(&job))
+    job_dto(&job)
 }
 
 /// A page of the actor's jobs: those of the artifact `artifact` names, or all
@@ -1582,7 +1582,11 @@ pub(crate) async fn list_jobs(
         })
         .await?;
     Ok(JobList {
-        jobs: page.jobs.iter().map(job_dto).collect(),
+        jobs: page
+            .jobs
+            .iter()
+            .map(job_dto)
+            .collect::<Result<Vec<_>, _>>()?,
         next_page_token: page.next_page_token,
     })
 }
@@ -1604,7 +1608,7 @@ pub(crate) async fn cancel_job(
         state.feed().committed();
     }
     Ok(CancelJobResponse {
-        job: job_dto(&receipt.job),
+        job: job_dto(&receipt.job)?,
         replayed: receipt.delivery == Delivery::Replayed,
     })
 }
@@ -2008,14 +2012,32 @@ pub(crate) fn data_base(value: u64) -> Result<AppDataVersion, ApiError> {
     Ok(AppDataVersion(value))
 }
 
-fn job_dto(record: &JobRecord) -> WireJob {
-    WireJob {
+/// Converts a job record to its wire form.
+///
+/// A `run_profile` job is never returned by a read (decision 0057 rule 3: hidden
+/// from GET /v1/jobs, GET /v1/jobs/{id}, the feed, MCP and CLI); should one
+/// reach here it is answered as not found, never mapped onto a wire value.
+fn job_dto(record: &JobRecord) -> Result<WireJob, ApiError> {
+    let kind = match record.kind {
+        JobKind::VerifyRevision => WireJobKind::VerifyRevision,
+        JobKind::RunProfile => return Err(ApiError::not_found("job not found")),
+    };
+    let failure = match record.failure {
+        None => None,
+        Some(JobFailure::RevisionUnavailable) => Some(WireFailure::RevisionUnavailable),
+        Some(JobFailure::StorageUnavailable) => Some(WireFailure::StorageUnavailable),
+        Some(JobFailure::LeaseExpired) => Some(WireFailure::LeaseExpired),
+        Some(JobFailure::Internal) => Some(WireFailure::Internal),
+        // Only a run_profile job ends this way, and no read returns one.
+        Some(JobFailure::ExecutionUnavailable) => {
+            return Err(ApiError::not_found("job not found"));
+        }
+    };
+    Ok(WireJob {
         id: record.id.to_string(),
         artifact_id: record.artifact.to_string(),
         revision: record.revision.0,
-        kind: match record.kind {
-            JobKind::VerifyRevision => WireJobKind::VerifyRevision,
-        },
+        kind,
         state: match record.state {
             JobState::Queued => WireJobState::Queued,
             JobState::Running => WireJobState::Running,
@@ -2031,12 +2053,7 @@ fn job_dto(record: &JobRecord) -> WireJob {
         started_at_ms: record.started_at.map(|time| time.0),
         finished_at_ms: record.finished_at.map(|time| time.0),
         retry_at_ms: (record.state == JobState::RetryScheduled).then_some(record.run_after.0),
-        failure: record.failure.map(|failure| match failure {
-            JobFailure::RevisionUnavailable => WireFailure::RevisionUnavailable,
-            JobFailure::StorageUnavailable => WireFailure::StorageUnavailable,
-            JobFailure::LeaseExpired => WireFailure::LeaseExpired,
-            JobFailure::Internal => WireFailure::Internal,
-        }),
+        failure,
         result: record.report.as_ref().map(|report| JobResult {
             verdict: if report.is_ok() {
                 JobVerdict::Ok
@@ -2060,7 +2077,7 @@ fn job_dto(record: &JobRecord) -> WireJob {
                 .collect(),
             truncated: report.is_truncated(),
         }),
-    }
+    })
 }
 
 fn commit_response(receipt: CommitReceipt) -> CommitResponse {

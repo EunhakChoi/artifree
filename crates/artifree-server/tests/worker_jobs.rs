@@ -14,7 +14,8 @@ use artifree_domain::change::ChangeSequence;
 use artifree_domain::identity::{ActorId, ArtifactId, UnixMillis};
 use artifree_domain::job::VerifyReport;
 use artifree_domain::job::{
-    JobFailure, JobId, JobKind, JobState, MAX_ATTEMPTS, MAX_FINDINGS, Problem, WorkerId,
+    AttemptIdentity, CheckpointAnswer, JobFailure, JobId, JobKind, JobState, MAX_ATTEMPTS,
+    MAX_FINDINGS, Problem, WorkerId,
 };
 use artifree_domain::package::{FilePackage, PackagePath};
 use artifree_domain::{ArtifactKind, MetadataRevision};
@@ -25,8 +26,9 @@ use artifree_ports::artifact_store::{
     UnreferencedContent,
 };
 use artifree_ports::job_store::{
-    Checkpoint, Claim, JobCancel, JobClaim, JobListing, JobReceipt, JobRecord, JobStore,
-    JobStoreError, Lease, NewJob, Retry,
+    AttemptRow, Checkpoint, Claim, JobCancel, JobClaim, JobListing, JobReceipt, JobRecord,
+    JobStore, JobStoreError, Lease, NewJob, NewProfileJob, ProfileBinding, ProfileCounts, Retry,
+    SettleOutcome,
 };
 use artifree_providers::storage::{DATABASE_FILE, SqliteStore};
 use rusqlite::Connection;
@@ -246,6 +248,42 @@ impl JobStore for Flaky {
     fn release_job(&self, lease: &Lease, now: UnixMillis) -> Result<JobRecord, JobStoreError> {
         self.inner.release_job(lease, now)
     }
+    fn enqueue_profile_job(&self, request: NewProfileJob<'_>) -> Result<JobReceipt, JobStoreError> {
+        self.inner.enqueue_profile_job(request)
+    }
+    fn checkpoint_attempt(
+        &self,
+        lease: &Lease,
+        attempt: &AttemptIdentity,
+        now: UnixMillis,
+        lease_ms: u64,
+    ) -> Result<CheckpointAnswer, JobStoreError> {
+        self.inner.checkpoint_attempt(lease, attempt, now, lease_ms)
+    }
+    fn settle_attempt(
+        &self,
+        attempt: &AttemptIdentity,
+        now: UnixMillis,
+    ) -> Result<SettleOutcome, JobStoreError> {
+        self.inner.settle_attempt(attempt, now)
+    }
+    fn complete_profile_job(
+        &self,
+        lease: &Lease,
+        attempt: &AttemptIdentity,
+        binding: ProfileBinding<'_>,
+        counts: ProfileCounts,
+        now: UnixMillis,
+    ) -> Result<JobRecord, JobStoreError> {
+        self.inner
+            .complete_profile_job(lease, attempt, binding, counts, now)
+    }
+    fn attempt_row(&self, attempt: &AttemptIdentity) -> Result<Option<AttemptRow>, JobStoreError> {
+        self.inner.attempt_row(attempt)
+    }
+    fn unsettled_attempts(&self) -> Result<Vec<AttemptRow>, JobStoreError> {
+        self.inner.unsettled_attempts()
+    }
 }
 
 /// Hooks at the points between files.
@@ -411,6 +449,8 @@ impl Fixture {
             worker: &worker(who),
             now: self.clock.now(),
             lease_ms: LEASE,
+            known_profiles: &[],
+            execution: None,
         })?;
         claim.claimed.ok_or("no job was due")?;
         self.clock.advance(i64::try_from(LEASE)? + 1);
@@ -697,6 +737,8 @@ fn heartbeats_keep_a_slow_job_from_being_taken_over() -> TestResult {
                 worker: &worker("thief"),
                 now: fixture.clock.now(),
                 lease_ms: LEASE,
+                known_profiles: &[],
+                execution: None,
             }),
             Ok(Claim {
                 claimed: Some(_),

@@ -251,6 +251,14 @@ run`, jobs stay `queued`, and every surface says so (the tool description,
     (`expire_job_leases`), because a lease belongs to a worker on the machine
     that made the backup; the restored directory's worker runs the job again,
     with a new fence. Nothing of the old lease is resumed.
+
+    > **Note, 2026-11-14.** This rule holds for `verify_revision`. The
+    > untrusted kind `run_profile` of
+    > [0057](0057-connecting-execution-to-jobs.md) (rules 8 to 13) follows
+    > 0042 rule 6 instead: trash revokes its live attempt, purge keeps a
+    > `cleanup_pending` tombstone and ends the job only at settlement, and a
+    > restore marks its live attempts `cleanup_pending`.
+
 16. **Content cleanup (0029, decision 10).** The tables hold no content
     digest: a job reaches file content only through `revision_files`, which
     the unreferenced-content rule already counts, so a job pins nothing the

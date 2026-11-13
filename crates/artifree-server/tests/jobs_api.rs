@@ -861,6 +861,8 @@ async fn cancelling_a_running_job_asks_and_the_worker_confirms() -> TestResult {
             worker: &"worker-held".parse()?,
             now: harness.clock.now(),
             lease_ms: 60_000,
+            known_profiles: &[],
+            execution: None,
         })?
         .claimed
         .ok_or("nothing claimed")?;

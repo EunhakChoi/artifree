@@ -157,6 +157,11 @@ pub fn run_next_observed<S: ArtifactStore + JobStore>(
         worker,
         now: clock.now(),
         lease_ms: config.lease_ms,
+        // This build knows no profile (decision 0057 rule 1): a claim ends every
+        // due run_profile job as execution_unavailable and reports it in
+        // Claim::settled, so this worker never runs one.
+        known_profiles: &[],
+        execution: None,
     })?;
     for record in &claim.settled {
         on_claim(ClaimEvent::Settled(record));

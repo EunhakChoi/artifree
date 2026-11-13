@@ -442,6 +442,13 @@ proof of settlement. R02b must update the kind-specific storage transitions,
 backup/restore invariants and these ADR cross-references together. Existing
 trusted verification still follows decision 0030 rule 15 unchanged.
 
+> **Note, 2026-11-14 (R02ba).** The storage transitions of this rule for the
+> untrusted kind `run_profile` are those of
+> [0057](0057-connecting-execution-to-jobs.md) rules 5 to 14: the attempt
+> table that is also the purge tombstone, settlement by attempt identity,
+> cleanup before reclaim and before a terminal state, trash and purge
+> revocation, and the restore marking. 0030 rule 15 names them too.
+
 ### 7. Output admission and publication
 
 R02a collects output in memory before releasing the private mount; no success
