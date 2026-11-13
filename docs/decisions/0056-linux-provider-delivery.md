@@ -1131,85 +1131,116 @@ how; where the two could be read differently, 0042 holds.
 >   directory, not a link, owned by the provider's account, no group or other
 >   permission). It holds one record per attempt that may still own a
 >   resource, named `<identity>.record`, where the identity is 16 bytes from
->   `getrandom`, written as 32 lowercase hexadecimal digits. A record is at
->   most 1 KiB of text: the line `artifree-attempt-v1`, then `identity=`,
->   `boot=` (the 36 characters of `/proc/sys/kernel/random/boot_id`),
->   `parent=` (the absolute path of the delegated group in which the attempt
->   group is made) and `group=` (the attempt group's name, of the form
->   `attempt-<digits>-<digits>`), one per line, in this order. It holds no
->   file content, input, output, credential or digest of them. The database
->   identity and the job's identity and fence of 0042 rule 6 are R02b's, which
->   adds them as further lines of a `v2` record.
-> - **When it is written.** Under the admission lock and after the
->   reconciliation below, before the input is staged and before the group is
->   made: the record is written to a temporary file in `attempts` that is
->   created exclusively with mode `0600`, synced, renamed to its name, and the
->   directory is synced. A failure refuses the attempt as
->   `NotStarted(RegistryNotWritten)` before any resource exists. The record is
->   removed, and the directory synced, only after the attempt's group was
->   observed gone and its staged input removed. A record that cannot be
->   removed then quarantines the provider as below.
+>   `getrandom` written as 32 lowercase hexadecimal digits, and a record
+>   being written, named `.<identity>.tmp`. A record is at most 1 KiB of
+>   text: the line `artifree-attempt-v1`, then `identity=`, `machine=` (the
+>   32 digits of `/etc/machine-id`), `boot=` (the 36 characters of
+>   `/proc/sys/kernel/random/boot_id`), `cgroupns=` (the target of
+>   `/proc/self/ns/cgroup`), `parent=` (the path, relative to the cgroup mount, of the delegated group in which the attempt group is made) and
+>   `group=`, one per line, in this order. It holds no file content, input,
+>   output, credential or digest of them. The database identity and the job's
+>   identity and fence of 0042 rule 6 are R02b's, which adds them as further
+>   lines of a `v2` record.
+> - **The group's name comes from the identity.** The attempt group is named
+>   `attempt-<a>-<b>`, where `a` and `b` are the identity's first and last
+>   eight bytes as unsigned decimal numbers, which is the form the guardian
+>   accepts. A record whose `group=` is not the name of its own identity is
+>   malformed. So a record can only ever name a group that this record's
+>   attempt made, never a group of another attempt, another process or a
+>   reused process identifier.
+> - **When it is written.** Under the admission lock, after admission and
+>   the reconciliation below, before the input is staged and before the group
+>   is made: the record is written to its temporary file, created exclusively
+>   with mode `0600`, synced, renamed to its name, and the directory is
+>   synced. A failure refuses the attempt as `NotStarted(RegistryNotWritten)`
+>   before any resource exists. After the attempt, the record is removed and
+>   the directory synced only when the attempt did not quarantine, its group
+>   was observed gone and its staged input removed. An attempt that
+>   quarantines keeps its record.
 > - **Reconciliation.** Under the admission lock, after the quarantine check
->   below and before admission, the provider reads every entry of `attempts`. An
->   entry that is not a regular file named like a record, or not a record of
->   the format above (an unknown line, a missing or repeated field, a name of
->   another form, a parent that is not absolute or holds a `.` or `..`
->   component, more than 1 KiB), is not reconciled: it quarantines the
->   provider, and nothing it names is touched. A temporary file left by a
->   write is removed. For each valid record:
->   - **The same boot.** The provider opens the record's parent beneath the
->     cgroup mount, with `openat2` and `RESOLVE_BENEATH`,
->     `RESOLVE_NO_SYMLINKS` and `RESOLVE_NO_MAGICLINKS`, and requires it to be
->     owned by the provider's account. It then opens the group by its name
->     beneath that handle the same way. A parent or a group that does not
->     exist means the group is gone: its processes are gone, and the kernel
->     removed it only empty. A group that exists is killed through
->     `cgroup.kill`, observed with `populated 0` within the cleanup
->     observation deadline and removed. A parent that is not the account's,
->     or any other failure, quarantines the provider and leaves the record.
->   - **A changed boot.** The record's boot identity differs from the
+>   and after admission, so that the cgroup mount, the delegated group and
+>   `cgroup.kill` are known to work and a host that admission refuses leaves
+>   its records untouched, the provider reads every entry of `attempts`. A
+>   regular file named `.<identity>.tmp` is removed: its rename never
+>   happened, so nothing it would name was made. Any other entry that is not
+>   a regular file named like a record, and any record that is not of the
+>   format above (an unknown line, a missing or repeated field, a `group=`
+>   that is not its identity's name, a parent that is absolute, empty or holds a `.` or `..` component, more than
+>   1 KiB), is not reconciled: it quarantines the provider, and nothing it
+>   names is touched. For each valid record:
+>   - **Another machine.** Its machine identity differs from the host's: a
+>     restore onto another machine, which 0042 rule 6 puts outside the
+>     supported recovery profile until the operator reconciles it. It
+>     quarantines the provider, touches nothing, and the refusal states that
+>     remote cleanup cannot be proved.
+>   - **A changed boot on this machine.** Its boot identity differs from the
 >     kernel's. No process or mount of an earlier boot survives a reboot, and
 >     a group of the same name now belongs to the new boot, so the provider
->     touches no group: it only removes the record. A restore onto another
->     machine is outside the supported recovery profile (0042 rule 6); its
->     records are reconciled like this one, and the plan states that no
->     remote cleanup is proved.
->   - After a group was seen gone, the staged input of the execution
->     directory is removed and then the record. Reconciliation ends after the
->     first quarantine, so that later records stay for the operator.
+>     touches no group and only removes the record.
+>   - **The same boot.** Its cgroup namespace must be the provider's own;
+>     otherwise the path may resolve elsewhere, and the record quarantines
+>     the provider. The provider then opens the record's relative parent beneath its handle on the cgroup mount, opened at admission, with `openat2` and `RESOLVE_BENEATH`,
+>     `RESOLVE_NO_SYMLINKS` and `RESOLVE_NO_MAGICLINKS`, requires it to be
+>     owned by the provider's account, and opens the group by its name
+>     beneath that handle the same way. A parent or a group that does not
+>     exist means the group is gone: the namespace is the same, so the path
+>     names the same place, and the kernel removes a group only when it is
+>     empty. A group that exists is killed through `cgroup.kill`, observed
+>     with `populated 0` within the cleanup observation deadline and removed.
+>     A parent that is not the account's, and any other failure, quarantines the provider and leaves the record. Beneath the mount, the record cannot reach a group that is not its own: the name carries the record's random identity, so it names only the group its attempt made, and the parent's owner is the provider's account.
+>   - After a group was seen gone (or touched by no rule, at a changed
+>     boot), the staged input of the execution directory is removed and then
+>     the record. Reconciliation stops at the first quarantine, so that the
+>     remaining records stay for the operator.
 > - **The persisted quarantine.** Every point that sets the in-process
 >   quarantine today (a cleanup that was not observed, a routing change, a
->   guardian not reaped, a record that cannot be reconciled or removed) also
->   writes a file `quarantine` in the execution directory, created with mode
->   `0600` and synced, holding `artifree-quarantine-v1` and `reason=<word>`,
->   where the reason is `cleanup`, `routing`, `guardian` or `registry`. A
->   failed write leaves the in-process quarantine. Under the lock, while that
->   file exists, whatever it holds, every launch is refused as `Quarantined`
->   first, before reconciliation and admission, so that nothing a quarantined
->   directory names is touched again, and the refusal reads that operator
->   action is required. Nothing in the product removes the file; the
->   operator removes it after settling the host, and the plan states this in
->   the module's documentation. Trusted verification is unaffected.
+>   guardian not reaped) and every refusal of reconciliation also writes a
+>   file `quarantine` in the execution directory: created exclusively with
+>   mode `0600`, holding `artifree-quarantine-v1` and `reason=<word>` (the
+>   reason is `cleanup`, `routing`, `guardian` or `registry`), synced, and
+>   then the directory synced. An existing file is left as it is, since the
+>   directory is quarantined already. The file is written before the
+>   attempt's record could be removed, so a process that dies in between
+>   leaves both. A write that fails keeps the in-process quarantine and the
+>   record, and the attempt is refused as `QuarantineNotPersisted`, so that
+>   the caller learns that a restart would not remember it. Under the lock,
+>   before admission and reconciliation, the provider looks the file up: if
+>   it exists, whatever it holds, or if the lookup fails with anything but
+>   `ENOENT`, the launch is refused as `Quarantined`, and the refusal reads
+>   that operator action is required. Nothing in the product removes the
+>   file; the operator removes it after settling the host, as the module's
+>   documentation states. Trusted verification is unaffected.
 > - **Phases, for the tests.** Two phases join R02ah's: `registered` (the
->   record is durable, nothing else exists) and `created` (the group exists,
->   no guardian and no stub). R02ah's `hold` and `stall` apply to them.
+>   record is durable, nothing else exists) and `created` (the input is
+>   staged and the group exists; the guardian and the stub do not, as in
+>   R02ah's order). R02ah's `hold` and `stall` apply to them, and a supervisor
+>   killed there leaves no guardian, whatever the plan's guardian switch.
+> - **Reconciliation alone, for the tests.** A test-only entry takes the lock,
+>   checks the quarantine, admits and reconciles, and returns what it did for
+>   each record, so that a test can look at the execution directory before
+>   any new attempt stages its own input.
 > - **The tests in the job.** Each runs in its own execution directory:
 >   - The death of the supervisor at `registered` and at `created`, in a unit
->     with `KillMode=process` as R02ah's `death_at`, with the guardian. Then
->     a second unit runs a launch of the fixture plan with the `exit`
->     scenario in the same execution directory: it passes, the dead
->     attempt's record and staged input are gone, no group named in it is
->     left, and the new attempt's own record is gone once it returns.
+>     with `KillMode=process` as R02ah's `death_at`, which also requires no
+>     guardian line. A second unit then reconciles alone in the same
+>     execution directory: the dead attempt's record is gone, at `created`
+>     its staged input is gone too, and no group of its name is left. A
+>     launch of the fixture plan with the `exit` scenario then passes and
+>     leaves no record.
 >   - A record of the same boot whose group holds a trusted `sleep`, made by
->     the test beneath its own delegated group: the next launch kills it,
->     sees the group empty, removes it and the record, and passes.
->   - A record of another boot whose group name names a live decoy group
->     with a trusted `sleep`: the next launch leaves the decoy and its
->     process alone, removes the record and passes.
->   - A record whose group is not of the attempt form, naming a decoy group
->     beneath the test's delegated group, and a malformed record: each launch
->     is refused as `Quarantined`, the decoy and its process are untouched,
->     and the record stays.
+>     the test beneath its own delegated group with the name of the record's
+>     identity: reconciliation kills it, sees the group empty, removes it and
+>     the record.
+>   - A record of another boot on this machine whose group names a live
+>     decoy group with a trusted `sleep`: reconciliation leaves the decoy and
+>     its process alone and removes the record.
+>   - Records that must quarantine, each in its own directory, with a decoy
+>     that holds a trusted `sleep`: a `group=` that is not its identity's
+>     name, naming the decoy beneath the test's delegated group; a parent
+>     owned by root, made by the preparation script, holding the decoy; a relative parent with a `..` component that resolves to the decoy's parent;
+>     another machine's identity; another cgroup namespace; and a file that
+>     is not a record. Each is refused as `Quarantined` with the operator
+>     text, the decoy and its process are untouched, and the record stays.
 >   - The routing change of R02ag in one process, then a second process in a
 >     new unit with the same execution directory: its launch is refused as
 >     `Quarantined` with the operator text, and once the test removes the
@@ -1217,25 +1248,32 @@ how; where the two could be read differently, 0042 holds.
 >   - Every earlier job test passes with the registry present, and leaves no
 >     record behind.
 > - **Unit tests.** The record's writer and its strict parser over a table of
->   malformed records; the name and path checks; the decision for the same
->   and a changed boot as a pure function; the quarantine file's presence
->   refusing a launch, in a temporary execution directory, with no group.
+>   malformed records; the group name of an identity; the decision for
+>   another machine, a changed boot, another namespace and the same boot as
+>   a pure function; the quarantine lookup refusing a launch when the file
+>   exists and when the lookup fails, in a temporary execution directory,
+>   with no group.
 > - **The mutations.** Each must fail its test in the job:
 >   - Reconciliation skipped: the same-boot record's `sleep` survives.
 >   - The boot identity ignored: the decoy's `sleep` of another boot is
 >     killed.
 >   - The group-name check removed: the decoy beneath the test's group is
 >     killed.
+>   - The `..` check removed: the decoy reached through `..` is killed.
 >   - The persisted quarantine not written: the second process launches.
 >   - The quarantine file not read: the second process launches.
->   - The record not removed after an attempt: the fixture plan's test,
->     which requires no record left once the launch returns.
+>   - The staged input not removed by reconciliation: the death at
+>     `created`, whose input is then still there.
+>     The ownership check of the parent has its job test but no mutation: the
+>     kernel's own permission check refuses the kill of a root-owned group
+>     too, so removing the provider's check changes no observable outcome.
 >
 > The rules, reworded:
 >
 > - **Rule 5.** Under the admission lock, the provider checks the persisted
->   quarantine, then reconciles the registry, then admits, and it writes the
->   attempt's record before the input is staged and the group made.
+>   quarantine, then admits, then reconciles the registry, and it writes the
+>   attempt's record before the input is staged and the group made; the
+>   group's name comes from the record's identity.
 > - **Rule 14.** The R02ai row is reworded as below.
 > - **Rule 17.** A new R02ai point: that a process in a new unit can kill,
 >   observe and remove an attempt group that a dead supervisor's unit left
@@ -1749,7 +1787,7 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
 | R02af | Input and output as amended on 2026-11-13: a pinned input checked against its listing and bound read-only at `/input` from a fresh staging directory; the keeper opened through `/proc` before the release with its mount id checked; collection after a passing verdict, beneath the output root, with the bounds and refusals of the amendment and a bound manifest; the private mount tree with a `noexec` input; payload-made and planted hostile trees, the verdicts, the freed tmpfs, and the ten mutations.                                                                                                                                                                                                                                                 | 3 (input), 7, 8       |
 | R02ag | The crash acceptance as amended on 2026-11-13 (crashes): the scratch root as the payload's working directory, the `crash` and `crash-setter` fixtures under file routing with a 1 MiB parent limit, limits before and after `exec`, a scratch with no core and no stored core; the pipe and socket routes refused with their counters at zero and then shown live; an absolute pattern refused; a routing change during an attempt that ends it and quarantines the provider; and the six mutations.                                                                                                                                                                                                                                                               | 5 (cores), 8          |
 | R02ah | The guardian as amended on 2026-11-13 (the guardian): a fixture mode in the tool root that stays in `supervisor`, is started before the stub and ends the group on its socket's end of file, an expired renewal window or the absolute deadline; renewals only after a heartbeat that confirms fence, cancel, generation and authority, against a stand-in store (revoked fence, cancel, generation, authority, unavailable, a stalled supervisor, 120 seconds of confirmations); the death of the supervisor at five phases in a unit with `KillMode=process`, and once without the guardian.                                                                                                                                                                     | 6, 8                  |
-| R02ai | The attempt registry as amended on 2026-11-14 (the attempt registry): a durable record before the input and the group, reconciliation under the lock for the same and a changed boot, strict records whose names cannot reach other groups, the persisted quarantine with its operator text, the death of the supervisor at `registered` and `created`, and the six mutations.                                                                                                                                                                                                                                                                                                                                                                                     | 6, 8                  |
+| R02ai | The attempt registry as amended on 2026-11-14 (the attempt registry): a durable record before the input and the group, reconciliation under the lock for the same and a changed boot, strict records whose names cannot reach other groups, the persisted quarantine with its operator text, the death of the supervisor at `registered` and `created`, reconciliation alone for the tests, and the seven mutations.                                                                                                                                                                                                                                                                                                                                               | 6, 8                  |
 
 15. **What R02a leaves to R02b.** R02ab to R02ag launch without the ownership
     record of 0042, rule 6; R02ai adds it. Everything that needs the job store
