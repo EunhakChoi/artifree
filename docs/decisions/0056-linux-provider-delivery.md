@@ -525,6 +525,165 @@ how; where the two could be read differently, 0042 holds.
 >   through `/proc/1/root` and both mutations.
 > - **Rule 17.** The R02ae point is settled by this amendment.
 
+> **Amendment, 2026-11-13 (input and output).** Rule 17 left to R02af how
+> the keeper of 0042, rule 7 holds the scratch until collection ends, now
+> that the bootstrap mounts it in a mount namespace of its own. Rule 2 says
+> that the staged input is bound read-only, but not from where or how it is
+> checked. The temporary branch `probe/r02af` (deleted afterwards and never
+> merged) measured both on `ubuntu-24.04` (kernel 7.0, Bubblewrap 0.9.0)
+> with the launcher, the bootstrap and the filter of R02ae, in workflow runs
+> 43379681082 (commit `36b7fb1`) and 43380088675 (commit `7e398cf`).
+> Between its observation and the release, the provider's prototype opened
+> the scratch and planted entries in it. After the attempt group had been
+> emptied and removed, it read the scratch back. The measurements:
+>
+> - **The keeper.** Before the release the provider, outside the group,
+>   opened `/proc/<bootstrap>/root/tmp` as a directory. The descriptor was
+>   on a tmpfs, and its mount id from `statx` was the id of the scratch's
+>   line in the bootstrap's mount table, which the provider had just read.
+> - **After the group.** Once the group had been emptied and its directory
+>   removed, the descriptor still named the same mount, with the same id.
+>   The payload's files could be listed and read through it.
+> - **Releasing the mount.** The payload had written 64 MiB into the
+>   scratch. The host's `Shmem` rose by 65,472 KiB during the attempt.
+>   After the provider closed its descriptors, it fell back to the value it
+>   had before the attempt.
+> - **Resolution beneath the output root.** `openat2` with
+>   `RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS`, `RESOLVE_NO_MAGICLINKS` and
+>   `RESOLVE_NO_XDEV` refused `..`, an absolute path and a path through
+>   `/proc` with `EXDEV`. With `O_NOFOLLOW` and `O_NONBLOCK` added:
+>   - a symbolic link failed with `ELOOP`, and a socket failed with
+>     `ENXIO`;
+>   - a FIFO opened, so only the type of the opened descriptor tells it from
+>     a file;
+>   - a hard link opened, with a link count of 2.
+> - **What can be in the scratch.** From outside, the provider made a
+>   symbolic link, a hard link and a FIFO in the scratch. A character device
+>   failed with `EPERM`. The fixture filter refuses `symlink`, `link`,
+>   `mknod`, `rename` and `mount`, and a refusal kills the process. So the
+>   fixture payload itself can make only regular files, directories and
+>   socket files.
+> - **The input bind.** A host directory bound with `--ro-bind` at `/input`
+>   had the mount line `ro,nosuid,nodev` (ext4, propagation `master:1`). The
+>   payload read a staged file. Opening it to append failed with `EACCES`
+>   (mode `0444`), also through `/proc/1/root/input`. Creating, unlinking
+>   and making a directory in it failed with `EROFS`.
+> - **No unsafe code.** Every call above has a safe interface in `rustix`
+>   once its `fs` feature is on. That feature adds no crate.
+>
+> Staging into the scratch through the keeper worked too: the payload read
+> the file and could not append to it. It is not chosen. The payload owns
+> what is in the scratch, so only a read-only mount keeps a later profile
+> from changing its own input. R02af works as follows.
+>
+> - **The input.** The provider stages a pinned revision's files, given as
+>   a `FilePackage` with a listing of each file's path, length and SHA-256.
+>   It refuses the input when the listing and the files differ in a path, a
+>   length or a digest. Where the files come from (the store, access checks
+>   and the pinned revision) is R02b's (rule 15).
+>   - The staging directory is the provider's own, inside its execution
+>     directory, made fresh for each attempt under the admission lock. A
+>     leftover of an earlier attempt is removed before staging.
+>   - Files are written once, without following links, beneath a handle on
+>     that directory, with mode `0444`. The directories get mode `0555`
+>     after they are filled.
+>   - The provider passes the directory's path to the stub, which puts it in
+>     the launcher's fixed argument list as `--ro-bind <path> /input`. The
+>     path is the provider's, never a request's.
+>   - The directory is removed when the attempt ends, on every path.
+> - **The keeper.** Between its observation and the release, the provider
+>   opens the scratch through `/proc/<bootstrap>/root/tmp`, close-on-exec.
+>   - It requires the descriptor to be on a tmpfs, with the mount id of the
+>     scratch line it has just checked; otherwise the attempt is not
+>     started.
+>   - It makes the output root `/tmp/out` (mode `0700`) through that handle
+>     and keeps a handle on it. The stub was started before either handle
+>     was opened, so no process of the attempt can inherit one.
+>   - Only the output root is collected; the rest of the scratch is ignored.
+> - **Collection.** Collection runs only after the attempt's verdict has
+>   passed: exit status 0, cleanup observed, no limit exceeded. Any other
+>   verdict drops the handles unread, and no output exists. Collection
+>   traverses from the output root's handle with the four resolve flags
+>   above, `O_NOFOLLOW` and `O_NONBLOCK`, and classifies each entry by
+>   `fstat` on the descriptor it opened.
+>   - A directory is entered through that descriptor.
+>   - A regular file with one link is read once, through that descriptor,
+>     with a bound of one byte over the file limit. The bytes read must
+>     match the size `fstat` gave.
+>   - Anything else is refused: a link, a socket, a FIFO, a device, a second
+>     link or an entry that cannot be opened.
+>   - The traversal reads at most 512 entries in all, and no directory
+>     deeper than seven levels below the output root (a package path has at
+>     most eight segments). It stops at the first excess, so a rejected tree
+>     is bounded too.
+>   - The collected files must form a valid `FilePackage`: portable paths,
+>     no case collision, at most 256 files, 5 MiB each and 25 MiB in all.
+>   - The refusal names the first reason found, and the attempt yields
+>     nothing.
+> - **The manifest.** A collected package has a manifest: each file's path,
+>   length and SHA-256 in path order. It is bound to the SHA-256 of the
+>   tool root's manifest, the filter's digest and the input listing's
+>   digest. The actor and its generation, the artifact, the revision, the
+>   job and the fence join the binding in R02b, which has them.
+> - **Releasing the mount.** The provider drops both handles when collection
+>   ends, which frees the tmpfs. No mount outlives the attempt (0042,
+>   rule 5).
+> - **Races.** Collection starts after the group is empty. The bootstrap's
+>   mount namespace is gone, and the keeper's handles are the only way into
+>   the scratch, so no process can change the tree during collection.
+>   0042's same-size replacement and link races are proved where they can
+>   happen: by unit tests of the collector on a temporary directory, with a
+>   hook that swaps an entry between listing and opening.
+> - **The tests.** These run in the job:
+>   - Success: a synthetic input becomes the expected bytes and manifest,
+>     the staging directory is gone afterwards, and `Shmem` returns to its
+>     value before the attempt within 16 MiB, after a payload that wrote
+>     64 MiB.
+>   - The input: writes, creations, unlinks and new directories in
+>     `/input` fail, also through `/proc/1/root`, and the staged bytes do
+>     not change.
+>   - Payload-made hostile trees: a socket, more than 256 files, a file over
+>     5 MiB, more than 25 MiB in all, a directory bomb over the entry bound,
+>     directories deeper than the bound, an invalid name, a case collision
+>     and an unsupported extension. Each is refused by its reason.
+>   - Planted trees: a test-only step of the plan, before the release, adds a
+>     relative symbolic link, a hard link and a FIFO through the keeper.
+>     Each is refused by its reason.
+>   - Verdicts: exit 0 with invalid output yields nothing, a nonzero exit
+>     with valid output is not collected, and a fresh attempt after a
+>     refused one succeeds.
+>     These are unit tests: input verification, the mount-id comparison, the
+>     collector's bounds and the races, and a device refused by type (through
+>     `/dev/null`, since a device cannot be made in the scratch).
+> - **The mutations.** Each must fail its test in the job:
+>   - The collector following links (resolve flags and `O_NOFOLLOW`
+>     removed) with its type check removed. The relative link is admitted.
+>   - The link-count check removed. The hard link is admitted.
+>   - The type check removed. The FIFO is admitted as an empty file.
+>   - The entry bound removed. The directory bomb is admitted.
+>   - The depth bound removed. The deep empty directories are admitted.
+>   - The input bound with `--bind`. A creation in `/input` succeeds.
+>   - The keeper dropped before the group is emptied. Success finds no
+>     output.
+>   - The handles kept after collection. `Shmem` does not return.
+>   - Collection after a nonzero exit. Output is collected.
+>
+> The rules, reworded:
+>
+> - **Rule 2.** The fixed argument list binds the attempt's staging
+>   directory read-only at `/input`. Its path comes from the provider.
+> - **Rule 3.** The bootstrap's readback, and the provider's read of the
+>   mount table, also require `/input` to be a read-only bind, without
+>   set-user-ID or devices.
+> - **Rule 5.** Between its observation and the release, the provider opens
+>   the keeper and makes the output root. After the verdict, it collects
+>   and then drops the keeper.
+> - **Rule 7.** `rustix` also enables `fs`, for the keeper, staging and
+>   collection.
+> - **Rule 14.** The R02af row names the staging, the keeper, the
+>   collection, its tests and its mutations.
+> - **Rule 17.** The R02af point is settled by this amendment.
+
 > **Note, 2026-11-12 (R02aa).** The provider's admission and the job
 > `Linux enforcement` exist. On the runner the provider's own code did what
 > the second measurement did with shell commands, which settles the first
@@ -778,7 +937,9 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
 2. **The launcher is Bubblewrap, used as a program.** The provider starts the
    `bwrap` of the tool root (rule 6) with a fixed argument list built from the
    profile: every namespace unshared, the parent-death kill, a new session, a
-   cleared environment, read-only binds of the tool root and the staged input,
+   cleared environment, read-only binds of the tool root and the staged input
+   (the input at `/input`, from the attempt's staging directory, whose path
+   comes from the provider; the amendment of 2026-11-13, input and output),
    the mount point of the scratch, a private `/proc` and a minimal `/dev`
    with an empty tmpfs over its `/dev/pts` (the amendment of 2026-11-13, the
    launcher's `/dev/pts`), the sandbox's root, `/dev` and `/dev/pts`
@@ -794,7 +955,9 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
    the flags of 0042, rule 4 and the size and the inode count of 0042, rule 5,
    and reads it back from its mount table with the launcher's empty
    read-only tmpfs over `/dev/pts` (the amendments of 2026-11-13, files,
-   descriptors and network, and the launcher's `/dev/pts`);
+   descriptors and network, and the launcher's `/dev/pts`) and the input's
+   read-only bind at `/input`, without set-user-ID or devices (the
+   amendment of 2026-11-13, input and output);
    sets the soft and hard resource limits of 0042, rule 5 (descriptors, core
    size) and reads them back; drops what the launcher left of capabilities,
    the two of rule 2 among them and the bounding set included, and
@@ -822,7 +985,11 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
    payload are born inside the group (0042, rule 6). The bootstrap reports
    readiness when every step of rule 3 is done, and execs the payload only
    after the provider's release, which the provider gives only after it has
-   read the bootstrap's state itself, its mount table included. An attempt that never reported, or whose
+   read the bootstrap's state itself, its mount table included. Between that
+   read and the release it opens the keeper of 0042, rule 7 on the scratch
+   and makes the output root; after a passing verdict it collects through
+   the keeper and then drops it (the amendment of 2026-11-13, input and
+   output). An attempt that never reported, or whose
    `exec` failed, counts as not started and as failed, never as a run.
 6. **The tool root.** One directory per version holds the launcher, the
    bootstrap with the loader and libraries it needs to start, the payload's
@@ -836,7 +1003,8 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
    host is called supported outside the enforcement job.
 7. **Three dependencies, for the system calls.** The bootstrap and the provider
    use `rustix` (resource limits, `prctl`, capabilities, descriptor handling,
-   mounting), `seccompiler` (compiling and installing the filter) and `nix`
+   mounting, and with its `fs` feature the keeper, staging and collection of
+   the amendment of 2026-11-13, input and output), `seccompiler` (compiling and installing the filter) and `nix`
    (`unshare`, which `rustix` offers only as an unsafe function), all through
    their safe interfaces and only on Linux targets. First-party code stays free of
    `unsafe`. Each is added in the slice that first needs it, pinned, with its
@@ -915,7 +1083,7 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
 | R02ac | The launch as amended on 2026-11-12 (read-only root and `/dev`, the scratch mounted and bounded by the bootstrap and read back by the provider), with its checks: file creation outside the scratch fails, and a launch without a read-only remount, without the inode count or without the provider's read of the mount table fails its test. Resources and cleanup under that launch: fork and thread bomb, memory, scratch bytes and inodes, log flood, hang, CPU; double fork, `setsid`, ignored signals, held pipes, a background writer.                                                                                                                                                                                                                     | 4 (scratch), 5, 6, 8  |
 | R02ad | The public mapping from each system-call restriction to its filter entry, probe, independent observation and mutation, and the descriptor ceiling with its inheritance, setter and guard checks (the real-leak case of an inherited descriptor is R02ae's).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | 4, 8                  |
 | R02ae | Files, descriptors and network as amended on 2026-11-13: local networking in the fixture profile (with the mapping's network class, its guard mutations and the R02ad mutations run again), real host listeners whose counters do not change during the launch with the attempt's namespace read from outside and a mutation without the network namespace, host canaries and signals with a mutation exposing a host directory, `/proc` and the closed `/dev/pts` (the launcher's cover, required by the mount check, with `ENOENT` for `/dev/ptmx` and both paths through `/proc/1/root`, and a mutation without the cover with and without the check), a real descriptor leak refused by the bootstrap, and configuration injection with a live preload canary. | 4, 8                  |
-| R02af | Input staging from a pinned revision's files, and output collection in memory through a directory handle, with the hostile trees.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | 3 (input), 7, 8       |
+| R02af | Input and output as amended on 2026-11-13: a pinned input checked against its listing and bound read-only at `/input` from a fresh staging directory; the keeper opened through `/proc` before the release with its mount id checked; collection after a passing verdict, beneath the output root, with the bounds and refusals of the amendment and a bound manifest; payload-made and planted hostile trees, the verdicts, the freed tmpfs, and the nine mutations.                                                                                                                                                                                                                                                                                              | 3 (input), 7, 8       |
 | R02ag | The crash acceptance: cores under file routing after `fork` and `exec`, the weakened limit, the pipe and socket routes with counters, a routing change that stops admission.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | 5 (cores), 8          |
 | R02ah | The guardian with its own deadline, death of the supervisor at each phase, the attempt registry and quarantine. Renewals run against a stand-in for the store, including one that keeps renewing after its fence is revoked and one that renews for the whole 120 seconds.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | 6, 8                  |
 
@@ -962,7 +1130,8 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
       launcher's `/dev/pts`).
     - R02af: how the keeper of 0042, rule 7 holds the scratch until
       collection ends, now that the mount is made inside the sandbox and
-      lives in the bootstrap's mount namespace.
+      lives in the bootstrap's mount namespace. Settled by the amendment of
+      2026-11-13 (input and output).
     - R02ag: that the coredump behaviour 0042 cites for kernel 6.18 holds for
       the kernel of the runner, read from that kernel's source before the
       slice relies on it.
