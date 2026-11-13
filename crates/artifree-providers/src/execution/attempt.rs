@@ -1,8 +1,8 @@
 //! One trusted launch of the fixture stub in its own attempt group (decision 0056 rule 5 and
 //! decision 0042 rules 5 and 6).
 //!
-//! Compiled only into the test build (0056 rule 16). Nothing here is visible outside
-//! `execution`.
+//! Compiled into the test build and into the `enforcement-fixture` build (decision 0057 rule 2;
+//! 0056 rule 16). Nothing here is visible outside `execution`.
 //!
 //! R02ac (0056 rule 14) added the resource part of the group phase. The scratch bounds are read
 //! back from the bootstrap's mount table (`readiness`), and the stub runs behind the two seccomp
@@ -36,6 +36,12 @@
 //! only when the attempt did not quarantine, its group was observed gone and its input removed.
 //! Every quarantine also writes the quarantine file; a file that was not written refuses the
 //! attempt as `QuarantineNotPersisted`, first.
+//!
+//! R02bb (decision 0057 rules 6, 7 and 19) splits the launch into `hold`, which takes the lock,
+//! checks the quarantine, admits the host and reconciles the registry, and `launch_held`, which
+//! runs one attempt on the capacity that `hold` took. The worker claims between the two, and the
+//! record carries the attempt identity that its claim recorded. The guardian's renewals are asked
+//! from the store's checkpoint (`renew`), and the guardian is renewed only after a `continue`.
 
 use std::ffi::OsStr;
 use std::fmt;
@@ -51,7 +57,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
 use artifree_domain::package::{FilePackage, PackagePath};
+use artifree_ports::execution::BoundRun;
 use sha2::{Digest, Sha256};
 
 use super::admission::{self, AdmissionRoots, wait_within};
@@ -64,7 +72,9 @@ use super::probe_group::{self, ProbeGroup};
 use super::readiness::{self, GroupObservation};
 use super::registry::{self, HostIdentity, Identity, QuarantineReason, Reconciled, Registry};
 use super::report::HostReport;
-use super::staging::{InputListing, InputRefusal, VerifiedInput};
+#[cfg(test)]
+use super::staging::InputListing;
+use super::staging::{InputRefusal, VerifiedInput};
 use super::usage::{self, GroupUsage};
 use super::{AdmissionRefusal, FIXTURE, InspectionProfile, launcher, policy, read_bounded};
 use guardian_link::GuardianLink;
@@ -98,6 +108,7 @@ const TEARDOWN_GRACE: Duration = Duration::from_secs(2);
 /// identity. `start_stub` appends the path as the last argument.
 const FIXTURE_STUB: &[&str] = &["stub", FIXTURE.identity];
 /// The bytes of the fixture input's one page, `index.html`.
+#[cfg(test)]
 const FIXTURE_PAGE: &[u8] = b"<!doctype html><title>fixture</title>";
 /// The fixture plan's job lease. Its renewal window is a third of it (0042 rule 6).
 const FIXTURE_LEASE: Duration = Duration::from_secs(30);
@@ -105,6 +116,7 @@ const FIXTURE_LEASE: Duration = Duration::from_secs(30);
 /// 2026-11-13, the guardian).
 const GUARDIAN_MARGIN: Duration = Duration::from_secs(2);
 /// The sleep step of a held pause.
+#[cfg(test)]
 const HOLD_STEP: Duration = Duration::from_secs(1);
 
 /// Set once this process quarantined the provider: a cleanup not observed, a routing change, a
@@ -118,12 +130,18 @@ static QUARANTINED: AtomicBool = AtomicBool::new(false);
 /// the job's lease, the stand-in store and the guardian's test-only switches (decision 0056,
 /// amendment of 2026-11-13, the guardian).
 #[derive(Clone, Debug)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "the plan's test-only switches are independent and named by decision 0056, amendment of 2026-11-13 (the guardian)"
+#[cfg_attr(
+    test,
+    expect(
+        clippy::struct_excessive_bools,
+        reason = "the plan's test-only switches are independent and named by decision 0056, amendment of 2026-11-13 (the guardian)"
+    )
 )]
 pub(super) struct AttemptPlan {
-    /// The arguments after the fixture path.
+    /// The tool root's program that runs the stub, the bootstrap and the guardian (decision 0057
+    /// rule 4). `EntryProgram::Fixture` in `fixture()`.
+    pub(super) program: launcher::EntryProgram,
+    /// The arguments after the program's prefix, before the staged input's path.
     pub(super) stub_arguments: &'static [&'static str],
     /// The wall deadline, counted from the LAUNCH record on a monotonic clock.
     pub(super) wall_deadline: Duration,
@@ -139,12 +157,15 @@ pub(super) struct AttemptPlan {
     /// A test-only step: after the group is ended, whatever the verdict, list the whole
     /// scratch through the keeper into `AttemptEvidence::scratch` (0056,
     /// amendment of 2026-11-13, crashes). `false` in `fixture()`.
+    #[cfg(test)]
     pub(super) list_scratch: bool,
     /// The job's lease, from which the renewal window is a third (0042 rule 6; 0056, amendment of
     /// 2026-11-13, the guardian). `FIXTURE_LEASE` in `fixture()`.
     pub(super) lease: Duration,
     /// The stand-in store: the answer to the heartbeat with this number, counted from 0, given at
-    /// once. `always_confirms` in `fixture()`.
+    /// once. `always_confirms` in `fixture()`. Test-only: the renewals of a launch are asked from
+    /// the `renew` function that its caller passes (decision 0057 rule 7).
+    #[cfg(test)]
     pub(super) store: fn(u32) -> Heartbeat,
     /// Whether the guardian is started. `false` leaves it out, so that the launcher's parent-death
     /// signal is shown alone. `true` in `fixture()`.
@@ -157,6 +178,7 @@ pub(super) struct AttemptPlan {
     pub(super) renew_regardless: bool,
     /// A test-only pause at one phase (0056, amendment of 2026-11-13, the guardian). `None` in
     /// `fixture()`.
+    #[cfg(test)]
     pub(super) pause: Option<Pause>,
 }
 
@@ -168,27 +190,32 @@ impl AttemptPlan {
         self.lease / 3
     }
 
-    /// The one plan that the fixture uses: the fixture stub and the decision 0042 deadlines.
+    /// The default plan: the fixture program, the fixture stub and the decision 0042 deadlines.
     #[must_use]
     pub(super) fn fixture() -> Self {
         Self {
+            program: launcher::EntryProgram::Fixture,
             stub_arguments: FIXTURE_STUB,
             wall_deadline: WALL_DEADLINE,
             readiness_deadline: READINESS_DEADLINE,
             release_record: &RELEASE,
             plant: None,
+            #[cfg(test)]
             list_scratch: false,
             lease: FIXTURE_LEASE,
+            #[cfg(test)]
             store: always_confirms,
             guardian: true,
             provider_deadline: true,
             renew_regardless: false,
+            #[cfg(test)]
             pause: None,
         }
     }
 }
 
 /// The fixture plan's stand-in store: it confirms every heartbeat.
+#[cfg(test)]
 fn always_confirms(_heartbeat: u32) -> Heartbeat {
     Heartbeat::Confirmed
 }
@@ -196,6 +223,7 @@ fn always_confirms(_heartbeat: u32) -> Heartbeat {
 /// A test-only pause of the provider at one phase. At the phase the provider creates the empty
 /// file `<markers>/<word>` and then holds or stalls, as `mode` says (0056, amendment of
 /// 2026-11-13, the guardian).
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct Pause {
     /// The phase at which the pause takes place.
@@ -230,6 +258,7 @@ pub(super) enum Phase {
 
 impl Phase {
     /// The word that names this phase in its marker file.
+    #[cfg(test)]
     #[must_use]
     pub(super) fn word(self) -> &'static str {
         match self {
@@ -245,6 +274,7 @@ impl Phase {
 }
 
 /// What a paused provider does once its marker file exists.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PauseMode {
     /// Waits, in a loop, until the process is killed.
@@ -276,6 +306,16 @@ pub(super) enum LeaseLoss {
     Generation,
     /// The authority was lost.
     Authority,
+    /// The artifact was trashed (decision 0057 rule 7). Only the worker's checkpoint answers it.
+    #[cfg(feature = "enforcement-fixture")]
+    Trash,
+    /// The artifact was purged (decision 0057 rule 7). Only the worker's checkpoint answers it.
+    #[cfg(feature = "enforcement-fixture")]
+    Purge,
+    /// A revocation of the lease was stored while the run went on (decisions 0057 rules 7 and 13).
+    /// Only the worker's checkpoint answers it.
+    #[cfg(feature = "enforcement-fixture")]
+    Lease,
 }
 
 /// Why the stub did not reach a run, with the step that failed (decision 0056 rule 5).
@@ -429,7 +469,8 @@ pub(super) struct AttemptEvidence {
     /// passing verdict with exit status 0 (0042 rule 7).
     pub(super) output: Result<CollectedOutput, OutputRefusal>,
     /// The scratch listing of the plan's test-only step, or the kind of the error that ended it;
-    /// `None` when the plan did not ask for it or no keeper was held. Not printed.
+    /// `None` when the plan did not ask for it or no keeper was held. Not printed. Test-only.
+    #[cfg(test)]
     pub(super) scratch: Option<Result<Vec<String>, io::ErrorKind>>,
 }
 
@@ -622,6 +663,9 @@ struct Session {
     /// Whether a quarantine of this attempt did not write its quarantine file, so the attempt is
     /// refused as `QuarantineNotPersisted`.
     persist_failed: bool,
+    /// The supervisor's own pid namespace, read at admission. The readiness check refuses a
+    /// bootstrap that shares it (decision 0042 rule 6).
+    own_pid_namespace: PathBuf,
 }
 
 impl Session {
@@ -668,7 +712,78 @@ struct Settled {
     stderr: Option<io::Result<Vec<u8>>>,
 }
 
-/// Runs one attempt with the fixture input (see `launch_with`).
+/// The capacity that `hold` took for one attempt (decision 0057 rule 19): the admission lock and
+/// what admission and reconciliation found. The lock stays held while the value lives, and a
+/// launch on it runs one attempt without releasing the lock itself.
+#[derive(Debug)]
+#[must_use]
+pub(super) struct Held {
+    /// The admission lock. It is never read: it holds the lock until the value is dropped (0042
+    /// rule 6).
+    _lock: AdmissionLock,
+    /// The host admission's evidence.
+    pub(super) report: HostReport,
+    /// The delegated group in which each attempt's group is created.
+    delegated: PathBuf,
+    /// SHA-256 of the seccomp program, in lowercase hexadecimal.
+    filter_sha256: String,
+    /// The supervisor's own pid namespace, read at admission.
+    own_pid_namespace: PathBuf,
+    /// The host identity that each attempt's record carries.
+    pub(super) host: HostIdentity,
+    /// The records that reconciliation settled and removed in this execution directory. Only the
+    /// worker reads them.
+    #[cfg(feature = "enforcement-fixture")]
+    pub(super) reconciled: Vec<Reconciled>,
+}
+
+/// Takes the capacity of one attempt: the admission lock, the quarantine check and the whole host
+/// admission, the filter digest and the pid namespace, then the reconciliation of the registry
+/// (decision 0057 rule 19; 0056 rule 5, as reworded by the amendments of 2026-11-13 and
+/// 2026-11-14). It is the first half of the launch that `launch_with` ran as one: no record, input
+/// or group exists yet. The caller keeps the value through its launch and its settlement, so the
+/// lock is released only after the attempt is settled (decision 0057 rule 10).
+///
+/// # Errors
+///
+/// Returns the refusal of the first step that failed. A refusal carries no group counters.
+pub(super) fn hold(execution_dir: &Path) -> Result<Held, AttemptRefusal> {
+    let roots = &admission::production_roots();
+    let lock = AdmissionLock::acquire(execution_dir)
+        .map_err(|refusal| without_usage(lock_failure(refusal)))?;
+    let (report, delegated) = admit_checked(roots, execution_dir).map_err(without_usage)?;
+    let (filter_sha256, own_pid_namespace) = policy_and_namespace(roots)?;
+    let (host, reconciled) = reconcile_registry(roots, execution_dir).map_err(without_usage)?;
+    // Only the worker reads what reconciliation removed.
+    #[cfg(not(feature = "enforcement-fixture"))]
+    drop(reconciled);
+    Ok(Held {
+        _lock: lock,
+        report,
+        delegated,
+        filter_sha256,
+        own_pid_namespace,
+        host,
+        #[cfg(feature = "enforcement-fixture")]
+        reconciled,
+    })
+}
+
+/// The end of one launch on held capacity. `record_removed` is `true` when the attempt's group was
+/// seen gone and its record removed, and also when no record was written, so that the caller may
+/// settle the attempt (decision 0057 rules 10 and 19).
+#[derive(Debug)]
+#[must_use]
+pub(super) struct Launched {
+    /// The attempt's evidence, or why the launch produced none.
+    pub(super) result: Result<AttemptEvidence, AttemptRefusal>,
+    /// Whether the attempt's record is gone, or no record was written. Only the worker reads it.
+    #[cfg(feature = "enforcement-fixture")]
+    pub(super) record_removed: bool,
+}
+
+/// Runs one attempt with the fixture input (see `launch_with`). Test-only.
+#[cfg(test)]
 pub(super) fn launch(
     plan: &AttemptPlan,
     execution_dir: &Path,
@@ -678,6 +793,7 @@ pub(super) fn launch(
 }
 
 /// The input of `launch`: one `index.html` with `FIXTURE_PAGE`, verified against its own listing.
+#[cfg(test)]
 fn fixture_input() -> Result<VerifiedInput, InputRefusal> {
     let package = FilePackage::new(vec![(PackagePath::entry(), FIXTURE_PAGE.to_vec())])
         .map_err(|_| InputRefusal::NotStaged)?;
@@ -685,58 +801,126 @@ fn fixture_input() -> Result<VerifiedInput, InputRefusal> {
     VerifiedInput::verify(package, listing)
 }
 
-/// Runs one attempt: the admission lock, the quarantine check, the whole host admission, the filter
-/// digest and the pid namespace, the reconciliation of the registry, the attempt's record, the
-/// staging of the input, then the attempt group, named by the record's identity (0056 rule 5, as
-/// reworded by the amendment of 2026-11-14). The group is always ended and removed, or the attempt
-/// is quarantined (decision 0042 rule 6); `conclude` ends the guardian with it. A refusal carries
-/// the group's counters whenever the group was created, emptied and read.
-///
-/// `execution_dir` holds the admission lock, the attempts registry and the staging directory
-/// `input`. The group is created beside the admission's `supervisor` child, not in
-/// `execution_dir`.
-pub(super) fn launch_with(
+/// Runs one attempt on the capacity that `hold` took, under the identity that the claim recorded
+/// (decision 0057 rule 6). The record is written first and the `registered` pause follows; then
+/// `run_registered` stages the input, makes the group and ends it. `renew` answers the guardian's
+/// renewals, which are asked only at the store's checkpoint (decision 0057 rule 7). `run` binds the
+/// output manifest to the claimed run (rule 17). `held` is only borrowed, so the caller keeps the
+/// lock until it has settled the attempt (rule 10).
+pub(super) fn launch_held(
     plan: &AttemptPlan,
+    renew: &mut dyn FnMut(u32) -> Heartbeat,
+    held: &Held,
+    identity: Identity,
     input: VerifiedInput,
+    run: Option<BoundRun>,
     execution_dir: &Path,
+) -> Launched {
+    let roots = &admission::production_roots();
+    let registry = match register(
+        roots,
+        &held.delegated,
+        execution_dir,
+        held.host.clone(),
+        identity,
+    ) {
+        Ok(registry) => registry,
+        Err(failure) => {
+            // A write can fail after its rename made the record durable, so the record counts as
+            // gone only when the registry shows none; otherwise the attempt stays unsettled for
+            // the next reconciliation (decision 0057 rules 10 and 19).
+            #[cfg(feature = "enforcement-fixture")]
+            let record_removed = Registry::open(execution_dir)
+                .is_ok_and(|registry| registry.record_absent(identity));
+            return Launched {
+                result: Err(without_usage(failure)),
+                #[cfg(feature = "enforcement-fixture")]
+                record_removed,
+            };
+        }
+    };
+    pause_at(plan, Phase::Registered);
+    let mut registered = Registered {
+        registry,
+        identity,
+        removed: false,
+    };
+    let result = run_registered(
+        plan,
+        renew,
+        held,
+        input,
+        run,
+        execution_dir,
+        &mut registered,
+    );
+    Launched {
+        result,
+        #[cfg(feature = "enforcement-fixture")]
+        record_removed: registered.removed,
+    }
+}
+
+/// The attempt's record once `launch_held` wrote it: what `run_registered` needs to remove it.
+#[derive(Debug)]
+struct Registered {
+    /// The registry of the execution directory.
+    registry: Registry,
+    /// The identity of the record, which names the attempt's group.
+    identity: Identity,
+    /// Whether the record was removed, so that the caller may settle the attempt.
+    removed: bool,
+}
+
+/// Runs one attempt after its record is written (0056 rule 5, as reworded by the amendment of
+/// 2026-11-14): the staging of the input, the attempt group named by the record's identity, its
+/// phase, the cleanup and the final verdict. The group is always ended and removed, or the attempt
+/// is quarantined (decision 0042 rule 6); `conclude` ends the guardian with it. A refusal carries
+/// the group's counters whenever the group was created, emptied and read. `registered.removed` is
+/// set before the verdict, so the record's state is known whatever the outcome.
+///
+/// `execution_dir` holds the registry and the staging directory of `input`. The group is created
+/// beside the admission's `supervisor` child, not in `execution_dir`.
+fn run_registered(
+    plan: &AttemptPlan,
+    renew: &mut dyn FnMut(u32) -> Heartbeat,
+    held: &Held,
+    input: VerifiedInput,
+    run: Option<BoundRun>,
+    execution_dir: &Path,
+    registered: &mut Registered,
 ) -> Result<AttemptEvidence, AttemptRefusal> {
     // The stub and the bootstrap use the fixed tool root, so the roots that are verified here
     // must be the same ones: no caller chooses them.
     let roots = &admission::production_roots();
-    // Held until this function returns, so that no second launch can start meanwhile.
-    let _lock = AdmissionLock::acquire(execution_dir)
-        .map_err(|refusal| without_usage(lock_failure(refusal)))?;
-    let (report, delegated) = admit_checked(roots, execution_dir).map_err(without_usage)?;
-    let (filter_sha256, own_pid_namespace) = policy_and_namespace(roots)?;
-    let (registry, identity) =
-        open_record(plan, roots, &delegated, execution_dir).map_err(without_usage)?;
     // Staged under the admission lock, after the record and before any group exists (0056,
     // amendment of 2026-11-13).
     let staged = input
         .stage(execution_dir)
         .map_err(|failure| without_usage(AttemptFailure::Input(failure)))?;
     let input_digest = staged.digest();
-    let name = identity.group_name();
+    let name = registered.identity.group_name();
     // A failure drops `staged`, which removes it, best effort. The record stays: the next
     // reconciliation finds no group under its name and removes the record.
-    let group = probe_group::create_probe(&delegated, &name)
+    let group = probe_group::create_probe(&held.delegated, &name)
         .map_err(|failure| without_usage(AttemptFailure::Refused(failure)))?;
-    let group_path = delegated.join(&name);
+    let group_path = held.delegated.join(&name);
     pause_at(plan, Phase::Created);
 
     // From here on every path ends the group in `settle`, whatever the group phase returned.
     let mut session = Session {
         execution_dir: execution_dir.to_path_buf(),
-        routing: RoutingWatch::of(&report, roots),
+        routing: RoutingWatch::of(&held.report, roots),
+        own_pid_namespace: held.own_pid_namespace.clone(),
         ..Session::default()
     };
     let phase = run_group(
         plan,
+        renew,
         roots,
         staged.path(),
         &group,
         &group_path,
-        &own_pid_namespace,
         &mut session,
     );
     let (settled, guardian_reason) = conclude(group, &group_path, &mut session);
@@ -750,15 +934,21 @@ pub(super) fn launch_with(
     } else {
         Ok(())
     };
+    // Removed only when the group was observed gone and the input removed, and no quarantine took
+    // place (0056, amendment of 2026-11-14).
+    let released = settled.cleanup_observed && removed.is_ok();
+    let removable = released && !session.quarantined;
     let record_not_removed = release_record(
-        &registry,
-        identity,
+        &registered.registry,
+        registered.identity,
         &mut session,
-        settled.cleanup_observed && removed.is_ok(),
+        released,
     );
+    registered.removed = removable && !record_not_removed;
     let keeper = session.keeper.take();
     let usage = settled.usage;
     let refused = |failure: AttemptFailure| AttemptRefusal { failure, usage };
+    #[cfg(test)]
     let scratch = scratch_listing(plan, keeper.as_ref());
     // A quarantine whose file was not written ranks first, because a restart would not remember it
     // (0056, amendment of 2026-11-14).
@@ -788,7 +978,7 @@ pub(super) fn launch_with(
     if record_not_removed {
         return Err(refused(AttemptFailure::Quarantined));
     }
-    let binding = manifest_binding(&report, &filter_sha256, input_digest);
+    let binding = manifest_binding(&held.report, &held.filter_sha256, input_digest, run);
     let output = collect_output(keeper, passed.exit, &binding);
     Ok(AttemptEvidence {
         group: group_path,
@@ -800,11 +990,39 @@ pub(super) fn launch_with(
         peak_memory_bytes: counters.memory_peak_bytes,
         usage: counters,
         readiness: passed.readiness,
-        filter_sha256,
-        report,
+        filter_sha256: held.filter_sha256.clone(),
+        report: held.report.clone(),
         output,
+        #[cfg(test)]
         scratch,
     })
+}
+
+/// Runs one attempt with the given input under a held capacity: `hold`, then `launch_held` with a
+/// fresh identity and the plan's stand-in store as the renewals (decision 0057 rule 7). Test-only.
+#[cfg(test)]
+pub(super) fn launch_with(
+    plan: &AttemptPlan,
+    input: VerifiedInput,
+    execution_dir: &Path,
+) -> Result<AttemptEvidence, AttemptRefusal> {
+    let held = hold(execution_dir)?;
+    let identity = Identity::random().map_err(|_| {
+        without_usage(AttemptFailure::NotStarted(
+            NotStartedReason::RegistryNotWritten,
+        ))
+    })?;
+    let mut renew = |heartbeat: u32| (plan.store)(heartbeat);
+    launch_held(
+        plan,
+        &mut renew,
+        &held,
+        identity,
+        input,
+        None,
+        execution_dir,
+    )
+    .result
 }
 
 /// The quarantine check and the admission under the held lock (0056 rule 5, as reworded by the
@@ -863,15 +1081,16 @@ fn reconcile_registry(
 }
 
 /// Writes the record of a new attempt before the input is staged and the group made (0056,
-/// amendment of 2026-11-14): a random identity, the host's identity, the delegated group relative
-/// to the cgroup mount and the group name of the identity. Any failure refuses as
-/// `NotStarted(RegistryNotWritten)` before any resource exists.
+/// amendment of 2026-11-14): the attempt's identity as its claim recorded it, the host's identity,
+/// the delegated group relative to the cgroup mount and the group name of the identity. Any failure
+/// refuses as `NotStarted(RegistryNotWritten)` before any resource exists.
 fn register(
     roots: &AdmissionRoots<'_>,
     delegated: &Path,
     execution_dir: &Path,
     host: HostIdentity,
-) -> Result<(Registry, Identity), AttemptFailure> {
+    identity: Identity,
+) -> Result<Registry, AttemptFailure> {
     let not_written = AttemptFailure::NotStarted(NotStartedReason::RegistryNotWritten);
     let parent = delegated
         .strip_prefix(roots.cgroup_mount)
@@ -879,7 +1098,6 @@ fn register(
         .and_then(Path::to_str)
         .ok_or(not_written)?
         .to_owned();
-    let identity = Identity::random().map_err(|_| not_written)?;
     let record = registry::Record {
         identity,
         machine: host.machine,
@@ -890,21 +1108,7 @@ fn register(
     };
     let registry = Registry::open(execution_dir).map_err(|_| not_written)?;
     registry.write(&record).map_err(|_| not_written)?;
-    Ok((registry, identity))
-}
-
-/// Reconciles the registry, writes the attempt's record and then pauses at `registered` (0056,
-/// amendment of 2026-11-14). Returns the registry handle and the record's identity.
-fn open_record(
-    plan: &AttemptPlan,
-    roots: &AdmissionRoots<'_>,
-    delegated: &Path,
-    execution_dir: &Path,
-) -> Result<(Registry, Identity), AttemptFailure> {
-    let (host, _reconciled) = reconcile_registry(roots, execution_dir)?;
-    let (registry, identity) = register(roots, delegated, execution_dir, host)?;
-    pause_at(plan, Phase::Registered);
-    Ok((registry, identity))
+    Ok(registry)
 }
 
 /// Removes the attempt's record once the attempt is over (0056, amendment of 2026-11-14): only
@@ -962,11 +1166,13 @@ pub(super) fn reconcile_only(execution_dir: &Path) -> Result<Vec<Reconciled>, At
 
 /// The binding of the output manifest: the profile identity, the SHA-256 of the profile's
 /// manifest, the tool root's manifest digest, the filter's digest and the input listing's digest
-/// (0056, amendment of 2026-11-13).
+/// (0056, amendment of 2026-11-13), and the values of the claimed run when there is one (decision
+/// 0057 rule 17).
 fn manifest_binding(
     report: &HostReport,
     filter_sha256: &str,
     input_digest: [u8; 32],
+    run: Option<BoundRun>,
 ) -> ManifestBinding {
     ManifestBinding {
         profile: FIXTURE.identity,
@@ -974,6 +1180,7 @@ fn manifest_binding(
         tool_root_sha256: report.tool_manifest_sha256.clone(),
         filter_sha256: filter_sha256.to_owned(),
         input_digest,
+        run,
     }
 }
 
@@ -1015,6 +1222,7 @@ fn routing_after(
 /// verdict (0056, amendment of 2026-11-13, crashes). `None` when the plan does not ask for it or
 /// no keeper is held. It reaches the test in the evidence; a refused attempt carries none, and the
 /// crash tests require evidence.
+#[cfg(test)]
 fn scratch_listing(
     plan: &AttemptPlan,
     keeper: Option<&Keeper>,
@@ -1038,7 +1246,7 @@ fn lock_failure(refusal: LockRefusal) -> AttemptFailure {
 /// (0056, amendment of 2026-11-14, the attempt registry). Returns whether the file was written or
 /// already existed; `false` leaves the quarantine in this process only, and a restart would not
 /// remember it.
-fn quarantine(execution_dir: &Path, reason: QuarantineReason) -> bool {
+pub(super) fn quarantine(execution_dir: &Path, reason: QuarantineReason) -> bool {
     QUARANTINED.store(true, Ordering::SeqCst);
     registry::persist_quarantine(execution_dir, reason).is_ok()
 }
@@ -1048,11 +1256,11 @@ fn quarantine(execution_dir: &Path, reason: QuarantineReason) -> bool {
 /// its last argument. The caller ends the group whatever this returns.
 fn run_group(
     plan: &AttemptPlan,
+    renew: &mut dyn FnMut(u32) -> Heartbeat,
     roots: &AdmissionRoots<'_>,
     input: &Path,
     group: &ProbeGroup,
     group_path: &Path,
-    own_pid_namespace: &Path,
     session: &mut Session,
 ) -> Result<Passed, AttemptFailure> {
     let limits = probe_group::apply_limits(group).map_err(AttemptFailure::Refused)?;
@@ -1062,16 +1270,9 @@ fn run_group(
     let mut control = start_stub(plan, roots, input, session)?;
     place_stub(group, group_path, session)?;
     pause_at(plan, Phase::Started);
-    let (readiness, start) = release(
-        plan,
-        roots,
-        &mut control,
-        group_path,
-        own_pid_namespace,
-        session,
-    )?;
+    let (readiness, start) = release(plan, roots, &mut control, group_path, session)?;
     // `await_exit` records the exit in the session itself, on every path that reaped the stub.
-    let awaited = await_exit(plan, session, start);
+    let awaited = await_exit(plan, renew, session, start);
     // The stub is no longer polled and no renewal follows, so the guardian's window stops here,
     // not after the teardown grace below (0056, amendment of 2026-11-13, the guardian: `S`).
     send_to_guardian(session.guardian.as_mut(), guardian::STOP);
@@ -1106,8 +1307,9 @@ fn start_stub(
         .map_err(|_| AttemptFailure::NotStarted(NotStartedReason::StubNotStarted))?;
     // The command holds the child's end of the socket, so it is dropped right after the spawn.
     let spawned = {
-        let mut command = Command::new(roots.tool_root.join(launcher::FIXTURE_FILE));
+        let mut command = Command::new(roots.tool_root.join(plan.program.file()));
         command
+            .args(plan.program.prefix())
             .args(plan.stub_arguments)
             .arg(input)
             .env_clear()
@@ -1205,7 +1407,6 @@ fn release(
     roots: &AdmissionRoots<'_>,
     control: &mut UnixStream,
     group_path: &Path,
-    own_pid_namespace: &Path,
     session: &mut Session,
 ) -> Result<(GroupObservation, Instant), AttemptFailure> {
     let start = Instant::now();
@@ -1219,7 +1420,7 @@ fn release(
         group_path,
         Path::new("/proc"),
         roots.cgroup_mount,
-        own_pid_namespace,
+        &session.own_pid_namespace,
     )
     .map_err(|_| AttemptFailure::NotStarted(NotStartedReason::ReadinessNotConfirmed))?;
     // Opened and checked from outside the group after the observation and before the release
@@ -1282,6 +1483,7 @@ fn read_ready(
 /// part of the check and nothing else, and the plan's pause at `Running` comes first.
 fn await_exit(
     plan: &AttemptPlan,
+    renew: &mut dyn FnMut(u32) -> Heartbeat,
     session: &mut Session,
     start: Instant,
 ) -> Result<(ExitStatus, Duration), AttemptFailure> {
@@ -1318,6 +1520,7 @@ fn await_exit(
         running_verdict(elapsed, deadline, session.exceeded.load(Ordering::SeqCst))?;
         heartbeat(
             plan,
+            renew,
             &mut renewals,
             session.guardian.as_mut(),
             Instant::now(),
@@ -1553,20 +1756,16 @@ fn start_guardian(
         .readiness_deadline
         .saturating_add(plan.wall_deadline)
         .saturating_add(GUARDIAN_MARGIN);
-    let mut guardian_quarantine = None;
     let started = GuardianLink::start(
         roots.tool_root,
+        plan.program,
         name,
         deadline,
         plan.renewal_window(),
         plan.readiness_deadline,
-        &session.execution_dir,
-        &mut guardian_quarantine,
-    );
-    if let Some(persisted) = guardian_quarantine {
-        session.note_quarantine(persisted);
-    }
-    session.guardian = Some(started?);
+        session,
+    )?;
+    session.guardian = Some(started);
     Ok(())
 }
 
@@ -1574,6 +1773,7 @@ fn start_guardian(
 /// the phase is created first, so that a test can wait for it. Then the pause holds in a loop
 /// until the process is killed, or stalls for its duration and goes on. A marker that cannot be
 /// created is ignored: the waiting test then fails for want of it.
+#[cfg(test)]
 fn pause_at(plan: &AttemptPlan, phase: Phase) {
     let Some(pause) = plan.pause.as_ref().filter(|pause| pause.phase == phase) else {
         return;
@@ -1587,12 +1787,17 @@ fn pause_at(plan: &AttemptPlan, phase: Phase) {
     }
 }
 
-/// Asks the store for a heartbeat when one is due (see `heartbeat_due`) and applies its answer.
-/// A confirmation sends `R` to the guardian. An unavailable store sends nothing. A lost lease
-/// returns its part as `LeaseLost`, unless the plan renews regardless (0042 rule 6; 0056,
-/// amendment of 2026-11-13, the guardian).
+/// Outside the test build no plan pauses (the pause is a test-only step).
+#[cfg(not(test))]
+fn pause_at(_plan: &AttemptPlan, _phase: Phase) {}
+
+/// Asks `renew`, the store's checkpoint, for a heartbeat when one is due (see `heartbeat_due`) and
+/// applies its answer. A confirmation sends `R` to the guardian. An unavailable store sends
+/// nothing. A lost lease returns its part as `LeaseLost`, unless the plan renews regardless (0042
+/// rule 6; 0056, amendment of 2026-11-13, the guardian; 0057 rule 7).
 fn heartbeat(
     plan: &AttemptPlan,
+    renew: &mut dyn FnMut(u32) -> Heartbeat,
     renewals: &mut Renewals,
     guardian: Option<&mut GuardianLink>,
     now: Instant,
@@ -1600,7 +1805,7 @@ fn heartbeat(
     if !heartbeat_due(renewals.last_asked, now, plan.renewal_window()) {
         return Ok(());
     }
-    let answer = (plan.store)(renewals.asked);
+    let answer = renew(renewals.asked);
     renewals.asked = renewals.asked.saturating_add(1);
     renewals.last_asked = Some(now);
     if on_answer(answer, plan.renew_regardless).map_err(AttemptFailure::LeaseLost)? {

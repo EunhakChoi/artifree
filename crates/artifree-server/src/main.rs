@@ -23,6 +23,7 @@ use artifree_server::preview::normalize_frame_ancestors;
 use artifree_server::proxy::IpNetwork;
 use artifree_server::serve::{self, ServeOptions};
 
+mod execution_command;
 mod maintenance;
 mod ready_line;
 mod serve_env;
@@ -50,7 +51,18 @@ fn note(message: &str) {
 }
 
 fn main() -> ExitCode {
-    match run() {
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    // The entry point of an attempt touches nothing before it dispatches (decision 0057
+    // rule 4), so it is chosen before any other command is read.
+    if let Some((command, rest)) = args.split_first() {
+        if command == "execution" {
+            return execution_command::execution_command(rest);
+        }
+        if command == "worker" {
+            return worker_command::worker_exit(rest);
+        }
+    }
+    match run(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             note(&error);
@@ -59,19 +71,15 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<(), String> {
-    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    // Paths may be any bytes the platform allows, so these three commands read
-    // their arguments as they are, as does `worker`.
+fn run(args: Vec<OsString>) -> Result<(), String> {
+    // Paths may be any bytes the platform allows, so backup and restore read their
+    // arguments as they are, as do `worker` and `execution` in `main`.
     if let Some((command, rest)) = args.split_first() {
         if command == "backup" {
             return maintenance::backup_command(rest);
         }
         if command == "restore" {
             return maintenance::restore_command(rest);
-        }
-        if command == "worker" {
-            return worker_command::worker_command(rest);
         }
     }
     let args = args
@@ -625,6 +633,7 @@ Usage:
   artifree-server backup --data-dir <dir> --output <file>
   artifree-server restore --input <file> --data-dir <dir>
   artifree-server worker run --data-dir <dir> [--once | --supervised]
+  artifree-server execution bootstrap|stub|guardian ...   the entry point of one attempt of an execution profile; a build that knows no profile refuses it (exit status 2)
   artifree-server --describe | --version | --help
 
 serve runs the HTTP API and a separate preview content origin until Ctrl+C or

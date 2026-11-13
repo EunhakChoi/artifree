@@ -790,6 +790,37 @@ fn remove_takes_away_only_the_named_record() -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "enforcement-fixture")]
+#[test]
+fn a_record_is_absent_only_when_the_registry_shows_none() -> io::Result<()> {
+    let root = TempDir::new("registry-absent")?;
+    let registry = Registry::open(root.path())?;
+    assert!(
+        registry.record_absent(sample_identity()),
+        "an empty registry holds no record"
+    );
+    registry.write(&sample_record())?;
+    assert!(
+        !registry.record_absent(sample_identity()),
+        "a written record is present, so its attempt is not settled"
+    );
+    registry.remove(sample_identity())?;
+    assert!(
+        registry.record_absent(sample_identity()),
+        "a removed record is absent"
+    );
+    // A lookup that fails for another reason than a missing file counts as present.
+    let attempts = root.join(super::ATTEMPTS_DIR);
+    fs::set_permissions(&attempts, Permissions::from_mode(0o000))?;
+    let unreadable = registry.record_absent(sample_identity());
+    fs::set_permissions(&attempts, Permissions::from_mode(0o700))?;
+    assert!(
+        !unreadable,
+        "a registry that cannot be searched may hold the record"
+    );
+    Ok(())
+}
+
 /// The execution directory and the fake cgroup mount of a reconciliation test, both under `root`.
 /// The mount is owned by this account, as a delegated parent is.
 fn layout(root: &TempDir) -> io::Result<(PathBuf, PathBuf)> {

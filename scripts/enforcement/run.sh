@@ -116,6 +116,26 @@ run_scenario() {
   run_in_scenario "$1" resource_tests "$2" "$3" "$4"
 }
 
+# run_server_job SCENARIO LABEL TEST [systemd-run option...] sets the payload scenario, runs one job
+# test of the server's execution_jobs in a delegated unit and requires that no payload, probe or
+# entry point process outlived it (R02bb, decision 0057).
+run_server_job() {
+  local scenario=$1 label=$2 name=$3 left status=0
+  shift 3
+  sudo "$PREPARE" scenario "$scenario"
+  run_unit "$server_test" "$label" "$name" -p Delegate=yes "$@"
+  # pgrep exits 1 when nothing matches; any other status is a failure of the check itself.
+  left="$(pgrep -a -f 'artifree-execution-payload|/tools/probes/|/tools/v1/probes/|artifree-server execution')" || status=$?
+  case "$status" in
+    0)
+      printf '%s\n' "$left" >&2
+      fail "a payload, probe or entry point process outlived $name"
+      ;;
+    1) ;;
+    *) fail "the payload or probe process check failed with status $status" ;;
+  esac
+}
+
 # death_at PHASE GUARDIAN SCENARIO [HOLD_DIR] kills the supervisor of a guardian test at PHASE and checks what it
 # leaves (R02ah, decision 0056, amendment of 2026-11-13, the guardian). A test must run the supervisor
 # in a unit with `KillMode=process`, or the service manager does the guardian's work and the test
@@ -313,13 +333,33 @@ case "$lib_binaries" in
 esac
 lib_binary=$lib_binaries
 [[ -x "$lib_binary" ]] || fail "the library test binary is not executable: $lib_binary"
+# The server and its job tests are built with the enforcement-fixture feature, which alone makes
+# the server serve the fixture profile (decision 0057 rule 2).
+server_metadata="$(cargo test -p artifree-server --features enforcement-fixture --test execution_jobs --no-run --locked --message-format=json)"
+server_test_binaries="$(printf '%s\n' "$server_metadata" \
+  | jq -r 'select(.reason == "compiler-artifact" and .target.name == "execution_jobs" and .executable != null) | .executable')"
+case "$server_test_binaries" in
+  "") fail "cargo reported no execution_jobs test binary" ;;
+  *$'\n'*) fail "cargo reported more than one execution_jobs test binary" ;;
+esac
+server_test=$server_test_binaries
+[[ -x "$server_test" ]] || fail "the execution_jobs test binary is not executable: $server_test"
+server_bin_binaries="$(printf '%s\n' "$server_metadata" \
+  | jq -r 'select(.reason == "compiler-artifact" and .target.name == "artifree-server" and (.target.kind | index("bin")) != null and .executable != null) | .executable')"
+case "$server_bin_binaries" in
+  "") fail "cargo reported no artifree-server binary" ;;
+  *$'\n'*) fail "cargo reported more than one artifree-server binary" ;;
+esac
+server_bin=$server_bin_binaries
+[[ -x "$server_bin" ]] || fail "the artifree-server binary is not executable: $server_bin"
 
 say "part 1: install the pinned launcher and assemble the tool root"
-sudo "$PREPARE" install "$FIXTURE" "$PAYLOAD"
+sudo "$PREPARE" install "$FIXTURE" "$PAYLOAD" "$server_bin"
 {
   printf 'bubblewrap package: %s\n' "$(dpkg-query -W -f "\${Version}" bubblewrap)"
   printf 'launcher version: %s\n' "$("$ROOT/bin/bwrap" --version)"
   printf 'launcher sha256: %s\n' "$(sha256sum -- "$ROOT/bin/bwrap")"
+  printf 'server sha256: %s\n' "$(sha256sum -- "$ROOT/bin/artifree-server")"
   printf 'tool manifest sha256: %s\n' "$(sha256sum -- "$ROOT/MANIFEST")"
 } >> "$OUT/environment.txt"
 
@@ -561,6 +601,38 @@ run_unit "$lib_binary" registry-persisted execution::attempt::registry_tests::jo
   --setenv="ARTIFREE_PERSIST_DIR=$PWD/$persist"
 chmod -R u+w -- "$persist"
 rm -rf -- "$persist"
+sudo "$PREPARE" scenario exit
+
+say "part 13: the worker of run_profile jobs (R02bb, decision 0057 rules 2, 4 and 15 to 19)"
+sudo "$PREPARE" routing-file
+# The worker as the unit's own command (0057 rule 22): a fixture job is prepared outside the unit,
+# run by worker run --execution-dir --once, then checked through the store.
+unit_data="$OUT/server-unit-data"
+unit_exec="$OUT/server-unit-exec"
+rm -rf -- "$unit_data" "$unit_exec"
+mkdir -m 700 -- "$unit_data" "$unit_exec"
+sudo "$PREPARE" scenario copy
+ARTIFREE_WORKER_DATA="$PWD/$unit_data" run_direct "$server_test" server-unit-prepare job_prepare_a_worker_unit
+sudo systemd-run --quiet --wait --pipe --collect --service-type=exec \
+  --uid="$(id -u)" --gid="$(id -g)" --working-directory="$PWD" -p Delegate=yes \
+  -- "$server_bin" worker run --data-dir "$PWD/$unit_data" --execution-dir "$PWD/$unit_exec" --once \
+  > "$OUT/server-unit.jsonl" 2> "$OUT/server-unit.stderr" \
+  || fail "the worker unit failed; see $OUT/server-unit.stderr"
+grep -Fq '"state":"succeeded"' "$OUT/server-unit.jsonl" || fail "the worker unit recorded no succeeded job"
+ARTIFREE_WORKER_DATA="$PWD/$unit_data" run_direct "$server_test" server-unit-check job_check_the_worker_unit_result
+chmod -R u+w -- "$unit_exec"
+rm -rf -- "$unit_data" "$unit_exec"
+run_direct "$server_test" server-undelegated job_a_worker_outside_a_delegated_group_refuses_to_start
+run_server_job hang server-cancel job_cancel_ends_the_job_cancelled_after_cleanup
+run_server_job survivors-hang server-cancel-descendant job_a_sigterm_ignoring_descendant_is_gone_at_cancel
+run_server_job hang server-lease-loss job_lease_loss_schedules_a_retry
+run_server_job linger server-trash-during-run job_a_trash_during_the_run_is_never_published
+for part in fence cancel generation authority; do
+  run_server_job hang "server-renewal-$part" job_a_renewal_stops_at_the_store_answer --setenv="ARTIFREE_RENEWAL_PART=$part"
+done
+run_server_job hang server-store-unavailable job_an_unavailable_store_ends_the_attempt_by_the_guardian
+run_server_job hang server-stalled-worker job_a_stalled_worker_ends_the_attempt_by_the_guardian
+run_server_job exit server-busy-lock job_a_busy_lock_spends_no_attempt
 sudo "$PREPARE" scenario exit
 
 say "restore the routing and the profile"

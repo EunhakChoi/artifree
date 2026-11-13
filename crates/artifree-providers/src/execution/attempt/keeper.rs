@@ -7,11 +7,14 @@
 //! `/proc/<bootstrap>/root/tmp`, close-on-exec, and keeps that handle beside the output root's:
 //! both hold the tmpfs mounted until collection or rejection ends, and both are dropped then.
 
+#[cfg(test)]
 use std::io;
 use std::os::fd::OwnedFd;
 use std::path::Path;
 
-use rustix::fs::{self, AtFlags, Dir, FileType, Mode, OFlags, StatxFlags};
+use rustix::fs::{self, AtFlags, Mode, OFlags, StatxFlags};
+#[cfg(test)]
+use rustix::fs::{Dir, FileType};
 
 use super::super::collection::{self, CollectedOutput, CollectionRefusal, ManifestBinding};
 use super::super::readiness::{self, GroupObservation};
@@ -24,9 +27,11 @@ const TMPFS_MAGIC: i64 = 0x0102_1994;
 /// The output root's name in the scratch, which the payload sees as `/tmp/out`.
 const OUTPUT_ROOT: &str = "out";
 
+#[cfg(test)]
 /// The most entries that `list_scratch` reads: the scratch's inode bound (decision 0042 rule 5).
 const LIST_ENTRIES: usize = 4_096;
 
+#[cfg(test)]
 /// The deepest directory level below the scratch root that `list_scratch` enters.
 const LIST_DEPTH: usize = 8;
 
@@ -37,7 +42,8 @@ const LIST_DEPTH: usize = 8;
 pub(super) struct Keeper {
     /// The scratch root, opened through `/proc/<bootstrap>/root/tmp` and checked; kept so that the
     /// test-only listing can read it after the group is empty (0056, amendment of 2026-11-13,
-    /// crashes).
+    /// crashes). Test-only, like the listing.
+    #[cfg(test)]
     scratch: OwnedFd,
     /// The output root, opened beneath the scratch with the four resolve flags.
     output_root: OwnedFd,
@@ -97,6 +103,7 @@ impl Keeper {
         )
         .map_err(|_| not_held)?;
         Ok(Self {
+            #[cfg(test)]
             scratch,
             output_root,
         })
@@ -136,6 +143,7 @@ impl Keeper {
     ///
     /// Returns the first I/O error, or an error when the scratch holds more than `LIST_ENTRIES`
     /// entries or a directory deeper than `LIST_DEPTH`.
+    #[cfg(test)]
     pub(super) fn list_scratch(&self) -> io::Result<Vec<String>> {
         let mut entries = Vec::new();
         list_directory(&self.scratch, "", 0, &mut entries)?;
@@ -158,6 +166,7 @@ fn is_checked_scratch(filesystem_type: i64, mount_id: u64, scratch_mount_id: u64
 ///
 /// Returns the first I/O error, or an error when the listing exceeds `LIST_ENTRIES` or
 /// `LIST_DEPTH`.
+#[cfg(test)]
 fn list_directory(
     directory: &OwnedFd,
     prefix: &str,
@@ -213,6 +222,7 @@ fn list_directory(
 }
 
 /// The word that a scratch listing gives a file type.
+#[cfg(test)]
 fn kind_word(kind: FileType) -> &'static str {
     match kind {
         FileType::Directory => "directory",

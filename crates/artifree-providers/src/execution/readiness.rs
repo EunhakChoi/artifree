@@ -8,13 +8,13 @@
 //! amendment of 2026-11-13, rule 3 as reworded), and the staged input at `/input`, read-only with
 //! `nosuid`, `nodev` and `noexec`, on a tree with no propagation tag (the amendment of
 //! 2026-11-13, input and output). The bootstrap reads its own table back, and the provider reads
-//! the same table of the bootstrap's process independently. `confirm_member`, which exists only in
-//! test builds, is the keeper's re-check that the bootstrap is still a member of the group in
-//! filter mode.
+//! the same table of the bootstrap's process independently. `confirm_member`, which serves the
+//! launch of the test build and of the `enforcement-fixture` build (decision 0057 rule 2), is the
+//! keeper's re-check that the bootstrap is still a member of the group in filter mode.
 
-#[cfg(test)]
+#[cfg(any(test, feature = "enforcement-fixture"))]
 use std::fs;
-#[cfg(test)]
+#[cfg(any(test, feature = "enforcement-fixture"))]
 use std::path::{Path, PathBuf};
 
 /// The largest `/proc` status, limits or mount table text that a check reads, in bytes.
@@ -584,11 +584,11 @@ fn is_exactly(pair: LimitPair, value: u64) -> bool {
 }
 
 /// The largest number of processes that an attempt group may hold when it is observed.
-#[cfg(test)]
+#[cfg(any(test, feature = "enforcement-fixture"))]
 const MAX_GROUP_MEMBERS: usize = 64;
 
 /// Why the provider's independent observation refuses an attempt group.
-#[cfg(test)]
+#[cfg(any(test, feature = "enforcement-fixture"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ObservationFailure {
     /// A group or `/proc` file is missing, larger than its bound or not UTF-8, or a
@@ -606,7 +606,7 @@ pub(super) enum ObservationFailure {
 }
 
 /// What the provider saw in an attempt group before it released the bootstrap.
-#[cfg(test)]
+#[cfg(any(test, feature = "enforcement-fixture"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct GroupObservation {
     /// How many processes the group held.
@@ -630,7 +630,7 @@ pub(super) struct GroupObservation {
 /// # Errors
 /// Returns the first failed check, in this order: the membership list, every member's status,
 /// the bootstrap's limits, its mount table, its pid namespace, and every member's cgroup.
-#[cfg(test)]
+#[cfg(any(test, feature = "enforcement-fixture"))]
 pub(super) fn observe_group(
     group: &Path,
     proc_root: &Path,
@@ -709,7 +709,7 @@ pub(super) fn observe_group(
 /// Returns `Unreadable` for a listing or status that cannot be read or a listing line that is not
 /// a pid, `Membership` when `pid` is not listed or not in filter mode, and `Field` for a malformed
 /// status.
-#[cfg(test)]
+#[cfg(any(test, feature = "enforcement-fixture"))]
 pub(super) fn confirm_member(
     group: &Path,
     proc_root: &Path,
@@ -733,13 +733,13 @@ pub(super) fn confirm_member(
 }
 
 /// The `name` file below one process's directory under `proc_root`.
-#[cfg(test)]
+#[cfg(any(test, feature = "enforcement-fixture"))]
 fn member_file(proc_root: &Path, pid: u32, name: &str) -> PathBuf {
     proc_root.join(pid.to_string()).join(name)
 }
 
 /// Reads one bounded `/proc` text file as UTF-8; any failure is `Unreadable`.
-#[cfg(test)]
+#[cfg(any(test, feature = "enforcement-fixture"))]
 fn read_proc_text(path: &Path) -> Result<String, ObservationFailure> {
     let limit = u64::try_from(PROC_FILE_BYTES).map_err(|_| ObservationFailure::Unreadable)?;
     let bytes = super::read_bounded(path, limit).map_err(|_| ObservationFailure::Unreadable)?;

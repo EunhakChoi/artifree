@@ -1,11 +1,12 @@
 //! The provider's side of the guardian (decision 0056, amendment of 2026-11-13, the guardian).
 //!
-//! Compiled only into the test build, with the attempt module (0056 rule 16). The guardian is a
-//! child of the provider and stays outside the attempt group. Its standard input is one end of a
-//! Unix stream pair whose other end only the provider holds; both ends close on `exec`, and the
-//! spawn gives the guardian its own copy of the child's end as standard input. Its standard output
-//! is null. The provider never sends the guardian a credential, the input or the output: only the
-//! records of the guardian's protocol cross the socket.
+//! Compiled into the test build and the `enforcement-fixture` build, with the attempt module
+//! (decision 0057 rule 2; 0056 rule 16). The guardian is a child of the provider, runs the tool
+//! root's program that the plan names (decision 0057 rule 4), and stays outside the attempt group.
+//! Its standard input is one end of a Unix stream pair whose other end only the provider holds;
+//! both ends close on `exec`, and the spawn gives the guardian its own copy of the child's end as
+//! standard input. Its standard output is null. The provider never sends the guardian a credential,
+//! the input or the output: only the records of the guardian's protocol cross the socket.
 
 use std::io::{self, Read, Write};
 use std::os::fd::OwnedFd;
@@ -16,9 +17,10 @@ use std::time::{Duration, Instant};
 
 use super::super::admission::wait_within;
 use super::super::guardian::{self, GuardianReason};
+use super::super::launcher::EntryProgram;
+use super::super::probe_group;
 use super::super::registry::QuarantineReason;
-use super::super::{launcher, probe_group};
-use super::{AttemptFailure, NotStartedReason, quarantine};
+use super::{AttemptFailure, NotStartedReason, Session};
 
 /// The most bytes of the guardian's output that are collected. The report line is far shorter, so
 /// anything after the first 256 bytes is ignored.
@@ -36,13 +38,12 @@ pub(super) struct GuardianLink {
 }
 
 impl GuardianLink {
-    /// Starts the guardian of the attempt group `name` and waits for its ready byte.
+    /// Starts the guardian of the attempt group `name` and waits for its ready byte. `program` is
+    /// the tool root's program that runs the guardian (decision 0057 rule 4): its `guardian` mode
+    /// follows its `execution` subcommand when the program is the server.
     ///
     /// `deadline` and `window` are passed to the guardian as whole milliseconds from its start. The
     /// ready byte is awaited for at most `readiness`, the plan's readiness deadline.
-    /// `execution_dir` is the directory that a quarantine file is written in. `quarantined` is set
-    /// only when a guardian that does not report ready is not reaped, to whether that quarantine
-    /// was written.
     /// The command holds the child's end of the socket, so it is dropped right after the spawn,
     /// and only the guardian keeps that end.
     ///
@@ -51,25 +52,26 @@ impl GuardianLink {
     /// Returns `NotStarted(GuardianNotStarted)` when the socket or the child cannot be made, when a
     /// duration does not fit in milliseconds, or when the guardian does not write its ready byte
     /// within `readiness`. A guardian that does not report ready is killed and waited for. When it
-    /// is not reaped within the cleanup deadline, the provider is also quarantined with the reason
-    /// `guardian`, its quarantine file is written in `execution_dir`, and `quarantined` is set to
-    /// whether that file was written (0056, amendment of 2026-11-14).
+    /// is not reaped within the cleanup deadline, `session` quarantines the provider with the
+    /// reason `guardian` and notes whether its quarantine file was written (0056, amendment of
+    /// 2026-11-14).
     pub(super) fn start(
         tool_root: &Path,
+        program: EntryProgram,
         name: &str,
         deadline: Duration,
         window: Duration,
         readiness: Duration,
-        execution_dir: &Path,
-        quarantined: &mut Option<bool>,
+        session: &mut Session,
     ) -> Result<Self, AttemptFailure> {
         let not_started = AttemptFailure::NotStarted(NotStartedReason::GuardianNotStarted);
         let deadline_ms = u64::try_from(deadline.as_millis()).map_err(|_| not_started)?;
         let window_ms = u64::try_from(window.as_millis()).map_err(|_| not_started)?;
         let (mut socket, child_end) = UnixStream::pair().map_err(|_| not_started)?;
         let spawned = {
-            let mut command = Command::new(tool_root.join(launcher::FIXTURE_FILE));
+            let mut command = Command::new(tool_root.join(program.file()));
             command
+                .args(program.prefix())
                 .arg("guardian")
                 .arg(name)
                 .arg(deadline_ms.to_string())
@@ -88,7 +90,7 @@ impl GuardianLink {
         // is quarantined with the reason `guardian`.
         child.kill().ok();
         if wait_within(&mut child, probe_group::CLEANUP_DEADLINE).is_err() {
-            *quarantined = Some(quarantine(execution_dir, QuarantineReason::Guardian));
+            session.enter_quarantine(QuarantineReason::Guardian);
         }
         Err(not_started)
     }

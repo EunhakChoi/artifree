@@ -3,12 +3,14 @@
 
 use std::ffi::OsString;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use artifree_core::jobs::SystemClock;
+use artifree_ports::execution::Execution;
 use artifree_server::worker::{self, Stopped, WorkerEvent, WorkerOptions};
 
 const WORKER_HELP: &str = "Usage: artifree-server worker run --data-dir <dir> [options]
@@ -16,10 +18,11 @@ const WORKER_HELP: &str = "Usage: artifree-server worker run --data-dir <dir> [o
 Runs the persistent jobs (decision 0030) of the server whose data directory is
 <dir>: it claims queued jobs one at a time, re-reads every file of the pinned
 revision, compares its SHA-256 digest and size with the stored listing, and
-records the result. The worker is trusted in-repository code: it runs no
-untrusted code, has no network access of its own, and is not a sandbox. It
-opens the existing database directly (the server need not run) and never
-creates one. Run it as the user that runs the server.
+records the result. The worker is trusted in-repository code: it has no network
+access of its own and is not a sandbox. It runs no untrusted code unless it is
+given --execution-dir (decision 0057). It opens the existing database directly
+(the server need not run) and never creates one. Run it as the user that runs
+the server.
 
 Options:
   --data-dir <dir>     Data directory of the server (required)
@@ -32,6 +35,10 @@ Options:
                        every third of it (1-3600, default 30)
   --hold-file <path>   Testing only: after each claim, wait until this file
                        exists before reading the job's files
+  --execution-dir <dir>  The private directory of the admission lock, the
+                       attempt registry and the staged input (decision 0057
+                       rule 18). A build that knows no execution profile
+                       refuses it with exit status 2.
 
 On SIGINT or SIGTERM (Ctrl-C on Windows) the worker gives the job it holds back
 to the queue at its next checkpoint, without using an attempt, and exits 0. With
@@ -46,6 +53,8 @@ stdout is JSON lines: {\"event\":\"ready\",\"worker\":...}, one
 given back, {\"event\":\"lease_lost\",\"job\":...} when a lease was lost, and
 {\"event\":\"stopped\",\"reason\":\"drained\"|\"signal\"} last. Diagnostics go to
 stderr. Exit status 1: the database is missing, refused, or failed repeatedly.
+Exit status 2: --execution-dir was refused (no execution profile, or not the
+only process of a delegated group).
 See docs/decisions/0030-persistent-jobs-and-worker.md.";
 
 /// What a parsed command line asks for.
@@ -92,6 +101,7 @@ pub fn parse(arguments: &[OsString]) -> Result<Parsed, String> {
     }
     let mut data_dir: Option<PathBuf> = None;
     let mut hold_file: Option<PathBuf> = None;
+    let mut execution_dir: Option<PathBuf> = None;
     let mut once = false;
     let mut supervised = false;
     let mut poll_ms: Option<u64> = None;
@@ -110,12 +120,16 @@ pub fn parse(arguments: &[OsString]) -> Result<Parsed, String> {
             }
             continue;
         }
-        let flag = ["--data-dir", "--hold-file", "--poll-ms", "--lease-secs"]
-            .into_iter()
-            .find(|flag| argument == flag)
-            .ok_or_else(|| {
-                "Unknown arguments. An option is not recognized; use --help.".to_owned()
-            })?;
+        let flag = [
+            "--data-dir",
+            "--hold-file",
+            "--execution-dir",
+            "--poll-ms",
+            "--lease-secs",
+        ]
+        .into_iter()
+        .find(|flag| argument == flag)
+        .ok_or_else(|| "Unknown arguments. An option is not recognized; use --help.".to_owned())?;
         let value = remaining
             .next()
             .filter(|value| !value.is_empty())
@@ -125,6 +139,7 @@ pub fn parse(arguments: &[OsString]) -> Result<Parsed, String> {
         let taken = match flag {
             "--data-dir" => data_dir.replace(PathBuf::from(value)).is_some(),
             "--hold-file" => hold_file.replace(PathBuf::from(value)).is_some(),
+            "--execution-dir" => execution_dir.replace(PathBuf::from(value)).is_some(),
             "--poll-ms" => poll_ms.replace(number(flag, value, &POLL_MS)?).is_some(),
             _ => lease_secs
                 .replace(number(flag, value, &LEASE_SECS)?)
@@ -148,6 +163,7 @@ pub fn parse(arguments: &[OsString]) -> Result<Parsed, String> {
             poll: Duration::from_millis(poll_ms.unwrap_or(1_000)),
             lease: Duration::from_secs(lease_secs.unwrap_or(30)),
             hold_file,
+            execution_dir,
         },
         supervised,
     })
@@ -182,15 +198,54 @@ fn number(
     })
 }
 
+/// Why `worker` failed: `Fatal` exits with status 1, `Unsupported` with status 2
+/// (decision 0057 rule 18).
+#[derive(Debug)]
+pub enum WorkerFailure {
+    /// A bad command line, a database that cannot be used, or a store that
+    /// failed repeatedly.
+    Fatal(String),
+    /// A request this build cannot serve: `--execution-dir` without an execution
+    /// profile, or outside a delegated group.
+    Unsupported(String),
+}
+
+impl From<String> for WorkerFailure {
+    fn from(message: String) -> Self {
+        Self::Fatal(message)
+    }
+}
+
+/// Runs `worker` and returns its exit status; the message of a failure goes to
+/// stderr.
+pub fn worker_exit(arguments: &[OsString]) -> ExitCode {
+    match run_worker(arguments) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(WorkerFailure::Fatal(message)) => {
+            eprintln!("{message}");
+            ExitCode::FAILURE
+        }
+        Err(WorkerFailure::Unsupported(message)) => {
+            eprintln!("{message}");
+            ExitCode::from(2)
+        }
+    }
+}
+
 /// Runs `worker`. Prints help, or JSON lines until the worker stops.
-pub fn worker_command(arguments: &[OsString]) -> Result<(), String> {
+fn run_worker(arguments: &[OsString]) -> Result<(), WorkerFailure> {
     let (options, supervised) = match parse(arguments)? {
-        Parsed::Help => return print_line(WORKER_HELP),
+        Parsed::Help => {
+            print_line(WORKER_HELP)?;
+            return Ok(());
+        }
         Parsed::Run {
             options,
             supervised,
         } => (options, supervised),
     };
+    // Refused before any line is printed and before the database is opened.
+    let execution = open_execution(options.execution_dir.as_deref())?;
     let shutdown = Arc::new(AtomicBool::new(false));
     // The runtime exists only to wait for signals; the loop is synchronous.
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -205,13 +260,28 @@ pub fn worker_command(arguments: &[OsString]) -> Result<(), String> {
         // Armed before the worker says it is ready, like the signal handlers.
         watch_stdin(&shutdown)?;
     }
-    let stopped = worker::run(&options, &SystemClock, &shutdown, &mut |event| {
-        // A closed stdout must not stop a worker that holds a lease.
-        drop(print_line(&event_line(event).to_string()));
-        if let WorkerEvent::Warning(error) = event {
-            eprintln!("warning: {error}");
-        }
-    })?;
+    let stopped = worker::run(
+        &options,
+        execution.as_deref(),
+        &SystemClock,
+        &shutdown,
+        &mut |event| {
+            // A closed stdout must not stop a worker that holds a lease.
+            if let Some(line) = event_line(event) {
+                drop(print_line(&line.to_string()));
+            }
+            match event {
+                WorkerEvent::Warning(error) => eprintln!("warning: {error}"),
+                WorkerEvent::Attempt { job, detail } => {
+                    eprintln!("attempt of job {}: {detail}", job.as_str());
+                }
+                WorkerEvent::Unavailable(detail) => {
+                    eprintln!("execution unavailable: {detail}");
+                }
+                _ => {}
+            }
+        },
+    )?;
     let reason = match stopped {
         Stopped::Drained => "drained",
         Stopped::Signal => "signal",
@@ -221,6 +291,45 @@ pub fn worker_command(arguments: &[OsString]) -> Result<(), String> {
     ));
     runtime.shutdown_background();
     Ok(())
+}
+
+/// Opens the execution port that `--execution-dir` asks for, or returns `None`
+/// when the option is absent. A worker refuses to start with the option outside a
+/// delegated group, naming the missing facility (decision 0057 rule 18).
+///
+/// # Errors
+///
+/// [`WorkerFailure::Unsupported`] when the directory or the group is refused.
+#[cfg(all(target_os = "linux", feature = "enforcement-fixture"))]
+fn open_execution(dir: Option<&Path>) -> Result<Option<Box<dyn Execution>>, WorkerFailure> {
+    let Some(dir) = dir else { return Ok(None) };
+    match artifree_providers::execution::FixtureExecution::open(dir) {
+        Ok(execution) => Ok(Some(Box::new(execution))),
+        Err(refusal) => Err(WorkerFailure::Unsupported(format!(
+            "Execution unavailable. {refusal}; --execution-dir needs the only process \
+             of a delegated group and a private execution directory (decision 0057 \
+             rule 18)."
+        ))),
+    }
+}
+
+/// Opens the execution port that `--execution-dir` asks for, or returns `None`
+/// when the option is absent. This build knows no execution profile, so it
+/// refuses the option before the database is opened (decision 0057 rule 18).
+///
+/// # Errors
+///
+/// [`WorkerFailure::Unsupported`] when `--execution-dir` was given.
+#[cfg(not(all(target_os = "linux", feature = "enforcement-fixture")))]
+fn open_execution(dir: Option<&Path>) -> Result<Option<Box<dyn Execution>>, WorkerFailure> {
+    match dir {
+        Some(_) => Err(WorkerFailure::Unsupported(
+            "Execution unavailable. This build knows no execution profile, so \
+             --execution-dir is refused (decision 0057 rule 18)."
+                .to_owned(),
+        )),
+        None => Ok(None),
+    }
 }
 
 /// Sets `flag` when the process is interrupted (Ctrl-C) or, on Unix, asked to
@@ -292,26 +401,30 @@ fn watch_stdin(flag: &Arc<AtomicBool>) -> Result<(), String> {
         .map_err(|error| format!("cannot watch standard input: {error}"))
 }
 
-fn event_line(event: &WorkerEvent<'_>) -> serde_json::Value {
+/// The stdout line of an event, or `None` for an event that prints none. An
+/// attempt's end is diagnostics only, so it has no stdout line (decision 0030
+/// rule 13).
+fn event_line(event: &WorkerEvent<'_>) -> Option<serde_json::Value> {
     match event {
         WorkerEvent::Ready { worker } => {
-            serde_json::json!({"event": "ready", "worker": worker.as_str()})
+            Some(serde_json::json!({"event": "ready", "worker": worker.as_str()}))
         }
         WorkerEvent::Claimed(job) => {
-            serde_json::json!({"event": "claimed", "job": job.as_str()})
+            Some(serde_json::json!({"event": "claimed", "job": job.as_str()}))
         }
-        WorkerEvent::Job(record) | WorkerEvent::Released(record) => serde_json::json!({
+        WorkerEvent::Job(record) | WorkerEvent::Released(record) => Some(serde_json::json!({
             "event": "job",
             "job": record.id.as_str(),
             "state": record.state.as_str(),
             "attempts": record.attempts,
             "failure": record.failure.map(artifree_domain::job::JobFailure::as_str),
             "verified": record.report.as_ref().map(artifree_domain::job::VerifyReport::is_ok),
-        }),
+        })),
         WorkerEvent::LeaseLost(job) => {
-            serde_json::json!({"event": "lease_lost", "job": job.as_str()})
+            Some(serde_json::json!({"event": "lease_lost", "job": job.as_str()}))
         }
-        WorkerEvent::Warning(_) => serde_json::json!({"event": "warning"}),
+        WorkerEvent::Warning(_) => Some(serde_json::json!({"event": "warning"})),
+        WorkerEvent::Attempt { .. } | WorkerEvent::Unavailable(_) => None,
     }
 }
 

@@ -276,3 +276,30 @@ export function checkPanicStrategy(manifestText) {
     'Cargo.toml sets panic = "abort": JPEG decoder panic containment needs unwinding.',
   );
 }
+
+/** Names that a release build must not carry (decision 0057 rule 2). */
+const RELEASE_BUILD_FORBIDDEN = ['enforcement-fixture', '--all-features'];
+
+/**
+ * Rejects a release build that names the enforcement fixture feature or `--all-features`
+ * (decision 0057 rule 2). `whole` are release build sources read whole: the server build of the
+ * release archives and clean-install checks, the release packaging, the container image build and
+ * the container image. In `workflows` only the lines that run `cargo ... build` are read, since the
+ * enforcement job and the minimum-version job may test with the feature.
+ */
+export function checkReleaseBuilds({ whole, workflows }) {
+  for (const { path, text } of whole)
+    for (const name of RELEASE_BUILD_FORBIDDEN)
+      assert.ok(
+        !text.includes(name),
+        `${path} names ${name}: release builds use the default features (decision 0057 rule 2).`,
+      );
+  for (const { path, text } of workflows)
+    for (const line of text.split('\n'))
+      if (/\bcargo\b.*\bbuild\b/.test(line))
+        for (const name of RELEASE_BUILD_FORBIDDEN)
+          assert.ok(
+            !line.includes(name),
+            `${path} builds with ${name}: release builds use the default features (decision 0057 rule 2).`,
+          );
+}

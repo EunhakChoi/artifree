@@ -82,8 +82,9 @@ pub(super) fn admit(
 
 /// Runs the whole admission like `admit` and also returns the delegated group the provider
 /// entered from. An attempt's group is made beside its `supervisor` child (0056 rule 8). Only
-/// the test-build launch calls it.
-#[cfg(test)]
+/// the launch calls it: the test build's and, with the `enforcement-fixture` feature, the
+/// worker's (decision 0057 rule 2).
+#[cfg(any(test, feature = "enforcement-fixture"))]
 pub(super) fn admit_for_attempt(
     profile: InspectionProfile,
     roots: &AdmissionRoots<'_>,
@@ -170,6 +171,22 @@ pub(super) fn delegated_group<'a>(discovered: &'a Path, entered: Option<&'a Path
         Some(group) if discovered == group.join(OsStr::new(cgroup::SUPERVISOR_GROUP)) => group,
         _ => discovered,
     }
+}
+
+/// The worker's start check, before it opens its database (decision 0057 rule 18): facility 2's
+/// group and kill support, then facilities 5, 6 and 7 against that group, in the documented order.
+/// It writes nothing and enters no group; every capacity runs the whole admission before a claim.
+///
+/// # Errors
+/// The first refusal, which names the missing facility.
+#[cfg(feature = "enforcement-fixture")]
+pub(super) fn check_delegated_start(roots: &AdmissionRoots<'_>) -> Result<(), AdmissionRefusal> {
+    let discovered =
+        cgroup::discover_own_group(&roots.proc_self.join("cgroup"), roots.cgroup_mount)?;
+    cgroup::check_kill_support(&discovered)?;
+    cgroup::check_delegation(&discovered, cgroup::own_uid(roots.proc_self)?)?;
+    cgroup::check_controllers(&discovered)?;
+    cgroup::check_sole_occupant(&discovered, process::id())
 }
 
 /// What a successful probe run measured.

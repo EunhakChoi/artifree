@@ -34,7 +34,7 @@ readonly DECOY_PID="$SAVED_DIR/decoy.pid"
 usage() {
   cat >&2 <<'EOF'
 usage: prepare.sh VERB [ARGUMENT]
-  install FIXTURE PAYLOAD  install the pinned bubblewrap and assemble the tool root
+  install FIXTURE PAYLOAD SERVER  install the pinned bubblewrap and assemble the tool root
   save-routing        save kernel.core_pattern once, before the job changes it
   routing-file        set kernel.core_pattern to the plain file name core
   routing-pipe        restore the saved kernel.core_pattern
@@ -105,19 +105,24 @@ write_host_address() {
   write_root_text 0644 "$ROOT/etc/host-address" "$address"
 }
 
-# Assembles the tool root: the bubblewrap launcher, the fixture and the payload, the shared
-# libraries each of them needs, the licence of each Debian package that owns a copied file,
-# the scenario file that starts as `exit`, the runner's IPv4 address in etc/host-address, and
-# the manifest last (decision 0056 rule 6). The sandbox binds the tool root's lib and lib64 as
-# /lib and /lib64 and nothing else, so a library that ldd reports under /usr/lib (usrmerged
-# hosts such as ubuntu-24.04) is copied to the path it has inside the sandbox. The fixture's
-# write-probes mode writes the probe programs under probes/ before the manifest, which covers
+# Assembles the tool root: the bubblewrap launcher, the fixture, the payload and the server
+# binary, the shared libraries each of them needs, the licence of each Debian package that owns a
+# copied file, the scenario file that starts as `exit`, the runner's IPv4 address in
+# etc/host-address, and the manifest last (decision 0056 rule 6). The sandbox binds the tool
+# root's lib and lib64 as /lib and /lib64 and nothing else, so a library that ldd reports under
+# /usr/lib (usrmerged hosts such as ubuntu-24.04) is copied to the path it has inside the
+# sandbox. The fixture's write-probes mode writes the probe programs under probes/ before the manifest, which covers
 # them like every other file: "The fixture's tool root also holds its generated probe programs,
 # under the same manifest" (decision 0056 rule 6, as amended 2026-11-13).
+# The server binary serves the worker's stub, bootstrap and guardian entry points (decision 0057
+# rule 4). It is installed stripped, because every admission hashes every file of the tool root.
+# The fixture stays for admission's namespace check and probe child, the probe programs and the
+# counters.
 install_tool_root() {
-  local fixture=$1 payload=$2
+  local fixture=$1 payload=$2 server=$3
   [[ -f "$fixture" && -x "$fixture" ]] || fail "the fixture is not an executable file: $fixture"
   [[ -f "$payload" && -x "$payload" ]] || fail "the payload is not an executable file: $payload"
+  [[ -f "$server" && -x "$server" ]] || fail "the server binary is not an executable file: $server"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get install -y --no-install-recommends "bubblewrap=$BUBBLEWRAP_VERSION"
@@ -130,6 +135,8 @@ install_tool_root() {
   copy_libraries "$fixture"
   install -o root -g root -m 0755 "$payload" "$ROOT/bin/artifree-execution-payload"
   copy_libraries "$payload"
+  install -s -o root -g root -m 0755 "$server" "$ROOT/bin/artifree-server"
+  copy_libraries "$server"
   write_root_text 0644 "$ROOT/etc/scenario" exit
   write_host_address
   "$ROOT/bin/artifree-execution-fixture" write-probes "$ROOT/probes"
@@ -591,7 +598,7 @@ decoy_off() {
 main() {
   local verb=${1:-}
   case "$verb" in
-    install) (( $# == 3 )) || usage ;;
+    install) (( $# == 4 )) || usage ;;
     scenario)
       if (( $# != 2 )) || ! is_scenario "$2"; then
         usage
@@ -622,7 +629,7 @@ main() {
     fail "run as root through sudo"
   fi
   case "$verb" in
-    install) install_tool_root "$2" "$3" ;;
+    install) install_tool_root "$2" "$3" "$4" ;;
     save-routing) save_routing ;;
     routing-file) routing_file ;;
     routing-pipe) routing_pipe ;;

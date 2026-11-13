@@ -2,11 +2,11 @@
 //! root's handle and bound into a manifest (decision 0042, rule 7; decision 0056, amendment of
 //! 2026-11-13, input and output).
 //!
-//! Compiled only into the test build (0056 rule 16). It runs only after the attempt's verdict has
-//! passed, and it traverses from the output root's handle. Each entry is classified by `statat`
-//! without following links, opened only when it is a directory or a regular file, and checked
-//! again through the opened descriptor. A regular file is read once, through that descriptor, so
-//! no path is read again by name.
+//! Compiled into the test build and the enforcement-fixture build (0056 rule 16; decision 0057
+//! rule 2). It runs only after the attempt's verdict has passed, and it traverses from the output
+//! root's handle. Each entry is classified by `statat` without following links, opened only when
+//! it is a directory or a regular file, and checked again through the opened descriptor. A regular
+//! file is read once, through that descriptor, so no path is read again by name.
 
 use std::collections::BTreeSet;
 use std::ffi::CStr;
@@ -18,9 +18,11 @@ use std::str::FromStr;
 use artifree_domain::package::{
     FilePackage, MAX_FILE_BYTES, MAX_PACKAGE_BYTES, MAX_PATH_SEGMENTS, PackageError, PackagePath,
 };
+use artifree_ports::execution::BoundRun;
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, Stat};
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
 use super::report::hex;
 use super::staging::RESOLVE;
 
@@ -33,7 +35,11 @@ const MAX_ENTRIES: usize = 2048;
 /// file is at level 7.
 const MAX_DEPTH: usize = MAX_PATH_SEGMENTS - 1;
 /// The version tag that starts the output manifest's canonical text.
+#[cfg(test)]
 const MANIFEST_TAG: &str = "artifree-output-manifest-v1";
+/// The tag of a manifest that also binds its run (decision 0057 rule 17).
+#[cfg(test)]
+const MANIFEST_TAG_V2: &str = "artifree-output-manifest-v2";
 
 /// Why the collected files do not form a valid package, as far as collection reports it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -93,8 +99,8 @@ pub(super) enum CollectionRefusal {
 }
 
 /// What the output manifest binds the collected files to (0056, amendment of 2026-11-13, input
-/// and output). R02b adds the actor and its generation, the artifact, the revision, the job and
-/// the fence under a new version tag, so a digest under one tag is never compared with another.
+/// and output). It also carries the run the attempt belongs to (decision 0057 rule 17), under a
+/// version tag of its own, so a digest under one tag is never compared with one under another.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ManifestBinding {
     /// The operation profile's identity.
@@ -107,6 +113,10 @@ pub(super) struct ManifestBinding {
     pub(super) filter_sha256: String,
     /// The digest of the input listing.
     pub(super) input_digest: [u8; 32],
+    /// The run the attempt belongs to (decision 0057 rule 17). `None` writes R02af's manifest
+    /// under `artifree-output-manifest-v1`; `Some` writes `artifree-output-manifest-v2` with seven
+    /// more lines.
+    pub(super) run: Option<BoundRun>,
 }
 
 /// The output manifest: the binding and each collected file's path, length and SHA-256, in path
@@ -137,18 +147,29 @@ impl OutputManifest {
     }
 
     /// The canonical text that the digest covers: the version tag, the binding's lines in a fixed
-    /// order, then one `file` line per file (0056, amendment of 2026-11-13, input and output).
+    /// order, the seven run lines when the binding carries a run, then one `file` line per file
+    /// (0056, amendment of 2026-11-13, input and output; decision 0057 rule 17). A run selects the
+    /// version tag `artifree-output-manifest-v2`; no run keeps `artifree-output-manifest-v1`.
+    #[cfg(test)]
     #[must_use]
     pub(super) fn canonical_text(&self) -> String {
         let binding = &self.binding;
+        let tag = if binding.run.is_some() {
+            MANIFEST_TAG_V2
+        } else {
+            MANIFEST_TAG
+        };
         let mut text = format!(
-            "{MANIFEST_TAG}\nprofile\t{}\nprofile-manifest\t{}\ntool-root\t{}\nfilter\t{}\ninput\t{}\n",
+            "{tag}\nprofile\t{}\nprofile-manifest\t{}\ntool-root\t{}\nfilter\t{}\ninput\t{}\n",
             binding.profile,
             hex(binding.profile_manifest_sha256),
             binding.tool_root_sha256,
             binding.filter_sha256,
             hex(binding.input_digest),
         );
+        if let Some(run) = &binding.run {
+            text.push_str(&run_lines(run));
+        }
         for (path, length, sha256) in &self.files {
             let line = format!("file\t{path}\t{length}\t{}\n", hex(*sha256));
             text.push_str(&line);
@@ -157,10 +178,40 @@ impl OutputManifest {
     }
 
     /// The SHA-256 digest of the canonical text.
+    #[cfg(test)]
     #[must_use]
     pub(super) fn digest(&self) -> [u8; 32] {
         Sha256::digest(self.canonical_text().as_bytes()).into()
     }
+
+    /// The binding this manifest was made under.
+    #[cfg(feature = "enforcement-fixture")]
+    #[must_use]
+    pub(super) fn binding(&self) -> &ManifestBinding {
+        &self.binding
+    }
+}
+
+/// The seven lines that bind a run, in their canonical order: the actor, its generation (`none`
+/// when it has none), the artifact, the revision, the job, the fence and the attempt (decision
+/// 0057 rule 17). Each value is printable ASCII without tabs or newlines by construction (0056,
+/// amendment of 2026-11-13, input and output).
+#[cfg(test)]
+fn run_lines(run: &BoundRun) -> String {
+    let BoundRun {
+        actor,
+        generation,
+        artifact,
+        revision,
+        job,
+        fence,
+        attempt,
+    } = run;
+    let generation_text = generation.map_or_else(|| "none".to_owned(), |n| n.to_string());
+    format!(
+        "actor\t{actor}\ngeneration\t{generation_text}\nartifact\t{artifact}\n\
+         revision\t{revision}\njob\t{job}\nfence\t{fence}\nattempt\t{attempt}\n"
+    )
 }
 
 /// A collected package with its manifest.
@@ -371,3 +422,6 @@ fn package_reason(error: &PackageError) -> PackageReason {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod run_binding_tests;
