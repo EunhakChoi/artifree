@@ -69,6 +69,11 @@ const WALL_DEADLINE: Duration = Duration::from_secs(120);
 const READINESS_DEADLINE: Duration = Duration::from_secs(10);
 /// The pause between two polls of the stub and of the readers.
 const POLL: Duration = Duration::from_millis(10);
+
+/// How much longer than the cleanup observation deadline the provider waits for the guardian's line
+/// when it closed the socket without `D`: the guardian then kills the group and waits up to that
+/// deadline itself before it writes the line.
+const GUARDIAN_REPORT_MARGIN: Duration = Duration::from_secs(1);
 /// How long the provider waits on the control socket once the stub has exited.
 const CONTROL_GRACE: Duration = Duration::from_secs(1);
 /// The largest read that one pipe reader makes at a time.
@@ -147,6 +152,13 @@ pub(super) struct AttemptPlan {
 }
 
 impl AttemptPlan {
+    /// The renewal window: a third of the lease (0042 rule 6). The provider's heartbeat schedule and
+    /// the guardian's window both use this value.
+    #[must_use]
+    pub(super) fn renewal_window(&self) -> Duration {
+        self.lease / 3
+    }
+
     /// The one plan that the fixture uses: the fixture stub and the decision 0042 deadlines.
     #[must_use]
     pub(super) fn fixture() -> Self {
@@ -840,7 +852,11 @@ fn run_group(
         session,
     )?;
     // `await_exit` records the exit in the session itself, on every path that reaped the stub.
-    let (exit, wall_time) = await_exit(plan, session, start)?;
+    let awaited = await_exit(plan, session, start);
+    // The stub is no longer polled and no renewal follows, so the guardian's window stops here,
+    // not after the teardown grace below (0056, amendment of 2026-11-13, the guardian: `S`).
+    send_to_guardian(session.guardian.as_mut(), guardian::STOP);
+    let (exit, wall_time) = awaited?;
     // Decision 0042 rule 6: after the launcher and init teardown a normal exit also requires an
     // empty group. `populated` is not used: measured on 2026-11-12, it stays 1 for a few
     // milliseconds after ordinary exits while the listing is already empty. `settle` kills
@@ -1322,7 +1338,8 @@ fn start_guardian(
         roots.tool_root,
         name,
         deadline,
-        plan.lease / 3,
+        plan.renewal_window(),
+        plan.readiness_deadline,
     )?);
     Ok(())
 }
@@ -1354,7 +1371,7 @@ fn heartbeat(
     guardian: Option<&mut GuardianLink>,
     now: Instant,
 ) -> Result<(), AttemptFailure> {
-    if !heartbeat_due(renewals.last_asked, now, plan.lease / 3) {
+    if !heartbeat_due(renewals.last_asked, now, plan.renewal_window()) {
         return Ok(());
     }
     let answer = (plan.store)(renewals.asked);
@@ -1390,14 +1407,17 @@ fn conclude(
     let Some(mut link) = session.guardian.take() else {
         return (settled, None);
     };
-    if settled.cleanup_observed {
+    let within = if settled.cleanup_observed {
         link.send(guardian::DONE).ok();
+        probe_group::CLEANUP_DEADLINE
     } else {
         // The group may still exist, so the guardian gets no `D`. It reads end of file instead and
-        // ends the attempt itself; its line still comes back on the socket.
+        // ends the attempt itself, which takes up to its own cleanup deadline after its kill, so
+        // its line is awaited for that and `GUARDIAN_REPORT_MARGIN` more.
         link.close_records();
-    }
-    let (report, reaped) = link.finish(probe_group::CLEANUP_DEADLINE);
+        probe_group::CLEANUP_DEADLINE.saturating_add(GUARDIAN_REPORT_MARGIN)
+    };
+    let (report, reaped) = link.finish(within);
     if !reaped {
         settled.cleanup_observed = false;
         quarantine();

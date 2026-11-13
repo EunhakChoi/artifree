@@ -12,13 +12,12 @@ use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use super::super::admission::wait_within;
 use super::super::guardian::{self, GuardianReason};
 use super::super::{launcher, probe_group};
-use super::{AttemptFailure, NotStartedReason, POLL, READINESS_DEADLINE, quarantine};
+use super::{AttemptFailure, NotStartedReason, quarantine};
 
 /// The most bytes of the guardian's output that are collected. The report line is far shorter, so
 /// anything after the first 256 bytes is ignored.
@@ -38,7 +37,8 @@ pub(super) struct GuardianLink {
 impl GuardianLink {
     /// Starts the guardian of the attempt group `name` and waits for its ready byte.
     ///
-    /// `deadline` and `window` are passed to the guardian as whole milliseconds from its start.
+    /// `deadline` and `window` are passed to the guardian as whole milliseconds from its start. The
+    /// ready byte is awaited for at most `readiness`, the plan's readiness deadline.
     /// The command holds the child's end of the socket, so it is dropped right after the spawn,
     /// and only the guardian keeps that end.
     ///
@@ -46,7 +46,7 @@ impl GuardianLink {
     ///
     /// Returns `NotStarted(GuardianNotStarted)` when the socket or the child cannot be made, when a
     /// duration does not fit in milliseconds, or when the guardian does not write its ready byte
-    /// within the readiness deadline. A guardian that does not report ready is killed and waited
+    /// within `readiness`. A guardian that does not report ready is killed and waited
     /// for. When it is not reaped within the cleanup deadline, the provider is also quarantined in
     /// its process.
     pub(super) fn start(
@@ -54,6 +54,7 @@ impl GuardianLink {
         name: &str,
         deadline: Duration,
         window: Duration,
+        readiness: Duration,
     ) -> Result<Self, AttemptFailure> {
         let not_started = AttemptFailure::NotStarted(NotStartedReason::GuardianNotStarted);
         let deadline_ms = u64::try_from(deadline.as_millis()).map_err(|_| not_started)?;
@@ -73,7 +74,7 @@ impl GuardianLink {
             command.spawn()
         };
         let mut child = spawned.map_err(|_| not_started)?;
-        if read_ready_byte(&mut socket) {
+        if read_ready_byte(&mut socket, readiness) {
             return Ok(Self { child, socket });
         }
         // A guardian that is still running after the kill stays in `supervisor`, so the provider
@@ -135,13 +136,7 @@ impl GuardianLink {
             .next()
             .and_then(|line| std::str::from_utf8(line).ok())
             .and_then(guardian::parse_report);
-        let reaped = loop {
-            match self.child.try_wait() {
-                Ok(Some(_)) => break true,
-                Ok(None) if started.elapsed() < within => thread::sleep(POLL),
-                Ok(None) | Err(_) => break false,
-            }
-        };
+        let reaped = wait_within(&mut self.child, within.saturating_sub(started.elapsed())).is_ok();
         if !reaped {
             // The kill and its wait may fail. Either way `reaped` stays false, which is what the
             // caller reads, so the outcome of the kill needs no other handling here.
@@ -152,13 +147,13 @@ impl GuardianLink {
     }
 }
 
-/// Reads the guardian's ready byte within `READINESS_DEADLINE`, counted from the call. Any other
-/// byte, an end of stream, a read error or a passed deadline means that the guardian is not ready.
-fn read_ready_byte(socket: &mut UnixStream) -> bool {
+/// Reads the guardian's ready byte within `within`, counted from the call. Any other byte, an end
+/// of stream, a read error or a passed deadline means that the guardian is not ready.
+fn read_ready_byte(socket: &mut UnixStream, within: Duration) -> bool {
     let started = Instant::now();
     let mut byte = [0u8; 1];
     loop {
-        let Some(remaining) = READINESS_DEADLINE
+        let Some(remaining) = within
             .checked_sub(started.elapsed())
             .filter(|left| !left.is_zero())
         else {
@@ -174,3 +169,6 @@ fn read_ready_byte(socket: &mut UnixStream) -> bool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

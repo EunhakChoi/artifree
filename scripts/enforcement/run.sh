@@ -120,9 +120,10 @@ run_scenario() {
 # leaves (R02ah, decision 0056, amendment of 2026-11-13, the guardian). A test must run the supervisor
 # in a unit with `KillMode=process`, or the service manager does the guardian's work and the test
 # proves nothing. Within 10 s no payload, probe or guardian process may be left. Each attempt group
-# beneath the unit must be empty, and there must be exactly one unless the phase is collecting, where
-# there must be none. With GUARDIAN=1 and any phase but collecting, the guardian's line must name
-# supervisor-gone with emptied=1. Otherwise no guardian line may appear. The unit is then removed.
+# beneath the unit must be empty, and there may be at most one, or none at collecting. systemd trims
+# the empty groups of a delegated subtree when the unit stops (measured in the job of #205: at guarded
+# none was left), and the kernel removes only an empty group, so a removed group was empty too. With
+# GUARDIAN=1 and any phase but collecting, the guardian's line must name supervisor-gone with emptied=1. Otherwise no guardian line may appear. The unit is then removed.
 death_at() {
   local phase=$1 guardian=$2 scenario=$3
   local unit="artifree-supervisor-$phase-$guardian"
@@ -174,18 +175,22 @@ death_at() {
   for left in "$group"/attempt-*; do
     [[ -d "$left" && ${left##*/} =~ ^attempt-[0-9]+-[0-9]+$ ]] && groups+=("$left")
   done
+  printf 'death-at phase=%s guardian=%s groups-left=%d\n' "$phase" "$guardian" "${#groups[@]}"
   if [[ $phase == collecting ]]; then
     ((${#groups[@]} == 0)) || fail "an attempt group is left after the death at collecting: ${groups[*]}"
   else
-    ((${#groups[@]} == 1)) || fail "the death at $phase (guardian=$guardian) left ${#groups[@]} attempt groups, not 1"
-    # The kernel may report the last exit a moment after the processes are gone, so the check is
-    # retried for up to 2 s.
-    for ((tries = 0; tries < 20; tries++)); do
-      populated="$(grep '^populated ' "${groups[0]}/cgroup.events" || true)"
-      [[ $populated == 'populated 0' ]] && break
-      sleep 0.1
+    ((${#groups[@]} <= 1)) || fail "the death at $phase (guardian=$guardian) left ${#groups[@]} attempt groups, not at most 1"
+    for left in "${groups[@]}"; do
+      # The kernel may report the last exit a moment after the processes are gone, so the check is
+      # retried for up to 2 s. A group that systemd removed meanwhile was empty.
+      for ((tries = 0; tries < 20; tries++)); do
+        [[ -e "$left/cgroup.events" ]] || break
+        populated="$(grep '^populated ' "$left/cgroup.events" || true)"
+        [[ $populated == 'populated 0' ]] && break
+        sleep 0.1
+      done
+      [[ ! -e "$left/cgroup.events" || $populated == 'populated 0' ]] || fail "the attempt group after the death at $phase is not empty: $populated"
     done
-    [[ $populated == 'populated 0' ]] || fail "the attempt group after the death at $phase is not empty: $populated"
   fi
   if [[ $guardian == 1 && $phase != collecting ]]; then
     grep -q 'guardian supervisor-gone emptied=1' "$log" || fail "the guardian reported no supervisor-gone emptied=1 line after the death at $phase"
