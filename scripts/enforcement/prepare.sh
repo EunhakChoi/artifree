@@ -10,23 +10,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
-# The operator's packaging script (decision 0058 rule 19): the job builds its root with the same
-# functions, then adds its test programs.
-# shellcheck source=../tools/package-root.sh
-source "$SCRIPT_DIR/../tools/package-root.sh"
-
-# The repository's package version, from the workspace manifest. The job's server binary must
-# name the same version, and the provider's TOOL_ROOT is the root of that version.
-repo_version() {
-  awk '/^\[workspace\.package\]/ { section = 1; next } /^\[/ { section = 0 }
-    section && $1 == "version" { gsub(/"/, "", $3); print $3; exit }' "$SCRIPT_DIR/../../Cargo.toml"
-}
-VERSION="$(repo_version)"
-readonly VERSION
-is_version "$VERSION" || package_fail "the workspace names no package version: $VERSION"
-# The tool root of this version (decision 0058 rule 19). run.sh derives the same path.
-ROOT="$(root_of_version "$VERSION")"
-readonly ROOT
+# VERSION, ROOT and the operator's packaging functions (decision 0058 rule 19): the job builds
+# its root with the same functions, then adds its test programs. run.sh sources the same file.
+# shellcheck source=version.sh
+source "$SCRIPT_DIR/version.sh"
 readonly SAVED_DIR=/run/artifree-enforcement
 readonly SAVED_ROUTING="$SAVED_DIR/core_pattern"
 readonly CORE_PATTERN=/proc/sys/kernel/core_pattern
@@ -160,15 +147,10 @@ install_tool_root() {
   write_manifest
 }
 
-
-
-
 # The directory of saved copies and of the saved routing value. Only root may read it.
 ensure_saved_dir() {
   install -d -o root -g root -m 0700 "$SAVED_DIR"
 }
-
-
 
 save_routing() {
   install -d -o root -g root -m 0700 "$SAVED_DIR"

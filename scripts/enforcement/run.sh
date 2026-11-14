@@ -3,12 +3,10 @@
 # Privileged steps go only through prepare.sh and systemd-run.
 set -euo pipefail
 
-# The tool root of the workspace's package version (decision 0058 rule 19). It must equal ROOT
-# in prepare.sh and the provider's TOOL_ROOT.
-VERSION="$(awk '/^\[workspace\.package\]/ { section = 1; next } /^\[/ { section = 0 }
-  section && $1 == "version" { gsub(/"/, "", $3); print $3; exit }' "$(dirname -- "$0")/../../Cargo.toml")"
-readonly VERSION
-readonly ROOT="/opt/artifree/tools/$VERSION"
+# VERSION and ROOT, the tool root of the workspace's package version (decision 0058 rule 19),
+# derived as prepare.sh derives them.
+# shellcheck source=version.sh
+source "$(dirname -- "$0")/version.sh"
 readonly OUT=target/enforcement
 readonly FIXTURE=target/debug/examples/artifree-execution-fixture
 readonly PAYLOAD=target/debug/examples/artifree-execution-payload

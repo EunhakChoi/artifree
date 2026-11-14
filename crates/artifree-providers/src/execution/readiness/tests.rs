@@ -40,9 +40,9 @@ const INPUT_LINE: &str = "1297 1290 252:0 /tmp/artifree-probe-input /input ro,no
 
 const MEASURED_MOUNTINFO: [&str; 10] = [
     ROOT_LINE,
-    "1291 1290 8:1 /opt/artifree/tools/v1 /tools ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
-    "1292 1290 8:1 /opt/artifree/tools/v1/lib /lib ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
-    "1293 1290 8:1 /opt/artifree/tools/v1/lib64 /lib64 ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
+    "1291 1290 8:1 /opt/artifree/tools/0.1.0 /tools ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
+    "1292 1290 8:1 /opt/artifree/tools/0.1.0/lib /lib ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
+    "1293 1290 8:1 /opt/artifree/tools/0.1.0/lib64 /lib64 ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
     "1294 1290 0:111 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw",
     DEV_LINE,
     "1296 1295 0:113 / /dev/pts rw,nosuid,noexec,relatime - devpts devpts rw,mode=620,ptmxmode=666",

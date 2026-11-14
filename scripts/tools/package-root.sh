@@ -9,8 +9,9 @@
 # launcher and its licence, SERVER as the bootstrap, the libraries both load with their
 # licences, and the manifest of every file, all owned by root without group or other write
 # bits, as the provider requires. The script refuses a root that exists: a root is never
-# replaced in place (decision 0042 rule 3). Nothing is downloaded but the pinned launcher
-# package.
+# replaced in place (decision 0042 rule 3). A failed run removes the root it made, so it can be
+# run again. Nothing is downloaded but the pinned launcher package, and it refuses to downgrade
+# a newer Bubblewrap that the host already has.
 #
 # scripts/enforcement/prepare.sh sources this file, so the enforcement job builds its root with
 # the same functions. The job adds its test programs before the manifest, and its verbs that
@@ -56,16 +57,22 @@ launcher_profile_name() {
 }
 
 # Makes ROOT's parent directories root-owned 0755 and ROOT itself, refusing an existing root.
+# ROOT is made by one mkdir, which fails when anything is at that path, so two runs never share
+# a root.
 begin_root() {
-  [[ ! -e "$ROOT" && ! -L "$ROOT" ]] || package_fail "refusing to write over the existing root $ROOT"
   install -d -o root -g root -m 0755 /opt/artifree "$TOOLS_DIR"
-  install -d -o root -g root -m 0755 "$ROOT"
+  mkdir -m 0755 -- "$ROOT" 2> /dev/null || package_fail "refusing to write over the existing root $ROOT"
   install -d -o root -g root -m 0755 "$ROOT/bin" "$ROOT/lib" "$ROOT/lib64" "$ROOT/licenses" "$ROOT/etc"
 }
 
 # Installs the pinned Bubblewrap package and copies its launcher into ROOT with its licence. A
 # copy, not a link: the AppArmor profile names the launcher by its path in the root.
 install_launcher() {
+  local installed
+  installed="$(dpkg-query -W -f='${Version}' bubblewrap 2> /dev/null || true)"
+  if [[ -n "$installed" ]] && dpkg --compare-versions "$installed" gt "$BUBBLEWRAP_VERSION"; then
+    package_fail "bubblewrap $installed is newer than the pinned $BUBBLEWRAP_VERSION; this script does not downgrade it"
+  fi
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get install -y --no-install-recommends "bubblewrap=$BUBBLEWRAP_VERSION"
@@ -144,12 +151,32 @@ write_root_text() {
   printf '%s\n' "$text" > "$path"
 }
 
+# Fails, naming each offender, unless ROOT, everything under it and each of its ancestors are
+# root's, with no group or other write bit (an ancestor may have them with its sticky bit set)
+# and no set-ID bit: the check the provider makes at every admission (decision 0058 rule 19).
+check_root_protected() {
+  local offenders dir uid mode
+  offenders="$(find "$ROOT" \( ! -uid 0 -o -perm /6022 \) -printf '%m %U %p\n')"
+  [[ -z "$offenders" ]] || package_fail "the root has entries others could change:"$'\n'"$offenders"
+  dir="$(dirname -- "$ROOT")"
+  while :; do
+    read -r uid mode < <(stat -c '%u %a' -- "$dir")
+    mode=$((8#$mode))
+    if ((uid != 0 || (mode & 06000) != 0 || ((mode & 022) != 0 && (mode & 01000) == 0))); then
+      package_fail "the ancestor $dir could be changed by someone other than root: uid $uid, mode $(printf '%o' "$mode")"
+    fi
+    [[ "$dir" != / ]] || break
+    dir="$(dirname -- "$dir")"
+  done
+}
+
 # Writes ROOT/MANIFEST in the format of decision 0056 rule 6: one line per regular file under
 # the root, `<sha256> <length> <relative path>`, sorted by bytes, and no line for the manifest
-# itself. An entry that is neither a directory nor a regular file would make the provider
+# itself. It first checks that the root is protected. An entry that is neither a directory nor a regular file would make the provider
 # refuse the root, so it fails here instead of writing a manifest for it.
 write_manifest() {
   local manifest
+  check_root_protected
   manifest="$(mktemp -- "$TOOLS_DIR/.manifest.XXXXXX")"
   (
     cd -- "$ROOT" || package_fail "cannot enter $ROOT"
@@ -194,6 +221,14 @@ unload_launcher_profile() {
   rm -- "$file"
 }
 
+# Removes the root this run made and its launcher profile file, after a failed run, so that a
+# retry starts from nothing. begin_root refused any root that was there before.
+abandon_root() {
+  local version=$1
+  rm -rf -- "$ROOT"
+  rm -f -- "$(launcher_profile_file "$version")"
+}
+
 package_main() {
   (($# == 1)) || {
     printf 'usage: package-root.sh SERVER\n' >&2
@@ -205,10 +240,13 @@ package_main() {
   ROOT="$(root_of_version "$version")"
   readonly ROOT
   begin_root
+  # shellcheck disable=SC2064 # The version is fixed now, so it is expanded now.
+  trap "abandon_root '$version'" EXIT
   install_launcher
   install_server "$server"
   write_manifest
   load_launcher_profile "$version"
+  trap - EXIT
   printf '%s\n' "$ROOT"
 }
 

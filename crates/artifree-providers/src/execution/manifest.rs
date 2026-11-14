@@ -76,11 +76,25 @@ fn check_entry(metadata: &Metadata, owner: u32) -> Result<(), AdmissionRefusal> 
     }
 }
 
-/// Checks every ancestor of `root` up to and including `top`: each must be a directory, not a
-/// link, and protected. `top` is `/` in production. A `top` that is no ancestor of `root` is
-/// refused, so a mistaken one never skips the check.
-fn check_ancestors(root: &Path, owner: u32, top: &Path) -> Result<(), AdmissionRefusal> {
+/// The ancestors of `root` from its parent up to and including `top`, or `None` when `top` is no
+/// ancestor of `root`. A mistaken `top` is refused before anything is read, so it never skips the
+/// check and never lets the check depend on the host's directories.
+fn ancestors_to<'a>(root: &'a Path, top: &Path) -> Option<Vec<&'a Path>> {
+    let mut chain = Vec::new();
     for ancestor in root.ancestors().skip(1) {
+        chain.push(ancestor);
+        if ancestor == top {
+            return Some(chain);
+        }
+    }
+    None
+}
+
+/// Checks every ancestor of `root` up to and including `top`: each must be a directory, not a
+/// link, and protected. `top` is `/` in production; one that is no ancestor of `root` is refused.
+fn check_ancestors(root: &Path, owner: u32, top: &Path) -> Result<(), AdmissionRefusal> {
+    let chain = ancestors_to(root, top).ok_or(AdmissionRefusal::ToolRootUnprotected)?;
+    for ancestor in chain {
         let metadata =
             fs::symlink_metadata(ancestor).map_err(|_| AdmissionRefusal::ToolRootUnprotected)?;
         if !metadata.file_type().is_dir()
@@ -88,11 +102,8 @@ fn check_ancestors(root: &Path, owner: u32, top: &Path) -> Result<(), AdmissionR
         {
             return Err(AdmissionRefusal::ToolRootUnprotected);
         }
-        if ancestor == top {
-            return Ok(());
-        }
     }
-    Err(AdmissionRefusal::ToolRootUnprotected)
+    Ok(())
 }
 
 /// Verifies the tool root at `root` against its manifest and returns the manifest's identity.

@@ -15,7 +15,9 @@ use std::thread;
 
 use super::super::admission::{AdmissionRoots, admit_with};
 use super::super::{AdmissionRefusal, InspectionProfile, launcher};
-use super::{MANIFEST_FILE, ManifestIdentity, ancestor_protected, entry_protected, verify};
+use super::{
+    MANIFEST_FILE, ManifestIdentity, ancestor_protected, ancestors_to, entry_protected, verify,
+};
 
 /// The SHA-256 of `abc`, computed with `sha256sum` outside the code under test.
 const DIGEST_ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
@@ -600,10 +602,12 @@ fn refuses_a_root_of_another_owner_or_under_a_shared_ancestor() -> Result<(), Bo
         "the sealed base root is accepted"
     );
     let owner = fs::metadata(&root)?.uid();
+    // An unprivileged test cannot give one entry another owner, so this account's parent is
+    // refused first; `entry_protected` is what tests the owner of an entry.
     assert_eq!(
         verify(&root, owner ^ 1, scratch.path()).map(|_| ()),
         Err(AdmissionRefusal::ToolRootUnprotected),
-        "a root that another account owns"
+        "a root under ancestors that another account owns"
     );
     // The scratch directory is the root's parent: world-writable, it is refused, unless sticky.
     fs::set_permissions(scratch.path(), fs::Permissions::from_mode(0o777))?;
@@ -637,4 +641,29 @@ fn refuses_a_top_that_is_no_ancestor_of_the_root() -> Result<(), Box<dyn Error>>
         "a top that is no ancestor never ends the ancestor check early"
     );
     Ok(())
+}
+
+#[test]
+fn the_ancestor_chain_ends_at_the_top_or_is_refused() {
+    let root = Path::new("/opt/artifree/tools/0.1.0");
+    assert_eq!(
+        ancestors_to(root, Path::new("/opt")),
+        Some(vec![
+            Path::new("/opt/artifree/tools"),
+            Path::new("/opt/artifree"),
+            Path::new("/opt")
+        ])
+    );
+    assert_eq!(
+        ancestors_to(root, Path::new("/")).map(|chain| chain.len()),
+        Some(4)
+    );
+    for top in [
+        "/opt/artifree/tools/0.1.0",
+        "/opt/artifree/tools/0.1.0/bin",
+        "/srv",
+        "/op",
+    ] {
+        assert_eq!(ancestors_to(root, Path::new(top)), None, "{top}");
+    }
 }
