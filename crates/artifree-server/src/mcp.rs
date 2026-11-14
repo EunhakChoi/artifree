@@ -56,6 +56,7 @@ use serde_json::Value;
 use crate::auth::{AuthContext, hex};
 use crate::http::{AppState, MAX_BODY_BYTES};
 use crate::operations::{self, ApiError};
+use crate::preview::PreviewTarget;
 
 /// Path of the MCP endpoint on the API listener.
 pub const MCP_PATH: &str = "/mcp";
@@ -252,6 +253,7 @@ pub(crate) async fn dispatch(
                     auth.generation,
                     &artifact_id,
                     revision,
+                    PreviewTarget::Source,
                 )
                 .await
             })

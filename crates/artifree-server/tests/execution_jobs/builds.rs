@@ -5,13 +5,21 @@
 //! `build_failed` with its fixed diagnostic, and an `index.html` that does not load the bundle ends
 //! as `output_rejected`. The `react-v1` check runs the fixture's payload under `react-v1`'s filter,
 //! so that a filter kill ends as `build_failed` with its fixed diagnostic and the log bound ends as
-//! `limit_exceeded`.
+//! `limit_exceeded`. The template's build is then previewed under `/b/` (slice R03cc): each of
+//! its files is served from the build, under the content security policy.
 //!
 //! One ignored test runs the case in `ARTIFREE_BUILD_CASE`. `scripts/enforcement/run.sh` (part
 //! 17) runs it once per case, with the payload scenario each `react-v1` check case needs.
 
 use artifree_domain::job::BuildDiagnostic;
 use artifree_ports::build_store::BuildStore;
+use artifree_server::auth::AccessToken;
+use artifree_server::http::{AppState, Settings};
+use artifree_server::limits::RequestLimits;
+use artifree_server::{changes, preview};
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode, header};
+use tower::ServiceExt;
 
 use super::*;
 
@@ -124,6 +132,9 @@ fn build_case(name: &str) -> Result<BuildCase, Box<dyn Error>> {
     Ok(case)
 }
 
+/// The content origin of the preview.
+const ORIGIN: &str = "http://127.0.0.1:7411";
+
 /// A diagnostic as (location, message).
 fn shown(diagnostic: BuildDiagnostic) -> Shown {
     (
@@ -197,6 +208,82 @@ impl Store {
     }
 }
 
+impl Store {
+    /// Issues a build preview of revision 1 through the management preview operation and checks
+    /// that `/b/` serves each file of the published build under the content security policy
+    /// (decision 0058 rule 14, slice R03cc).
+    fn preview_the_build(&self, profile: &ProfileName) -> TestResult {
+        let files = self
+            .port
+            .build_files(&self.artifact()?, SourceRevision(1), profile)?
+            .ok_or("the build is missing")?;
+        let state = AppState::new(
+            SqliteStore::open(&self.path)?,
+            SqliteTokenStore::open(&self.path)?,
+            AccessToken::parse(&"0".repeat(64)).ok_or("invalid fixture token")?,
+            Settings {
+                content_origin: ORIGIN.into(),
+                preview_ttl: Duration::from_secs(60),
+                frame_ancestors: "http://127.0.0.1:*".into(),
+                limits: RequestLimits::default(),
+                change_streams: changes::DEFAULT_STREAMS_PER_ACTOR,
+                ..Settings::default()
+            },
+        )?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async {
+            let url = state
+                .issue_build_preview(owner()?, self.artifact()?.as_str(), 1, profile.clone())
+                .await?;
+            let entry = url
+                .strip_prefix(ORIGIN)
+                .ok_or("the preview uses another origin")?;
+            let router = preview::router(state);
+            let entry_document = PackagePath::entry();
+            let served = files
+                .files()
+                .map(|(path, content)| (format!("{entry}{path}"), path, content))
+                .chain(std::iter::once((
+                    entry.to_owned(),
+                    &entry_document,
+                    files
+                        .file(&entry_document)
+                        .ok_or("the build has no entry")?,
+                )));
+            for (target, path, content) in served {
+                let response = router
+                    .clone()
+                    .oneshot(Request::get(&target).body(Body::empty())?)
+                    .await?;
+                assert_eq!(response.status(), StatusCode::OK, "{target}");
+                let header_of = |name: header::HeaderName| {
+                    response
+                        .headers()
+                        .get(name)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("")
+                        .to_owned()
+                };
+                assert_eq!(
+                    header_of(header::CONTENT_TYPE),
+                    path.media_type().essence(),
+                    "{target}"
+                );
+                assert!(
+                    header_of(header::CONTENT_SECURITY_POLICY)
+                        .starts_with(&format!("sandbox {}; ", preview::SANDBOX)),
+                    "{target}"
+                );
+                let body = to_bytes(response.into_body(), usize::MAX).await?;
+                assert_eq!(body.as_ref(), content, "{target}");
+            }
+            Ok::<(), Box<dyn Error>>(())
+        })
+    }
+}
+
 /// Decision 0058 rules 7, 8, 13 and 18 (slice R03cb): the job of the case in
 /// `ARTIFREE_BUILD_CASE` ends as rule 18 names, its attempt settled.
 #[test]
@@ -211,6 +298,9 @@ fn job_a_build_ends_as_its_case_names() -> TestResult {
     let _worker = Worker::spawn(&scratch, &[])?;
     let end = store.build_end(&job, &parsed(case.profile)?)?;
     assert_eq!(end, case.end, "the {name} build");
+    if matches!(end, End::Published(_)) {
+        store.preview_the_build(&parsed(case.profile)?)?;
+    }
     assert_eq!(
         store.attempt_of(&job)?.state,
         AttemptState::Settled,

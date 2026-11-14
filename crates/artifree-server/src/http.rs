@@ -62,7 +62,7 @@ use crate::limits::{Limiter, Refusal, RequestLimits, Slots};
 use crate::mcp;
 use crate::operations::{self, ApiError};
 use crate::origin::normalize_origin;
-use crate::preview::{self, PreviewTickets};
+use crate::preview::{self, PreviewTarget, PreviewTickets};
 use crate::ranges::{self, Requested};
 use crate::rooms::{self, ProcessClock, RoomClock, RoomHub, RoomNames};
 use crate::runtime_sessions::RuntimeSessions;
@@ -289,6 +289,49 @@ impl AppState {
     /// for their readers. Streams opened afterwards end at once.
     pub fn close_streams(&self) {
         self.shared.feed.close();
+    }
+
+    /// Issues a build preview link for `actor` through the management preview
+    /// operation (decision 0058 rule 14) and returns its URL. Only the
+    /// enforcement job calls it, to preview a build the real worker
+    /// published: slice R03d puts the build target on the API, MCP and the
+    /// CLI, and until then a build without `enforcement-fixture` has no
+    /// caller that issues one.
+    ///
+    /// # Errors
+    ///
+    /// The refusal of the operation or of the identity store, as its message.
+    #[cfg(feature = "enforcement-fixture")]
+    pub async fn issue_build_preview(
+        &self,
+        actor: ActorId,
+        artifact: &str,
+        revision: u64,
+        profile: artifree_domain::job::ProfileName,
+    ) -> Result<String, String> {
+        let generation = if actor.is_owner() {
+            StateGeneration::FIRST
+        } else {
+            let id = actor.clone();
+            self.identity(move |store| store.user(&id))
+                .await
+                .map_err(|error| error.body.message)?
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "the actor is not registered".to_owned())?
+                .state_generation
+        };
+        operations::preview(
+            self,
+            actor,
+            None,
+            generation,
+            artifact,
+            revision,
+            PreviewTarget::Build(profile),
+        )
+        .await
+        .map(|preview| preview.url)
+        .map_err(|error| error.body.message)
     }
 
     /// The identity store, for tests that change the registry directly; the
@@ -1814,6 +1857,7 @@ async fn create_preview(
         auth.generation,
         &id,
         revision,
+        PreviewTarget::Source,
     )
     .await?;
     let url = preview.url.clone();

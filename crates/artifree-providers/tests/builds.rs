@@ -22,7 +22,7 @@ use artifree_ports::artifact_store::{
 };
 use artifree_ports::asset_store::{AssetStore, AssetWrite};
 use artifree_ports::build_store::{
-    BuildPublication, BuildRecord, BuildStore, MAX_BUILDS_PER_ARTIFACT, Publication,
+    BuildPublication, BuildRecord, BuildSnapshot, BuildStore, MAX_BUILDS_PER_ARTIFACT, Publication,
 };
 use artifree_ports::job_store::{
     ClaimedJob, ExecutionClaim, JobClaim, JobRecord, JobStore, JobStoreError, NewProfileJob,
@@ -766,5 +766,112 @@ fn a_25_mib_publication_fits_within_the_lease() -> TestResult {
         "the publication took {elapsed:?}, more than half the lease"
     );
     assert_eq!(fixture.files(1)?, Some(files));
+    Ok(())
+}
+
+impl Fixture {
+    /// Enqueues a `run_profile` job of `profile` for `revision` at `now` and
+    /// leaves it queued.
+    fn enqueued(
+        &self,
+        revision: u64,
+        profile: &ProfileName,
+        name: &str,
+        now: i64,
+    ) -> Result<JobRecord, Box<dyn std::error::Error>> {
+        Ok(self
+            .store
+            .enqueue_profile_job(NewProfileJob {
+                request: RequestIdentity {
+                    actor: &self.owner,
+                    key: &key(name),
+                    fingerprint: RequestFingerprint(digest(name)),
+                },
+                artifact: &self.created.artifact.id,
+                revision: SourceRevision(revision),
+                profile,
+                now: at(now),
+            })?
+            .job)
+    }
+
+    fn snapshot(&self, revision: u64) -> Result<Option<BuildSnapshot>, JobStoreError> {
+        self.store.build_snapshot(
+            &self.created.artifact.id,
+            SourceRevision(revision),
+            &profile(),
+        )
+    }
+
+    fn file(&self, revision: u64, path: &str) -> Result<Option<Vec<u8>>, JobStoreError> {
+        self.store.build_file(
+            &self.created.artifact.id,
+            SourceRevision(revision),
+            &profile(),
+            &parsed(path),
+        )
+    }
+}
+
+/// Rules 15 and 16 (slice R03cc): one snapshot gives the latest build, the
+/// newest job of the profile for the revision by enqueue order, and the
+/// diagnostics that job keeps. A job of another revision or another profile is
+/// not the revision's.
+#[test]
+fn the_snapshot_reads_the_newest_job_of_the_revision_by_enqueue_order() -> TestResult {
+    let fixture = Fixture::new()?;
+    fixture.revise_to(2)?;
+    let build = fixture.built(1, 1, 100)?;
+    let older = fixture.settled(2, 2, 200)?;
+    let kept = [diagnostic(Some("src/main.tsx"), "Could not resolve \"x\"")];
+    fixture.store.fail_build(
+        &older.lease,
+        &attempt_id(2),
+        JobFailure::BuildFailed,
+        &kept,
+        at(210),
+    )?;
+
+    let snapshot = fixture.snapshot(2)?.ok_or("the artifact is in place")?;
+    assert_eq!(snapshot.latest, Some(build.clone()));
+    assert_eq!(snapshot.newest_job.map(|job| job.id), Some(older.job.id));
+    assert_eq!(snapshot.diagnostics, kept);
+
+    let newer = fixture.enqueued(2, &profile(), "newer", 300)?;
+    fixture.enqueued(1, &profile(), "other-revision", 400)?;
+    fixture.enqueued(2, &parsed("fixture"), "other-profile", 500)?;
+    let snapshot = fixture.snapshot(2)?.ok_or("the artifact is in place")?;
+    assert_eq!(snapshot.latest, Some(build));
+    assert_eq!(
+        snapshot.newest_job.map(|job| (job.id, job.state)),
+        Some((newer.id, JobState::Queued))
+    );
+    assert_eq!(snapshot.diagnostics, Vec::new());
+
+    fixture.trash(1, true)?;
+    assert_eq!(fixture.snapshot(2)?, None, "the trash serves no snapshot");
+    Ok(())
+}
+
+/// Rule 14 (slice R03cc): one file of a build is read by its path, and the
+/// trash serves none.
+#[test]
+fn a_build_file_is_read_by_its_path() -> TestResult {
+    let fixture = Fixture::new()?;
+    fixture.revise_to(2)?;
+    fixture.built(1, 1, 100)?;
+
+    assert_eq!(fixture.file(1, "app.js")?, Some(b"r1".to_vec()));
+    assert_eq!(
+        fixture.file(1, "index.html")?,
+        Some(b"<script src=app.js></script>".to_vec())
+    );
+    assert_eq!(fixture.file(1, "missing.js")?, None);
+    assert_eq!(fixture.file(2, "app.js")?, None, "revision 2 has no build");
+
+    fixture.trash(1, true)?;
+    assert_eq!(fixture.file(1, "app.js")?, None, "the trash serves no file");
+    fixture.trash(2, false)?;
+    assert_eq!(fixture.file(1, "app.js")?, Some(b"r1".to_vec()));
     Ok(())
 }

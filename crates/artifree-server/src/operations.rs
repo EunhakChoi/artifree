@@ -61,7 +61,9 @@ use crate::auth::hex;
 use crate::changes::Feed;
 use crate::handoffs::{self, HandoffError};
 use crate::http::AppState;
-use crate::preview::{self, RuntimeAuthority, RuntimeIssueError, RuntimeTicketRequest, ViewKey};
+use crate::preview::{
+    self, PreviewTarget, RuntimeAuthority, RuntimeIssueError, RuntimeTicketRequest, ViewKey,
+};
 use crate::runtime_policy::{Capability, MANIFEST_PATH, RuntimePolicy, SDK_PIN};
 use crate::runtime_sessions::{GrantScope, SessionError};
 
@@ -791,6 +793,9 @@ fn source_archive(export: RevisionExport) -> Result<Vec<u8>, String> {
     archive::stored_zip(entries, modified).map_err(|error| error.to_string())
 }
 
+/// The management preview operation: a link to `revision`'s own files, or to
+/// its build of a profile (decision 0058 rule 14). A revision without that
+/// build is refused here, before any ticket exists.
 pub(crate) async fn preview(
     state: &AppState,
     actor: ActorId,
@@ -798,34 +803,54 @@ pub(crate) async fn preview(
     generation: StateGeneration,
     id: &str,
     revision: u64,
+    target: PreviewTarget,
 ) -> Result<Preview, ApiError> {
     let id = artifact_id(id)?;
     let revision = revision_number(revision)?;
     let lookup_actor = actor.clone();
     let lookup_id = id.clone();
-    let record = state
-        .run(move |artifacts| artifacts.artifact(&lookup_actor, &lookup_id))
+    let lookup_target = target.clone();
+    state
+        .run(move |artifacts| match &lookup_target {
+            PreviewTarget::Source => {
+                let record = artifacts.artifact(&lookup_actor, &lookup_id)?;
+                if revision > record.current_revision {
+                    return Err(ArtifactError::NotFound(Missing::Revision));
+                }
+                Ok(())
+            }
+            PreviewTarget::Build(profile) => artifacts
+                .preview_build(&lookup_actor, &lookup_id, revision, profile)
+                .map(drop),
+        })
         .await?;
-    if revision > record.current_revision {
-        return Err(ArtifactError::NotFound(Missing::Revision).into());
-    }
     let owner = actor.clone();
-    let ticket = state
-        .previews()
-        .issue(actor, token_id, id, revision)
-        .ok_or_else(|| {
-            ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                ErrorCode::Unavailable,
-                "too many live previews; retry shortly",
-            )
-        })?;
+    let (route, ticket) = match target {
+        PreviewTarget::Source => ("p", state.previews().issue(actor, token_id, id, revision)),
+        PreviewTarget::Build(profile) => (
+            "b",
+            state
+                .previews()
+                .issue_build(actor, token_id, id, revision, profile),
+        ),
+    };
+    let ticket = ticket.ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::Unavailable,
+            "too many live previews; retry shortly",
+        )
+    })?;
     // The link is a bearer capability that outlives the request: if the user
     // was disabled, or disabled and enabled again, while this request ran, it
     // is removed again.
     state.ensure_current(&owner, generation).await?;
     Ok(Preview {
-        url: format!("{}/p/{}/", state.settings().content_origin, ticket.secret),
+        url: format!(
+            "{}/{route}/{}/",
+            state.settings().content_origin,
+            ticket.secret
+        ),
         revision: revision.0,
         expires_at_ms: ticket.expires_at_ms,
     })

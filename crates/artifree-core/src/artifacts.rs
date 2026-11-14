@@ -48,6 +48,8 @@ pub enum Missing {
     File,
     /// The job does not exist, or its artifact is not accessible.
     Job,
+    /// The revision has no build for the profile (decision 0058 rule 14).
+    Build,
 }
 
 /// What a source export holds; see [`ArtifactService::export`].
@@ -146,6 +148,7 @@ impl fmt::Display for ArtifactError {
             Self::NotFound(Missing::Revision) => formatter.write_str("revision not found"),
             Self::NotFound(Missing::File) => formatter.write_str("file not found in revision"),
             Self::NotFound(Missing::Job) => formatter.write_str("job not found"),
+            Self::NotFound(Missing::Build) => formatter.write_str("revision has no build"),
             Self::RevisionConflict { current } => write!(
                 formatter,
                 "artifact changed; current revision is {}",

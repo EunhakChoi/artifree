@@ -28,6 +28,7 @@ use crate::auth::{AccessToken, AuthContext};
 use crate::http::{self, AppState, Settings};
 use crate::limits::RequestLimits;
 use crate::operations::ApiError;
+use crate::preview::PreviewTarget;
 use crate::rooms::{self, RoomNames};
 use crate::runtime_source::{self, FrameCall};
 use crate::{changes, operations, preview};
@@ -2020,6 +2021,7 @@ async fn hold_things(state: &AppState, actor: &ActorId) -> Result<String, Box<dy
         StateGeneration::FIRST,
         &artifact,
         1,
+        PreviewTarget::Source,
     )
     .await
     .map_err(|error| error.body.message)?;
@@ -2126,6 +2128,7 @@ fn a_request_that_authenticated_before_a_disable_leaves_nothing_registered()
             StateGeneration::FIRST,
             &artifact,
             1,
+            PreviewTarget::Source,
         )
         .await;
         assert!(
@@ -2508,6 +2511,7 @@ fn a_request_that_authenticated_before_a_disable_and_an_enable_registers_nothing
             earlier.generation,
             &artifact,
             1,
+            PreviewTarget::Source,
         )
         .await;
         assert!(is_unauthenticated(&preview), "{:?}", preview.map(|p| p.url));
@@ -2593,9 +2597,17 @@ fn a_request_that_authenticated_after_a_disable_and_an_enable_registers_everythi
         .await
         .map_err(|error| error.body.message)?;
         assert!(view.url.contains("/r/") || view.url.contains("/p/"));
-        operations::preview(&state, alice.clone(), None, later.generation, &artifact, 1)
-            .await
-            .map_err(|error| error.body.message)?;
+        operations::preview(
+            &state,
+            alice.clone(),
+            None,
+            later.generation,
+            &artifact,
+            1,
+            PreviewTarget::Source,
+        )
+        .await
+        .map_err(|error| error.body.message)?;
         assert_eq!(state.previews().live_tickets(&alice), 2);
         operations::open_confirmed_runtime_session(&state, &alice, None, later.generation)
             .await

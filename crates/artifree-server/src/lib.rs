@@ -31,6 +31,8 @@ pub mod worker;
 pub mod worker_lines;
 
 #[cfg(test)]
+mod build_preview_tests;
+#[cfg(test)]
 mod runtime_asset_download_tests;
 #[cfg(test)]
 mod runtime_asset_tests;

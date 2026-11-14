@@ -297,9 +297,10 @@ every slice. This table only points from an area to its records.
 
 Proposed and not implemented: untrusted execution
 ([0042](decisions/0042-linux-untrusted-execution.md) is a proposed boundary
-with read-only host inspection, a host admission and launches of a test fixture under resource limits, reachable from tests alone), React builds (their store and the worker's
-composition, diagnostics and failures exist, decision 0058, but only the `enforcement-fixture`
-build knows a build profile), view replacement, a frame's
+with read-only host inspection, a host admission and launches of a test fixture under resource limits, reachable from tests alone), React builds (their store, the worker's
+composition, diagnostics and failures, build tickets with the `/b/` route and the head status
+exist below the wire, decision 0058, but no API, MCP or CLI call issues a build ticket or reads
+the status yet, and only the `enforcement-fixture` build knows a build profile), view replacement, a frame's
 access to rooms, model and connector providers, structured
 document types and conversions, roles and sharing, publishing, PostgreSQL and
 external object storage. The module inventory in

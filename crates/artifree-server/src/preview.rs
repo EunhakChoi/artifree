@@ -2,7 +2,8 @@
 //!
 //! Artifact files are served from a separate origin than the API and web UI,
 //! under an unguessable short-lived ticket bound to an actor, artifact, and
-//! the revision whose files it serves. Every request rechecks the actor's
+//! the revision whose files it serves. A build ticket serves the revision's
+//! build of one profile instead, under `/b/` (decision 0058 rule 14). Every request rechecks the actor's
 //! current access through the application core. Responses carry a CSP
 //! `sandbox` without `allow-same-origin`, so content runs in an opaque origin
 //! even when opened directly, and may load only files of its own package.
@@ -20,7 +21,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use artifree_core::artifacts::ArtifactError;
 use artifree_domain::SourceRevision;
 use artifree_domain::identity::{ActorId, ArtifactId, TokenId};
-use artifree_domain::package::PackagePath;
+use artifree_domain::job::ProfileName;
+use artifree_domain::package::{MediaType, PackagePath};
 use axum::Router;
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::header::{self, HeaderValue};
@@ -47,6 +49,16 @@ pub const MAX_LIVE_TICKETS: usize = 4096;
 /// blocks submission. Content can still navigate its own frame; see
 /// decision 0003.
 pub const SANDBOX: &str = "allow-scripts allow-forms allow-modals allow-downloads";
+
+/// What a preview link serves (decision 0058 rule 14). A revision's source
+/// and its build are different packages, and one ticket names one of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreviewTarget {
+    /// The revision's own files, under `/p/`.
+    Source,
+    /// The revision's build of this profile, under `/b/`.
+    Build(ProfileName),
+}
 
 /// A newly issued preview link.
 #[derive(Debug)]
@@ -90,6 +102,9 @@ struct Ticket {
     /// The document revision: the one whose files this ticket serves. A
     /// runtime view keeps it for its whole life (decision 0054, rule 5).
     revision: SourceRevision,
+    /// The profile whose build of `revision` a build ticket serves; `None`
+    /// for a ticket that serves the revision's own files.
+    build: Option<ProfileName>,
     expires: Instant,
     runtime: Option<RuntimeTicket>,
 }
@@ -357,14 +372,41 @@ impl PreviewTickets {
         }
     }
 
-    /// Issues a ticket, or returns `None` when randomness is unavailable, the
-    /// registry is full of unexpired tickets, or its lock was poisoned.
+    /// Issues a ticket for the revision's own files, or returns `None` when
+    /// randomness is unavailable, the registry is full of unexpired tickets,
+    /// or its lock was poisoned.
     pub fn issue(
         &self,
         actor: ActorId,
         token_id: Option<TokenId>,
         artifact: ArtifactId,
         revision: SourceRevision,
+    ) -> Option<IssuedTicket> {
+        self.insert(actor, token_id, artifact, revision, None)
+    }
+
+    /// Issues a build ticket, which serves only the build of `profile` for
+    /// `revision` (decision 0058 rule 14). It lives in the same registry as a
+    /// source ticket, under the same bound, and is revoked as one is. `None`
+    /// as for [`Self::issue`].
+    pub fn issue_build(
+        &self,
+        actor: ActorId,
+        token_id: Option<TokenId>,
+        artifact: ArtifactId,
+        revision: SourceRevision,
+        profile: ProfileName,
+    ) -> Option<IssuedTicket> {
+        self.insert(actor, token_id, artifact, revision, Some(profile))
+    }
+
+    fn insert(
+        &self,
+        actor: ActorId,
+        token_id: Option<TokenId>,
+        artifact: ArtifactId,
+        revision: SourceRevision,
+        build: Option<ProfileName>,
     ) -> Option<IssuedTicket> {
         let secret = random_secret()?;
         // Compute every expiry before taking the lock, so an unrepresentable
@@ -388,6 +430,7 @@ impl PreviewTickets {
                 token_id,
                 artifact,
                 revision,
+                build,
                 expires,
                 runtime: None,
             },
@@ -511,6 +554,7 @@ impl PreviewTickets {
                     token_id,
                     artifact,
                     revision,
+                    build: None,
                     expires,
                     runtime: Some(RuntimeTicket {
                         view_id,
@@ -911,6 +955,9 @@ pub fn router(state: AppState) -> Router {
         .route("/p/{ticket}/{*path}", get(serve_file))
         .route("/r/{ticket}/", get(serve_runtime_entry))
         .route("/r/{ticket}/{*path}", get(serve_file))
+        .route("/b/{ticket}", get(redirect_to_build_directory))
+        .route("/b/{ticket}/", get(serve_build_entry))
+        .route("/b/{ticket}/{*path}", get(serve_build_file))
         .fallback(|| async { plain(StatusCode::NOT_FOUND, "Not found") })
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -944,11 +991,57 @@ async fn proxy_inspection_content(
 }
 
 async fn redirect_to_directory(Path(ticket): Path<String>) -> Response {
+    directory("p", &ticket)
+}
+
+async fn redirect_to_build_directory(Path(ticket): Path<String>) -> Response {
+    directory("b", &ticket)
+}
+
+/// Redirects a ticket without its trailing slash to its directory, so that
+/// relative references in the entry document resolve under the ticket.
+fn directory(route: &str, ticket: &str) -> Response {
     if ticket.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        Redirect::permanent(&format!("/p/{ticket}/")).into_response()
+        Redirect::permanent(&format!("/{route}/{ticket}/")).into_response()
     } else {
         plain(StatusCode::NOT_FOUND, "Not found")
     }
+}
+
+async fn serve_build_entry(State(state): State<AppState>, Path(ticket): Path<String>) -> Response {
+    serve_build(&state, &ticket, Some(PackagePath::entry())).await
+}
+
+async fn serve_build_file(
+    State(state): State<AppState>,
+    Path((ticket, path)): Path<(String, String)>,
+) -> Response {
+    serve_build(&state, &ticket, path.parse().ok()).await
+}
+
+/// Serves one file of the build a build ticket names, under the same headers
+/// as a revision's files. A source ticket serves nothing here.
+async fn serve_build(state: &AppState, secret: &str, path: Option<PackagePath>) -> Response {
+    let (Some(ticket), Some(path)) = (state.previews().resolve(secret), path) else {
+        return plain(StatusCode::NOT_FOUND, "Not found");
+    };
+    let Ticket {
+        actor,
+        artifact,
+        revision,
+        build: Some(profile),
+        ..
+    } = ticket
+    else {
+        return plain(StatusCode::NOT_FOUND, "Not found");
+    };
+    let media_type = path.media_type();
+    let result = state
+        .run(move |artifacts| {
+            artifacts.read_build_file(&actor, &artifact, revision, &profile, &path)
+        })
+        .await;
+    file_response(state, media_type, result)
 }
 
 async fn serve_entry(State(state): State<AppState>, Path(ticket): Path<String>) -> Response {
@@ -1031,16 +1124,31 @@ async fn serve(state: &AppState, secret: &str, path: Option<PackagePath>) -> Res
     let (Some(ticket), Some(path)) = (state.previews().resolve(secret), path) else {
         return plain(StatusCode::NOT_FOUND, "Not found");
     };
-    let media_type = path.media_type();
     let Ticket {
         actor,
         artifact,
         revision,
+        build: None,
         ..
-    } = ticket;
+    } = ticket
+    else {
+        // A build ticket serves its build only, under `/b/`.
+        return plain(StatusCode::NOT_FOUND, "Not found");
+    };
+    let media_type = path.media_type();
     let result = state
         .run(move |artifacts| artifacts.read_file(&actor, &artifact, revision, &path))
         .await;
+    file_response(state, media_type, result)
+}
+
+/// The response to a file read of a preview: the bytes under the content
+/// security headers, or a fixed plain answer.
+fn file_response(
+    state: &AppState,
+    media_type: MediaType,
+    result: Result<Vec<u8>, ArtifactError>,
+) -> Response {
     match result {
         Ok(content) => {
             let mut headers = security_headers(state);
