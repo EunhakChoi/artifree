@@ -36,6 +36,7 @@ use super::{
 
 mod attempts;
 mod builds;
+mod presence;
 
 /// The columns of a job row, in the order [`RawJob::from_row`] reads them.
 const COLUMNS: &str = "id, actor, artifact_id, revision, kind, state, cancel_requested, attempts,

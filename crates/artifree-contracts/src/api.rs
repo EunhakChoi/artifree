@@ -724,6 +724,19 @@ pub struct JobList {
 pub struct BackgroundStatus {
     /// The worker the server starts and watches.
     pub worker: WorkerStatus,
+    /// Whether an execution worker, which runs builds, is ready (decision 0058
+    /// rule 20).
+    pub execution: ExecutionStatus,
+}
+
+/// The execution workers that share the server's database (decision 0058 rule
+/// 20). It names no worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionStatus {
+    /// `true` when an execution worker was seen within the last five minutes.
+    /// `false` says that builds cannot start now.
+    pub ready: bool,
 }
 
 /// The server's own worker.

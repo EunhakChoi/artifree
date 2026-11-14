@@ -6,7 +6,10 @@ import {
 } from '../../packages/client/dist/index.js';
 import { parseBackground } from '../../packages/client/dist/responses.js';
 
-/** Every field the server may send, with a last exit (decision 0055, rule 5). */
+/**
+ * Every field the server may send, with a last exit (decision 0055, rule 5)
+ * and a ready execution worker (decision 0058 rule 20).
+ */
 const fullStatus = {
   worker: {
     mode: 'supervised',
@@ -15,6 +18,7 @@ const fullStatus = {
     last_exit: { at_ms: 1_700_000_000_000, outcome: 'failed' },
     dropped_lines: 2,
   },
+  execution: { ready: true },
 };
 
 /** A status whose worker runs under supervision and has not exited yet. */
@@ -25,9 +29,15 @@ const baseWorker = {
   dropped_lines: 0,
 };
 
-/** A status whose worker is `baseWorker` with `changes` applied. */
+/**
+ * A status whose worker is `baseWorker` with `changes` applied, with no ready
+ * execution worker.
+ */
 function statusWith(changes) {
-  return { worker: { ...baseWorker, ...changes } };
+  return {
+    worker: { ...baseWorker, ...changes },
+    execution: { ready: false },
+  };
 }
 
 /** A last exit at `atMs` with the given outcome. */
@@ -114,7 +124,16 @@ const refusedStatuses = [
   ['a negative dropped-line count', statusWith({ dropped_lines: -1 })],
   ['a fractional exit time', statusWith({ last_exit: exitAt('clean', 1.5) })],
   ['an exit that is not an object', statusWith({ last_exit: 'failed' })],
-  ['a missing worker', {}],
+  ['a missing worker', { execution: { ready: false } }],
+  ['a missing execution', { worker: baseWorker }],
+  [
+    'a readiness that is not a boolean',
+    { worker: baseWorker, execution: { ready: 'true' } },
+  ],
+  [
+    'an execution that is not an object',
+    { worker: baseWorker, execution: true },
+  ],
 ];
 
 for (const [name, body] of refusedStatuses) {

@@ -6,7 +6,9 @@
 //! as `output_rejected`. The `react-v1` check runs the fixture's payload under `react-v1`'s filter,
 //! so that a filter kill ends as `build_failed` with its fixed diagnostic and the log bound ends as
 //! `limit_exceeded`. The template's build is then previewed under `/b/` (slice R03cc): each of
-//! its files is served from the build, under the content security policy.
+//! its files is served from the build, under the content security policy. `GET /v1/background`
+//! then reports an execution worker ready (rule 20, slice R03cda): the worker that ran the job
+//! held capacity, so it marked itself seen.
 //!
 //! One ignored test runs the case in `ARTIFREE_BUILD_CASE`. `scripts/enforcement/run.sh` (part
 //! 17) runs it once per case, with the payload scenario each `react-v1` check case needs.
@@ -26,6 +28,8 @@ use super::*;
 /// A stored diagnostic as its location and its message.
 type Shown = (Option<(String, u32, u32)>, String);
 
+/// The owner token of the fixture's server.
+const OWNER_TOKEN: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 /// The environment variable that names the build case.
 const BUILD_CASE: &str = "ARTIFREE_BUILD_CASE";
 /// The template's entry document, which loads the bundle as rule 7 requires.
@@ -209,18 +213,12 @@ impl Store {
 }
 
 impl Store {
-    /// Issues a build preview of revision 1 through the management preview operation and checks
-    /// that `/b/` serves each file of the published build under the content security policy
-    /// (decision 0058 rule 14, slice R03cc).
-    fn preview_the_build(&self, profile: &ProfileName) -> TestResult {
-        let files = self
-            .port
-            .build_files(&self.artifact()?, SourceRevision(1), profile)?
-            .ok_or("the build is missing")?;
-        let state = AppState::new(
+    /// A server over this store, as `serve` builds one, with the fixture's owner token.
+    fn app_state(&self) -> Result<AppState, Box<dyn Error>> {
+        Ok(AppState::new(
             SqliteStore::open(&self.path)?,
             SqliteTokenStore::open(&self.path)?,
-            AccessToken::parse(&"0".repeat(64)).ok_or("invalid fixture token")?,
+            AccessToken::parse(OWNER_TOKEN).ok_or("invalid fixture token")?,
             Settings {
                 content_origin: ORIGIN.into(),
                 preview_ttl: Duration::from_secs(60),
@@ -229,7 +227,42 @@ impl Store {
                 change_streams: changes::DEFAULT_STREAMS_PER_ACTOR,
                 ..Settings::default()
             },
-        )?;
+        )?)
+    }
+
+    /// Checks that `GET /v1/background` reports an execution worker ready, at the server's own
+    /// clock (decision 0058 rule 20, slice R03cda).
+    fn background_reports_execution_ready(&self) -> TestResult {
+        let router = artifree_server::http::router(self.app_state()?);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async {
+            let request = Request::get("/v1/background")
+                .header(header::AUTHORIZATION, format!("Bearer {OWNER_TOKEN}"))
+                .body(Body::empty())?;
+            let response = router.oneshot(request).await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+            assert_eq!(
+                body["execution"]["ready"],
+                serde_json::Value::Bool(true),
+                "the worker that ran the job is ready: {body}"
+            );
+            Ok::<(), Box<dyn Error>>(())
+        })
+    }
+
+    /// Issues a build preview of revision 1 through the management preview operation and checks
+    /// that `/b/` serves each file of the published build under the content security policy
+    /// (decision 0058 rule 14, slice R03cc).
+    fn preview_the_build(&self, profile: &ProfileName) -> TestResult {
+        let files = self
+            .port
+            .build_files(&self.artifact()?, SourceRevision(1), profile)?
+            .ok_or("the build is missing")?;
+        let state = self.app_state()?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
@@ -298,6 +331,7 @@ fn job_a_build_ends_as_its_case_names() -> TestResult {
     let _worker = Worker::spawn(&scratch, &[])?;
     let end = store.build_end(&job, &parsed(case.profile)?)?;
     assert_eq!(end, case.end, "the {name} build");
+    store.background_reports_execution_ready()?;
     if matches!(end, End::Published(_)) {
         store.preview_the_build(&parsed(case.profile)?)?;
     }

@@ -925,10 +925,20 @@ function workerExit(value: unknown): WorkerExit | undefined {
     : undefined;
 }
 
-/** Parses `GET /v1/background` (decision 0055). */
+/**
+ * Parses `GET /v1/background` (decision 0055, and the execution readiness of
+ * decision 0058 rule 20).
+ */
 export function parseBackground(value: unknown): BackgroundStatus | undefined {
-  if (!isRecord(value) || !isRecord(value.worker)) return undefined;
-  const worker = value.worker;
+  if (
+    !isRecord(value) ||
+    !isRecord(value.worker) ||
+    !isRecord(value.execution) ||
+    typeof value.execution.ready !== 'boolean'
+  )
+    return undefined;
+  const { worker } = value;
+  const execution = { ready: value.execution.ready };
   const mode = oneOf(WORKER_MODES, worker.mode);
   const state = oneOf(WORKER_STATES, worker.state);
   const lastExit = optional(worker.last_exit, workerExit);
@@ -947,7 +957,7 @@ export function parseBackground(value: unknown): BackgroundStatus | undefined {
     dropped_lines: worker.dropped_lines,
   };
   if (lastExit.set !== undefined) parsed.last_exit = lastExit.set;
-  return { worker: parsed };
+  return { worker: parsed, execution };
 }
 
 /** Parses a non-2xx JSON body. */

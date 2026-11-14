@@ -6,8 +6,9 @@ versioned, packaged and protected tool root), R03bcba (the lock list, the
 packaged bundler and its measurement), R03bcbb (the `react-v1` profile in
 the build with `enforcement-fixture`), R03ca (the store of builds and
 diagnostics), R03cb (the worker's composition, diagnostics and failures)
-and R03cc (build tickets, the `/b/` route and the head status, below the
-wire) are implemented, R03cda to R03f are not**. Roadmap: R03.
+R03cc (build tickets, the `/b/` route and the head status, below the
+wire) and R03cda (the execution readiness, schema 16) are implemented,
+R03cdb to R03f are not**. Roadmap: R03.
 
 > **Note, 2026-11-14 (slices).** R03b is split into R03ba, R03bb and R03bc,
 > and rule 5 moves to R03f. A release build compiles no attempt, worker port,
@@ -481,6 +482,34 @@ wire) are implemented, R03cda to R03f are not**. Roadmap: R03.
 >
 > Rule 22's enforcement requirement covers both, since both change a
 > worker's loop.
+
+> **Note, 2026-11-15 (R03cda).** The readiness is implemented as the split
+> note describes it.
+>
+> - Schema 16 adds `execution_workers` (a worker identity and a time). The
+>   upgrade from 15 only creates the table.
+> - The port is `ExecutionPresence`, beside `JobStore`, with three calls:
+>   - `mark_seen` reads first, so an idle poll with a fresh row takes no
+>     write lock;
+>   - `forget_worker`;
+>   - `execution_ready`.
+>     Only `run_next_with`, the worker that can hold an execution port, is
+>     given it.
+> - The worker calls them around capacity:
+>   - it marks itself seen once capacity is held, before reconciliation
+>     and the claim;
+>   - it forgets its row at a refusal;
+>   - it writes nothing when the lock is busy or it has no port.
+> - A lease renewal of a running `run_profile` job (the checkpoint) marks
+>   the worker the job row names, in the renewal's transaction, under the
+>   same one-minute rule.
+> - The restore that expires leases also empties the table in the same
+>   transaction.
+> - `GET /v1/background` reads the readiness at the server's clock and adds
+>   `execution: { ready }` (contract 0.29.0). The field is required, and the
+>   TypeScript client refuses a body without a boolean `ready`. A store
+>   failure answers 503 (`unavailable`) instead of a status without the
+>   readiness. The web and the CLI do not show it yet.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),

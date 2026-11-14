@@ -639,3 +639,47 @@ pub trait JobStore {
     /// [`JobStoreError::Unavailable`].
     fn database_identity(&self) -> Result<FeedId, JobStoreError>;
 }
+
+/// How long a row of an execution worker counts as ready after it was last
+/// seen, in milliseconds (decision 0058 rule 20, slice R03cda).
+pub const READY_WINDOW_MS: i64 = 5 * 60 * 1000;
+
+/// How old a worker's row must be before it is written again, in milliseconds.
+/// An idle worker therefore writes at most once a minute.
+pub const SEEN_REWRITE_MS: i64 = 60 * 1000;
+
+/// How old a worker's row must be before any write deletes it, in milliseconds.
+pub const SEEN_PRUNE_MS: i64 = 60 * 60 * 1000;
+
+/// Where execution workers record that they are alive, so that a process that
+/// shares only the database can tell whether one is ready (decision 0058 rule
+/// 20, slice R03cda). The rows hold a worker identity and a time, nothing else.
+///
+/// A worker is ready when its row was last seen within [`READY_WINDOW_MS`]
+/// before now, or later than now. A renewal of a running `run_profile` job's
+/// lease also marks its worker seen, in the renewal's transaction.
+pub trait ExecutionPresence {
+    /// Marks `worker` seen at `now`, when its row is missing, was last seen
+    /// [`SEEN_REWRITE_MS`] or more before `now`, or was last seen later than
+    /// `now`. The write also deletes every row last seen more than
+    /// [`SEEN_PRUNE_MS`] before `now`. A fresh row is left without a write.
+    ///
+    /// # Errors
+    ///
+    /// [`JobStoreError::Unavailable`].
+    fn mark_seen(&self, worker: &WorkerId, now: UnixMillis) -> Result<(), JobStoreError>;
+
+    /// Deletes the row of `worker`, which can no longer run anything.
+    ///
+    /// # Errors
+    ///
+    /// [`JobStoreError::Unavailable`].
+    fn forget_worker(&self, worker: &WorkerId) -> Result<(), JobStoreError>;
+
+    /// Whether any execution worker is ready at `now`.
+    ///
+    /// # Errors
+    ///
+    /// [`JobStoreError::Unavailable`].
+    fn execution_ready(&self, now: UnixMillis) -> Result<bool, JobStoreError>;
+}

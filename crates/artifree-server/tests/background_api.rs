@@ -1,6 +1,7 @@
 //! Behavioral tests for `GET /v1/background` (decision 0055, rule 5): the body
 //! for each worker state and last exit, the tokens that may read it, the
-//! refusals, and the default settings.
+//! refusals, and the default settings; and the execution readiness of
+//! decision 0058 rule 20, read from the store under an injected clock.
 //!
 //! The expected bodies are written out here from the decision's wire names and
 //! not produced by the types under test, so a change of the wire form fails.
@@ -8,12 +9,17 @@
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 
 use artifree_contracts::api::{
     CreateTokenResponse, UserInfo, WorkerExit, WorkerExitOutcome, WorkerMode, WorkerState,
     WorkerStatus,
 };
+use artifree_core::jobs::Clock;
+use artifree_domain::identity::UnixMillis;
+use artifree_domain::job::WorkerId;
+use artifree_ports::job_store::{ExecutionPresence, READY_WINDOW_MS};
 use artifree_providers::storage::SqliteStore;
 use artifree_providers::tokens::SqliteTokenStore;
 use artifree_server::auth::AccessToken;
@@ -68,7 +74,7 @@ fn expected_body(state: &str, last_exit: Option<&str>) -> Value {
     if let Some(outcome) = last_exit {
         worker["last_exit"] = json!({ "at_ms": AT_MS, "outcome": outcome });
     }
-    json!({ "worker": worker })
+    json!({ "worker": worker, "execution": { "ready": false } })
 }
 
 /// The keys rule 5 gives `worker`: `last_exit` only once there has been an exit.
@@ -288,7 +294,10 @@ async fn the_body_reads_the_status_as_it_is_at_each_request() -> TestResult {
     let before = harness.background(Some(OWNER)).await?;
     assert_eq!(
         before.json,
-        json!({ "worker": { "mode": "supervised", "state": "running", "restarts": 0, "dropped_lines": 0 } }),
+        json!({
+            "worker": { "mode": "supervised", "state": "running", "restarts": 0, "dropped_lines": 0 },
+            "execution": { "ready": false }
+        }),
         "before the supervisor changes the status"
     );
     // The supervisor changes the status the server holds; a clone of the handle shares it.
@@ -377,7 +386,10 @@ async fn default_settings_report_mode_none_stopped_and_no_last_exit() -> TestRes
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.json);
     assert_eq!(
         reply.json,
-        json!({ "worker": { "mode": "none", "state": "stopped", "restarts": 0, "dropped_lines": 0 } }),
+        json!({
+            "worker": { "mode": "none", "state": "stopped", "restarts": 0, "dropped_lines": 0 },
+            "execution": { "ready": false }
+        }),
         "the default status"
     );
     assert_eq!(
@@ -385,5 +397,51 @@ async fn default_settings_report_mode_none_stopped_and_no_last_exit() -> TestRes
         BTreeSet::from(["dropped_lines", "mode", "restarts", "state"]),
         "the default status has no last_exit"
     );
+    Ok(())
+}
+
+/// A clock the test moves.
+#[derive(Debug, Default)]
+struct MovingClock(AtomicI64);
+
+impl Clock for MovingClock {
+    fn now(&self) -> UnixMillis {
+        UnixMillis(self.0.load(Ordering::SeqCst))
+    }
+}
+
+/// Decision 0058 rule 20: `execution.ready` is read from the rows execution
+/// workers write, at the server's clock, and is `true` until five minutes after
+/// a worker was last seen.
+#[tokio::test]
+async fn execution_ready_follows_the_last_time_a_worker_was_seen() -> TestResult {
+    const SEEN: i64 = 1_800_000_000_000;
+    let clock = Arc::new(MovingClock::default());
+    clock.0.store(SEEN, Ordering::SeqCst);
+    let harness = Harness::open(Settings {
+        clock: Arc::clone(&clock) as Arc<dyn Clock>,
+        ..Settings::default()
+    })?;
+    let ready = |reply: &Reply| reply.json["execution"]["ready"].clone();
+
+    let before = harness.background(Some(OWNER)).await?;
+    assert_eq!(before.status, StatusCode::OK, "{}", before.json);
+    assert_eq!(ready(&before), json!(false), "no worker was ever seen");
+
+    let worker: WorkerId = "execution-worker"
+        .parse()
+        .map_err(|error| format!("worker id: {error}"))?;
+    SqliteStore::open(&harness.directory.join("db.sqlite3"))?
+        .mark_seen(&worker, UnixMillis(SEEN))?;
+    for (at, expected) in [
+        (SEEN, true),
+        (SEEN + READY_WINDOW_MS, true),
+        (SEEN + READY_WINDOW_MS + 1, false),
+    ] {
+        clock.0.store(at, Ordering::SeqCst);
+        let reply = harness.background(Some(OWNER)).await?;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.json);
+        assert_eq!(ready(&reply), json!(expected), "at {at}");
+    }
     Ok(())
 }

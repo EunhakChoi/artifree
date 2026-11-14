@@ -811,8 +811,9 @@ sudo "$PREPARE" package-restore
 
 # Part 17 is the worker's half of builds (R03cb): each case is one react-v1 job (or a job of the
 # react-v1 check, which runs the fixture's payload under react-v1's filter) through the real worker,
-# and the test checks the end rule 18 names, its diagnostics and the published build.
-say "part 17: builds through the worker (0058, R03cb)"
+# and the test checks the end rule 18 names, its diagnostics and the published build, and that
+# GET /v1/background then reports an execution worker ready (rule 20, R03cda).
+say "part 17: builds through the worker (0058, R03cb and R03cda)"
 for case in template bad-import resolver no-script; do
   run_server_job copy "server-build-$case" builds::job_a_build_ends_as_its_case_names --setenv="ARTIFREE_BUILD_CASE=$case"
 done

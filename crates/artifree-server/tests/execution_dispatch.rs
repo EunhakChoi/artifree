@@ -33,7 +33,8 @@ use artifree_ports::execution::{
     LaunchFailure, LaunchOutcome, LimitKind, PinnedInput, ProfileOutput, ProfileRun,
 };
 use artifree_ports::job_store::{
-    AttemptRow, ExecutionClaim, JobClaim, JobRecord, JobStore, JobStoreError, ProfileCounts,
+    AttemptRow, ExecutionClaim, ExecutionPresence, JobClaim, JobRecord, JobStore, JobStoreError,
+    ProfileCounts, SEEN_REWRITE_MS,
 };
 use artifree_providers::storage::{DATABASE_FILE, SqliteStore};
 use rusqlite::Connection;
@@ -790,6 +791,74 @@ fn one_launch<'a>(runs: &[&'a Started]) -> Result<&'a Started, Box<dyn Error>> {
         [run] => Ok(*run),
         other => Err(format!("expected one launch, got {}", other.len()).into()),
     }
+}
+
+// --- the readiness (decision 0058 rule 20, slice R03cda) ----------------------
+
+/// Every readiness row, as worker and last-seen time.
+fn presence_rows(database: &Path) -> Result<Vec<(String, i64)>, Box<dyn Error>> {
+    let connection = Connection::open(database)?;
+    let mut statement =
+        connection.prepare("SELECT worker, last_seen FROM execution_workers ORDER BY worker")?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// A worker given capacity marks itself seen, even when nothing is due.
+#[test]
+fn held_capacity_marks_the_worker_seen() -> TestResult {
+    let world = World::new()?;
+    let log = Arc::new(Log::default());
+    let execution = FakeExecution {
+        shared: world.shared(&log),
+        scene: scene(Answer::Held, Launch::Succeeds),
+    };
+    assert_eq!(run_once(&world, Some(&execution), &log)?, Step::Idle);
+    assert_eq!(
+        presence_rows(&world.database)?,
+        [(world.worker.as_str().to_owned(), NOW.0)]
+    );
+    assert!(world.store.execution_ready(NOW)?);
+    Ok(())
+}
+
+/// A worker refused capacity forgets its row, so it stops counting as ready.
+#[test]
+fn refused_capacity_forgets_the_workers_row() -> TestResult {
+    let world = World::new()?;
+    let log = Arc::new(Log::default());
+    world.store.mark_seen(&world.worker, NOW)?;
+    let execution = FakeExecution {
+        shared: world.shared(&log),
+        scene: scene(Answer::Refused, Launch::Succeeds),
+    };
+    assert_eq!(run_once(&world, Some(&execution), &log)?, Step::Idle);
+    assert_eq!(presence_rows(&world.database)?, []);
+    assert!(!world.store.execution_ready(NOW)?);
+    Ok(())
+}
+
+/// A busy lock writes nothing: its holder keeps its own row. A worker without
+/// an execution port writes nothing either.
+#[test]
+fn a_busy_lock_and_a_trusted_worker_write_no_row() -> TestResult {
+    let world = World::new()?;
+    let log = Arc::new(Log::default());
+    let old = NOW.0 - 2 * SEEN_REWRITE_MS;
+    world.store.mark_seen(&world.worker, UnixMillis(old))?;
+    let execution = FakeExecution {
+        shared: world.shared(&log),
+        scene: scene(Answer::Busy, Launch::Succeeds),
+    };
+    assert_eq!(run_once(&world, Some(&execution), &log)?, Step::Idle);
+    assert_eq!(run_once(&world, None, &log)?, Step::Idle);
+    assert_eq!(
+        presence_rows(&world.database)?,
+        [(world.worker.as_str().to_owned(), old)]
+    );
+    Ok(())
 }
 
 // --- the capacity ------------------------------------------------------------

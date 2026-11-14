@@ -39,6 +39,7 @@ const WORKER = {
     restarts: 0,
     dropped_lines: 0,
   },
+  execution: { ready: false },
 };
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 

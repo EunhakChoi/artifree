@@ -272,14 +272,17 @@ fn member(object: &Value, name: &str) -> Result<String, Box<dyn Error>> {
 /// the contract, with no key the contract does not name at any depth. It must also
 /// carry none of the worker's output (`ready`, `event`, a worker identifier such as
 /// `worker-1a2b3c4d`), no process identifier and no path of the data directory.
+/// Being exactly the contract, the body can carry text only in `worker`:
+/// `execution` holds one boolean, whose key `ready` is the contract's own.
 fn checked_worker(text: &str, dir: &str) -> Result<WorkerStatus, Box<dyn Error>> {
     let raw: Value = serde_json::from_str(text)?;
     let parsed: BackgroundStatus = serde_json::from_str(text)?;
     if serde_json::to_value(&parsed)? != raw {
         return Err(format!("the body is not exactly the contract: {text}").into());
     }
+    let worker = raw["worker"].to_string();
     for forbidden in ["ready", "event", "worker-", "pid", dir] {
-        if text.contains(forbidden) {
+        if worker.contains(forbidden) {
             return Err(format!("the body carries {forbidden:?}: {text}").into());
         }
     }

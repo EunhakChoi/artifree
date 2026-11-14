@@ -19,7 +19,7 @@ use crate::storage::{random_bytes, unavailable};
 
 /// The schema version this build creates and reads. It is the database's
 /// `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i64 = 15;
+pub const SCHEMA_VERSION: i64 = 16;
 
 // Asset associations and receipts deliberately retain no bytes outside `blobs`.
 const ASSET_SCHEMA: &str = "
@@ -681,6 +681,17 @@ CREATE TABLE job_diagnostics (
 ) STRICT, WITHOUT ROWID;
 ";
 
+/// Added in schema version 16 (decision 0058 rule 20, slice R03cda): the time
+/// each execution worker was last seen, so that a process that shares only the
+/// database can tell whether one is ready. A row holds no user data and no
+/// path, and a restore empties the table.
+const PRESENCE_SCHEMA: &str = "
+CREATE TABLE execution_workers (
+    worker TEXT PRIMARY KEY,
+    last_seen INTEGER NOT NULL
+) STRICT, WITHOUT ROWID;
+";
+
 /// Brings the database to [`SCHEMA_VERSION`] in one immediate transaction, or
 /// leaves it as it was. An empty database (version 0, no tables) is created
 /// fresh; an older version is upgraded step by step.
@@ -813,6 +824,11 @@ fn upgrade_steps(connection: &mut Connection) -> Result<(), StoreError> {
         if version < step {
             rebuild_jobs(&transaction, schema, step)?;
         }
+    }
+    if version < 16 {
+        transaction
+            .execute_batch(PRESENCE_SCHEMA)
+            .map_err(unavailable)?;
     }
     // Foreign keys are off for these steps (decision 0057 rule 14), so they are
     // checked here: no table may have more foreign keys that do not resolve
@@ -1147,7 +1163,9 @@ pub(crate) fn renew_feed_identity(connection: &Connection) -> Result<(), StoreEr
 ///
 /// The same transaction marks every `live` execution attempt `cleanup_pending`
 /// with publication revoked as `lease` (decision 0057 rule 13). A reason already
-/// stored is kept, so an attempt settles with the reason it had.
+/// stored is kept, so an attempt settles with the reason it had. It also
+/// empties `execution_workers`: no execution worker of the backed-up database
+/// serves this one (decision 0058 rule 20).
 ///
 /// # Errors
 ///
@@ -1166,6 +1184,11 @@ pub(crate) fn expire_job_leases(connection: &Connection) -> Result<usize, StoreE
                  revoked = coalesce(revoked, 'lease') WHERE state = 'live'",
             [],
         )
+        .map_err(unavailable)?;
+    // No execution worker of the backed-up database serves this one (decision
+    // 0058 rule 20), so none counts as ready.
+    transaction
+        .execute("DELETE FROM execution_workers", [])
         .map_err(unavailable)?;
     transaction.commit().map_err(unavailable)?;
     Ok(expired)

@@ -107,6 +107,7 @@ const listedMismatches = (count) =>
 
 const background = (state, mode = 'supervised') => ({
   worker: { mode, state, restarts: 0, dropped_lines: 0 },
+  execution: { ready: false },
 });
 
 test('isOlder: a job created earlier is listed after a job created later', () => {

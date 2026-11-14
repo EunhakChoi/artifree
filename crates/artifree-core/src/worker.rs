@@ -44,8 +44,8 @@ use artifree_ports::execution::{
     HeldCapacity, LaunchFailure, LaunchOutcome, PinnedInput, ProfileOutput, ProfileRun,
 };
 use artifree_ports::job_store::{
-    Checkpoint, ExecutionClaim, JobClaim, JobRecord, JobStore, JobStoreError, Lease,
-    ProfileBinding, Retry, SettleOutcome,
+    Checkpoint, ExecutionClaim, ExecutionPresence, JobClaim, JobRecord, JobStore, JobStoreError,
+    Lease, ProfileBinding, Retry, SettleOutcome,
 };
 use sha2::{Digest, Sha256};
 
@@ -244,16 +244,18 @@ pub fn run_next_observed<S: ArtifactStore + JobStore>(
     let stores = Stores {
         store,
         builds: None,
+        presence: None,
     };
     run_claimed(&stores, clock, worker, config, pace, profiles, on_claim)
 }
 
 /// The stores of one claim. Only a worker with an execution port runs a
 /// `run_profile` job, and only [`run_next_with`] gives it one, together with
-/// the build store.
+/// the build store and the store of execution workers' readiness.
 struct Stores<'a, S> {
     store: &'a S,
     builds: Option<&'a dyn BuildStore>,
+    presence: Option<&'a dyn ExecutionPresence>,
 }
 
 /// Claims the oldest due job and runs it to an end the store records, or
@@ -294,12 +296,17 @@ pub fn run_next<S: ArtifactStore + JobStore>(
 /// at the end of the call. A job of a build profile is published as a build,
 /// or fails with rule 18's failures (decision 0058, slice R03cb).
 ///
+/// A worker given capacity marks itself seen before the claim, and a worker
+/// refused capacity forgets its row, so the readiness of decision 0058 rule 20
+/// can be read from the store (slice R03cda). A busy lock writes nothing: its
+/// holder keeps its own row fresh at each renewal.
+///
 /// # Errors
 ///
 /// [`JobStoreError::Unavailable`] when the store fails around the capacity, the
 /// settlement, the claim or the result. The job then keeps its lease until it
 /// expires, and a later claim runs it again, as [`run_next_observed`] documents.
-pub fn run_next_with<S: ArtifactStore + JobStore + BuildStore>(
+pub fn run_next_with<S: ArtifactStore + JobStore + BuildStore + ExecutionPresence>(
     store: &S,
     clock: &dyn Clock,
     worker: &WorkerId,
@@ -311,6 +318,7 @@ pub fn run_next_with<S: ArtifactStore + JobStore + BuildStore>(
     let stores = Stores {
         store,
         builds: Some(store),
+        presence: Some(store),
     };
     run_claimed(&stores, clock, worker, config, pace, profiles, on_claim)
 }
@@ -327,7 +335,14 @@ fn run_claimed<S: ArtifactStore + JobStore>(
 ) -> Result<Step, JobStoreError> {
     let store = stores.store;
     let mut held = match profiles.execution {
-        Some(execution) => take_capacity(store, clock, execution, on_claim)?,
+        Some(execution) => {
+            let presence = Presence {
+                store: stores.presence,
+                worker,
+                now: clock.now(),
+            };
+            take_capacity(store, clock, execution, presence, on_claim)?
+        }
         None => None,
     };
     let claim = store.claim_job(JobClaim {
@@ -383,14 +398,24 @@ fn run_claimed<S: ArtifactStore + JobStore>(
     run_profile(&profile_claim, capacity, on_claim)
 }
 
+/// Where a worker records its readiness, and as whom (decision 0058 rule 20).
+#[derive(Clone, Copy)]
+struct Presence<'a> {
+    store: Option<&'a dyn ExecutionPresence>,
+    worker: &'a WorkerId,
+    now: UnixMillis,
+}
+
 /// Asks the execution port for capacity before a claim. When it holds capacity,
-/// settles the attempts its reconciliation found removed or record-less and
-/// returns the capacity. When it is busy or refuses, returns `None` and spends
-/// nothing.
+/// marks the worker seen, settles the attempts its reconciliation found removed
+/// or record-less and returns the capacity. When it refuses, forgets the
+/// worker's row and returns `None`; when it is busy, returns `None`. Neither
+/// spends anything.
 fn take_capacity<S: JobStore>(
     store: &S,
     clock: &dyn Clock,
     execution: &dyn Execution,
+    presence: Presence<'_>,
     on_claim: &mut dyn FnMut(ClaimEvent<'_>),
 ) -> Result<Option<Box<dyn HeldCapacity>>, JobStoreError> {
     let unsettled = store.unsettled_attempts()?;
@@ -398,10 +423,16 @@ fn take_capacity<S: JobStore>(
         Capacity::Held(capacity) => capacity,
         Capacity::Busy => return Ok(None),
         Capacity::Refused(detail) => {
+            if let Some(rows) = presence.store {
+                rows.forget_worker(presence.worker)?;
+            }
             on_claim(ClaimEvent::Refused(detail));
             return Ok(None);
         }
     };
+    if let Some(rows) = presence.store {
+        rows.mark_seen(presence.worker, presence.now)?;
+    }
     for attempt in capacity.reconciled() {
         match store.settle_attempt(attempt, clock.now()) {
             Ok(SettleOutcome::Settled(record)) if record.state != JobState::Running => {

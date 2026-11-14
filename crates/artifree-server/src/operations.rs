@@ -6,18 +6,18 @@
 
 use artifree_contracts::api::{
     AgentSessionList, AppData, Artifact, ArtifactKind as WireKind, ArtifactList, Asset, AssetList,
-    CancelJobResponse, CommitResponse, ConflictingFile, ContentEncoding, CopiedPart,
-    CreateArtifactRequest, CreateRuntimeViewRequest, DataMembers, DataWriteResponse,
+    BackgroundStatus, CancelJobResponse, CommitResponse, ConflictingFile, ContentEncoding,
+    CopiedPart, CreateArtifactRequest, CreateRuntimeViewRequest, DataMembers, DataWriteResponse,
     DeleteAssetRequest, DeleteAssetResponse, DeleteDataRequest, DuplicateArtifactRequest,
     DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorBody,
-    ErrorCode, ExportRuntime, FileChange as WireChange, FileEdit as WireEdit, FileUpload, Handoff,
-    HandoffState, Job as WireJob, JobFailure as WireFailure, JobKind as WireJobKind, JobList,
-    JobMismatch, JobProblem, JobResult, JobState as WireJobState, JobVerdict, JsonValue,
-    ListArtifactsQuery, ListJobsQuery, ListSort, Preview, PurgeArtifactRequest,
-    PurgeArtifactResponse, ReadDataMembersQuery, RemoveUnreferencedContentRequest,
-    RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionFile,
-    RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata, RuntimeView,
-    SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest, SourceExportFormat,
+    ErrorCode, ExecutionStatus, ExportRuntime, FileChange as WireChange, FileEdit as WireEdit,
+    FileUpload, Handoff, HandoffState, Job as WireJob, JobFailure as WireFailure,
+    JobKind as WireJobKind, JobList, JobMismatch, JobProblem, JobResult, JobState as WireJobState,
+    JobVerdict, JsonValue, ListArtifactsQuery, ListJobsQuery, ListSort, Preview,
+    PurgeArtifactRequest, PurgeArtifactResponse, ReadDataMembersQuery,
+    RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse, RestoreRevisionRequest,
+    Revision, RevisionFile, RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata,
+    RuntimeView, SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest, SourceExportFormat,
     SourceExportManifest, StageHandoffRequest, UnreferencedContent as WireContent,
     UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest, UploadAssetRequest,
     UploadAssetResponse,
@@ -1565,6 +1565,20 @@ pub(crate) async fn enqueue_job(
     Ok(EnqueueJobResponse {
         job: job_dto(&receipt.job)?,
         replayed: receipt.delivery == Delivery::Replayed,
+    })
+}
+
+/// What `GET /v1/background` reports: the server's own worker (decision 0055,
+/// rule 5) and whether an execution worker is ready (decision 0058 rule 20),
+/// read from the database that the execution workers share.
+pub(crate) async fn background(state: &AppState) -> Result<BackgroundStatus, ApiError> {
+    let now = state.clock().now();
+    let ready = state
+        .run(move |artifacts| artifacts.execution_ready(now))
+        .await?;
+    Ok(BackgroundStatus {
+        worker: state.settings().worker_status.current(),
+        execution: ExecutionStatus { ready },
     })
 }
 
