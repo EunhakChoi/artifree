@@ -21,8 +21,8 @@ use artifree_domain::identity::{ActorId, ArtifactId, InvalidValue, RequestKey, U
 use artifree_domain::job::{JobId, JobKind, ProfileName};
 use artifree_ports::artifact_store::{ArtifactStore, RequestIdentity};
 use artifree_ports::job_store::{
-    JobCancel, JobListing, JobPosition, JobReceipt, JobRecord, JobStore, JobStoreError, NewJob,
-    NewProfileJob,
+    ExecutionPresence, JobCancel, JobListing, JobPosition, JobReceipt, JobRecord, JobStore,
+    JobStoreError, NewJob, NewProfileJob,
 };
 use sha2::{Digest, Sha256};
 
@@ -289,6 +289,22 @@ impl<S: ArtifactStore + JobStore> ArtifactService<S> {
                 job: id,
                 now,
             })
+            .map_err(|error| job_error(error, Missing::Job))
+    }
+}
+
+impl<S: ExecutionPresence> ArtifactService<S> {
+    /// Whether an execution worker is ready at `now`: one was seen within the
+    /// five minutes before it (decision 0058 rule 20, slice R03cda). It names
+    /// no worker and no job, so any authenticated caller may read it, as it may
+    /// read the server's own worker status.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::Unavailable`].
+    pub fn execution_ready(&self, now: UnixMillis) -> Result<bool, ArtifactError> {
+        self.store
+            .execution_ready(now)
             .map_err(|error| job_error(error, Missing::Job))
     }
 }

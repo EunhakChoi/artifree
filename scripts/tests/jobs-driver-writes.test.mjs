@@ -56,6 +56,7 @@ const RUNNING = {
     restarts: 0,
     state: 'running',
   },
+  execution: { ready: false },
 };
 
 /** A promise that never settles. */

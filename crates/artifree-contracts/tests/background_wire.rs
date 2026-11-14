@@ -3,7 +3,8 @@
 //! refuses.
 
 use artifree_contracts::api::{
-    BackgroundStatus, WorkerExit, WorkerExitOutcome, WorkerMode, WorkerState, WorkerStatus,
+    BackgroundStatus, ExecutionStatus, WorkerExit, WorkerExitOutcome, WorkerMode, WorkerState,
+    WorkerStatus,
 };
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
@@ -31,6 +32,7 @@ fn sample_status() -> BackgroundStatus {
             }),
             dropped_lines: 2,
         },
+        execution: ExecutionStatus { ready: true },
     }
 }
 
@@ -43,7 +45,8 @@ fn sample_body() -> Value {
             "restarts": 1,
             "last_exit": { "at_ms": 1_700_000_000_000_i64, "outcome": "failed" },
             "dropped_lines": 2
-        }
+        },
+        "execution": { "ready": true }
     })
 }
 
@@ -129,6 +132,7 @@ fn published_schema_closes_enums_and_objects() -> Result<(), serde_json::Error> 
         ("BackgroundStatus", &published),
         ("WorkerStatus", &definitions["WorkerStatus"]),
         ("WorkerExit", &definitions["WorkerExit"]),
+        ("ExecutionStatus", &definitions["ExecutionStatus"]),
     ];
     for (name, object) in objects {
         assert_eq!(
@@ -178,6 +182,7 @@ fn writes_rule_five_fields_and_omits_an_absent_last_exit() -> Result<(), serde_j
             last_exit: None,
             dropped_lines: 0,
         },
+        execution: ExecutionStatus { ready: false },
     };
     let written = serde_json::to_value(&first_run)?;
     assert_eq!(
@@ -188,7 +193,8 @@ fn writes_rule_five_fields_and_omits_an_absent_last_exit() -> Result<(), serde_j
                 "state": "running",
                 "restarts": 0,
                 "dropped_lines": 0
-            }
+            },
+            "execution": { "ready": false }
         }),
         "an absent `last_exit` must be an omitted key, not null"
     );
@@ -208,7 +214,23 @@ fn refuses_unknown_fields_and_values() -> Result<(), serde_json::Error> {
         sample_status(),
         "the sample body must be valid, so each refusal below comes from its edit alone"
     );
-    let edits: [(Edit, &str); 5] = [
+    let edits: [(Edit, &str); 8] = [
+        (
+            |body| body["execution"]["surprise"] = Value::Bool(true),
+            "unknown field `surprise`",
+        ),
+        (
+            |body| body["execution"]["ready"] = Value::from("true"),
+            "expected a boolean",
+        ),
+        (
+            |body| {
+                if let Some(object) = body.as_object_mut() {
+                    object.remove("execution");
+                }
+            },
+            "missing field `execution`",
+        ),
         (
             |body| body["worker"]["surprise"] = Value::Bool(true),
             "unknown field `surprise`",

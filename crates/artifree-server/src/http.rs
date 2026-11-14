@@ -1667,9 +1667,7 @@ async fn show_background(
     State(state): State<AppState>,
     Authenticated(_): Authenticated,
 ) -> Json<BackgroundStatus> {
-    Json(BackgroundStatus {
-        worker: state.settings().worker_status.current(),
-    })
+    Json(operations::background(&state).await)
 }
 
 /// Asks to stop a job. The body must be `{}`.

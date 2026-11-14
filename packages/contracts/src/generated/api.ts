@@ -2181,7 +2181,19 @@ export interface JobList {
  * process identifier.
  */
 export interface BackgroundStatus {
+  execution: ExecutionStatus;
   worker: WorkerStatus;
+}
+/**
+ * The execution workers that share the server's database (decision 0058 rule
+ * 20). It names no worker.
+ */
+export interface ExecutionStatus {
+  /**
+   * `true` when an execution worker was seen within the last five minutes.
+   * `false` says that builds cannot start now.
+   */
+  ready: boolean;
 }
 /**
  * The server's own worker.

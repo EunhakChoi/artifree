@@ -419,6 +419,10 @@ pub(super) fn checkpoint(
     let row = read_attempt(transaction, attempt)?
         .filter(|row| row.job == lease.job)
         .ok_or(JobStoreError::NotFound)?;
+    // Every checkpoint its guardian asks keeps the worker's readiness row
+    // fresh (decision 0058 rule 20), a stopping one included, so a long
+    // cleanup does not make a live worker look gone.
+    super::presence::seen_by_job(transaction, &lease.job, now)?;
     if let Some(reason) = assess(transaction, lease, &row, now)? {
         return Ok(CheckpointAnswer::Stop(reason));
     }

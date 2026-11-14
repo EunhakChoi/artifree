@@ -445,13 +445,18 @@
       "additionalProperties": false,
       "description": "Response of `GET /v1/background` (decision 0055, rule 5). It describes the\nserver and carries nothing of any user: no worker output, no path, and no\nprocess identifier.",
       "properties": {
+        "execution": {
+          "$ref": "#/$defs/ExecutionStatus",
+          "description": "Whether an execution worker, which runs builds, is ready (decision 0058\nrule 20)."
+        },
         "worker": {
           "$ref": "#/$defs/WorkerStatus",
           "description": "The worker the server starts and watches."
         }
       },
       "required": [
-        "worker"
+        "worker",
+        "execution"
       ],
       "type": "object"
     },
@@ -1234,6 +1239,20 @@
       },
       "required": [
         "error"
+      ],
+      "type": "object"
+    },
+    "ExecutionStatus": {
+      "additionalProperties": false,
+      "description": "The execution workers that share the server's database (decision 0058 rule\n20). It names no worker.",
+      "properties": {
+        "ready": {
+          "description": "`true` when an execution worker was seen within the last five minutes.\n`false` says that builds cannot start now.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ready"
       ],
       "type": "object"
     },

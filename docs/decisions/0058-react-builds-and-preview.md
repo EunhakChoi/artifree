@@ -5,9 +5,10 @@ Date: 2026-11-14. Status: **accepted; R03a (the package rules), R03ba
 versioned, packaged and protected tool root), R03bcba (the lock list, the
 packaged bundler and its measurement), R03bcbb (the `react-v1` profile in
 the build with `enforcement-fixture`), R03ca (the store of builds and
-diagnostics), R03cb (the worker's composition, diagnostics and failures)
-and R03cc (build tickets, the `/b/` route and the head status, below the
-wire) are implemented, R03cda to R03f are not**. Roadmap: R03.
+diagnostics), R03cb (the worker's composition, diagnostics and failures),
+R03cc (build tickets, the `/b/` route and the head status, below the
+wire) and R03cda (the execution readiness, schema 16) are implemented,
+R03cdb to R03f are not**. Roadmap: R03.
 
 > **Note, 2026-11-14 (slices).** R03b is split into R03ba, R03bb and R03bc,
 > and rule 5 moves to R03f. A release build compiles no attempt, worker port,
@@ -481,6 +482,42 @@ wire) are implemented, R03cda to R03f are not**. Roadmap: R03.
 >
 > Rule 22's enforcement requirement covers both, since both change a
 > worker's loop.
+
+> **Note, 2026-11-15 (R03cda).** The readiness is implemented as the split
+> note describes it.
+>
+> - Schema 16 adds `execution_workers` (a worker identity and a time). The
+>   upgrade from 15 only creates the table.
+> - The port is `ExecutionPresence`, beside `JobStore`, with three calls:
+>   - `mark_seen` reads first, so an idle poll with a fresh row takes no
+>     write lock;
+>   - `forget_worker`;
+>   - `execution_ready`.
+>     Only `run_next_with`, the worker that can hold an execution port, is
+>     given it.
+> - The worker calls them around capacity, and only when its build knows a
+>   build profile, since only such a worker can run a build:
+>   - it marks itself seen once capacity is held, at the time read then,
+>     before reconciliation and the claim;
+>   - at a refusal it reports the refusal, then forgets its row (a read
+>     first, so a refused worker without a row takes no write lock);
+>   - it writes nothing when the lock is busy or it has no port.
+> - Every checkpoint of a running `run_profile` job's attempt, a stopping
+>   one included, marks the worker the job row names, in the checkpoint's
+>   transaction, under the same one-minute rule. A long cleanup therefore
+>   keeps its worker ready.
+> - A row up to five minutes later than now counts as ready, and the
+>   pruning deletes rows more than an hour before or after now, so a clock
+>   that stepped back is bounded. A worker that restarts under a new
+>   identity leaves its old row, which stops counting within five minutes.
+> - The restore that expires leases also empties the table in the same
+>   transaction.
+> - `GET /v1/background` reads the readiness at the server's clock and adds
+>   `execution: { ready }` (contract 0.29.0). The field is required, and the
+>   TypeScript client refuses a body without a boolean `ready`. A store that
+>   cannot be read reports `ready: false`, since no build can start then,
+>   and keeps the server's worker status. The web and the CLI do not show
+>   the readiness yet.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),
