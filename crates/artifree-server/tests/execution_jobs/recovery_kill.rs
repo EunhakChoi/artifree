@@ -8,11 +8,11 @@
 use std::error::Error;
 
 use artifree_domain::job::{AttemptState, JobId, JobState};
-use artifree_ports::job_store::{AttemptRow, JobStore};
+use artifree_ports::job_store::AttemptRow;
 
 use super::recovery_support::{
-    QUARANTINE_FILE, attempt_rows, clear_pause, pause_launch, record_path, wait_marker,
-    wait_no_payload,
+    QUARANTINE_FILE, attempt_rows, clear_pause, only_unsettled, pause_launch, record_path,
+    wait_marker, wait_no_payload,
 };
 use super::{
     LEASE_3, Scratch, Store, TestResult, Worker, group_name, payload_processes, runs_the_payload,
@@ -47,17 +47,6 @@ fn kill_phase() -> Result<&'static str, Box<dyn Error>> {
         .ok_or_else(|| {
             format!("{KILL_PHASE} must name one of {KILL_PHASES:?}, not {named:?}").into()
         })
-}
-
-/// The one unsettled attempt of the store. Each case pauses while its job has one attempt, so an
-/// answer of any other count is an error.
-fn only_unsettled(store: &Store) -> Result<AttemptRow, Box<dyn Error>> {
-    let rows = store.port.unsettled_attempts()?;
-    let count = rows.len();
-    let [row]: [AttemptRow; 1] = rows
-        .try_into()
-        .map_err(|_| format!("expected one unsettled attempt, found {count}"))?;
-    Ok(row)
 }
 
 /// Checks, before the kill, the fact that `phase` leaves once its marker is written (decision

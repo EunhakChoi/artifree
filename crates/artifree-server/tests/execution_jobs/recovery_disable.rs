@@ -10,10 +10,12 @@ use artifree_domain::identity::StateGeneration;
 use artifree_domain::job::{AttemptState, JobId, JobState, Revocation};
 
 use super::recovery_support::{
-    attempt_rows, clear_pause, pause_launch, restored_copy, set_disabled, wait_marker,
+    attempt_rows, clear_pause, only_unsettled, pause_launch, restored_copy, set_disabled,
+    wait_marker,
 };
 use super::{
-    DEADLINE, LEASE_3, OWNER, Scratch, Store, TestResult, Worker, cancel_and_settle, within,
+    DEADLINE, LEASE_3, OWNER, Scratch, Store, TestResult, Worker, cancel_and_settle, group_name,
+    poll, within,
 };
 
 /// The environment variable that names the across case of one job test: `restart` or `restore`.
@@ -118,8 +120,8 @@ fn job_disable_and_enable_before_a_heartbeat_stops_the_attempt() -> TestResult {
 }
 
 /// A disable and an enable made while the attempt collects its output refuse its publication: the
-/// job ends cancelled with no counts, its attempt is settled and revoked `generation`, and its
-/// group is gone. The queued job waits behind it, and it is claimed after the enable under the
+/// job ends cancelled with no counts, and its attempt, whose group has ended before the output is
+/// collected, is settled and revoked `generation`. The queued job waits behind it, and it is claimed after the enable under the
 /// new generation and succeeds (0042 rule 6; 0057 rules 5, 9 and 10).
 #[test]
 #[ignore = "runs only in the Linux enforcement job"]
@@ -131,9 +133,19 @@ fn job_disable_and_enable_before_publication_cancels_the_job() -> TestResult {
     let queued = store.enqueue_fixture("queued")?;
     pause_launch(&scratch.execution(), COLLECTING_STALL)?;
     let worker = Worker::spawn(&scratch, &[])?;
-    // The pause comes after the group ended, so the group may be gone before it is looked for.
-    let (_, group) = worker.attempt_group(&store)?;
+    // The attempt's row exists from its registration on, so it is read before the pause begins.
+    // Its group has ended by `collecting`, so the case does not wait for the group to appear: it
+    // states the phase's fact at once, and the stall is left for the disable and the enable.
+    let row = poll(within(DEADLINE), "the one unsettled attempt", || {
+        Ok(only_unsettled(&store).ok())
+    })?;
+    let group = worker.group.join(group_name(&row.attempt));
     wait_marker(&scratch.execution(), "collecting")?;
+    assert!(
+        !group.exists(),
+        "the attempt group {} must be gone by the time the output is collected",
+        group.display()
+    );
     set_disabled(&store, true)?;
     set_disabled(&store, false)?;
     // The pause is cleared before the queued job launches, so only the first attempt stalls.
@@ -155,11 +167,6 @@ fn job_disable_and_enable_before_publication_cancels_the_job() -> TestResult {
         attempt.revoked,
         Some(Revocation::Generation),
         "the refused publication must be stored as the attempt's revocation"
-    );
-    assert!(
-        !group.exists(),
-        "the attempt group {} must be gone once the job is cancelled",
-        group.display()
     );
     store.wait_for_state(&queued, JobState::Succeeded)?;
     assert_pinned_now(&store, &queued, "the queued job claimed after the enable")
