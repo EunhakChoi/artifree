@@ -110,7 +110,7 @@ export async function checkEditor({
 
     // The dialog refuses what the server would refuse, and case-only twins.
     await newFile.click();
-    await pathInput.fill('notes.ts');
+    await pathInput.fill('notes.cjs');
     await expect(
       dialog.getByText('Artifree does not serve files with this extension.'),
     ).toBeVisible();
