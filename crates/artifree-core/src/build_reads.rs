@@ -146,10 +146,13 @@ impl<S: ArtifactStore + JobStore + BuildStore> ArtifactService<S> {
 
     /// The diagnostics a job read shows with `job` (decision 0058 rule 13 and
     /// its R03d split note): those it keeps, for a failed `run_profile` job,
-    /// and none for any other. `job` must come from [`Self::job`] or
-    /// [`Self::jobs`], which answer only the actor who enqueued it while it
-    /// may read the artifact outside the trash; that is the read rule of 13,
-    /// so no other check is made here.
+    /// and none for any other. `job` must come from a call that answers only
+    /// the actor who enqueued it while it may read the artifact outside the
+    /// trash: [`Self::job`], [`Self::jobs`], or the receipt of
+    /// [`Self::enqueue_build`], [`Self::enqueue_job`] or [`Self::cancel_job`],
+    /// whose store writes refuse an artifact in the trash and whose core
+    /// checks the actor first. That is the read rule of 13, so no other check
+    /// is made here.
     ///
     /// # Errors
     ///

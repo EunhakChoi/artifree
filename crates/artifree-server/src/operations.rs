@@ -150,9 +150,6 @@ impl ApiError {
             message,
         )
     }
-}
-
-impl ApiError {
     /// The `file_conflict` error of an edit whose files changed, with the
     /// current revision and the files.
     fn file_conflict(
@@ -1586,7 +1583,12 @@ pub(crate) async fn enqueue_job(
         ),
     };
     let now = state.clock().now();
-    let builds = state.settings().build_profiles.clone();
+    // Only a build reads the build profiles, so a verification copies none.
+    let builds = if profile.is_some() {
+        state.settings().build_profiles.clone()
+    } else {
+        Vec::new()
+    };
     let (receipt, diagnostics) = state
         .run(move |artifacts| {
             let receipt = match &profile {

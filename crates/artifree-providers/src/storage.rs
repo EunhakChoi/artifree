@@ -1256,9 +1256,10 @@ fn record_data_change(
 /// state or `cancel_requested` it changed (decision 0055, rule 7). The row goes
 /// to the feed of the job's owner and names the artifact's current revision and
 /// metadata revision (rule 8). A job of an artifact in the trash or purged gets
-/// none, because nothing of it is readable (rule 9). A `run_profile` job gets none
-/// either: no `job_changed` row is ever written for it, so its transitions consume
-/// no actor sequence (decision 0057 rule 3).
+/// none, because nothing of it is readable (rule 9). A hidden job, a `run_profile`
+/// job of a profile other than the public one, gets none either, so its
+/// transitions consume no actor sequence (decision 0057 rule 3); a public build
+/// gets its rows as a verification does (decision 0058 rule 17).
 fn record_job_change(transaction: &Transaction<'_>, job: &JobId) -> Result<(), StoreError> {
     let (actor, artifact_id, revision, metadata, hidden): (String, String, i64, i64, bool) =
         transaction

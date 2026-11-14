@@ -90,7 +90,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust",
       "path": "crates/artifree-core/src/jobs.rs",
       "status": "implemented",
-      "summary": "Persistent jobs with leases, retries, and cancellation, run by a separate trusted worker process that serve starts and restarts unless started with --no-worker; the one job kind re-verifies the files of a pinned revision. Not a sandbox: untrusted execution, builds, and model jobs are planned, and job changes reach the change feed as job_changed rows."
+      "summary": "Persistent jobs with leases, retries, and cancellation, run by a separate trusted worker process that serve starts and restarts unless started with --no-worker; verify_revision re-verifies the files of a pinned revision. The build kind, run_profile with react-v1, is on the API, MCP and the CLI, but a release build knows no build profile and refuses it with profile_unknown until R03f. Model jobs are planned, and job changes reach the change feed as job_changed rows."
     },
     {
       "id": "handoff",
@@ -135,7 +135,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Worker language open",
       "path": "crates/artifree-providers/src/build.rs",
       "status": "planned",
-      "summary": "Isolated HTML/JS/TSX build and preview generation."
+      "summary": "Isolated HTML/JS/TSX build and preview generation: implemented only in the build with enforcement-fixture (decision 0058); a release build knows no build profile until R03f."
     },
     {
       "id": "export",

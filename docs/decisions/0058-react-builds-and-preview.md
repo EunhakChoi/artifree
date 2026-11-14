@@ -662,7 +662,15 @@ Roadmap: R03.
 >   verification with one, a verification result on a build, or a build's
 >   counts or diagnostics on a verification is an invalid response. The
 >   web only names the kind (`Build`) and its four failures; the build
->   action stays R03e.
+>   action, a build's counts and its diagnostics in the web stay R03e.
+> - Known limitations. A retry of a build after the server's build stopped
+>   knowing the profile (a restart as a release build) answers
+>   `profile_unknown` instead of its replay, since the profile is checked
+>   before the key; the job is still read and listed. A list reads the
+>   diagnostics of each failed build on its page with its own read, after
+>   the page, so a build that fails meanwhile can empty an older job's
+>   diagnostics in that answer, as rule 13 empties them for every later
+>   read.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),

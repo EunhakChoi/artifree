@@ -1408,9 +1408,12 @@ async fn update_artifact(
     ))
 }
 
-/// Enqueues a verification job for one revision (decision 0030). An agent
-/// token may: the job reads stored files and changes nothing, and the actor's
-/// limit bounds how many wait.
+/// Enqueues a verification or a build of one revision (decisions 0030 and
+/// 0058 rule 17). An agent token may, as it may save a revision: a
+/// verification reads stored files and changes nothing, and a build changes
+/// no source; it only publishes output derived from the revision, which the
+/// store bounds and prunes, in an execution worker's sandbox. The actor's
+/// limit bounds how many of either wait.
 async fn enqueue_job(
     State(state): State<AppState>,
     Authenticated(actor): Authenticated,
