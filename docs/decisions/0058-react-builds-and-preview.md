@@ -4,7 +4,7 @@ Date: 2026-11-14. Status: **accepted; R03a (the package rules), R03ba
 (the profile table), R03bb (the provider's verdicts), R03bca (the
 versioned, packaged and protected tool root), R03bcba (the lock list, the
 packaged bundler and its measurement) and R03bcbb (the `react-v1` profile in
-the build with `enforcement-fixture`) are implemented, R03c to R03f are
+the build with `enforcement-fixture`) are implemented, R03ca to R03f are
 not**. Roadmap: R03.
 
 > **Note, 2026-11-14 (slices).** R03b is split into R03ba, R03bb and R03bc,
@@ -222,6 +222,37 @@ not**. Roadmap: R03.
 >   modified root. Admission checks the whole root before any profile matters,
 >   so this shows the root check that `react-v1` runs behind, as part 5 does
 >   for the fixture.
+
+> **Note, 2026-11-15 (R03c split).** R03c is split into R03ca, R03cb, R03cc
+> and R03cd, because its rules touch four layers that can each be proven on
+> their own: the store, the worker, the preview origin and the trusted
+> worker's claim loop. Where an earlier note or rule names R03c, it means
+> these slices together.
+>
+> - **R03ca, the store.** Rule 9 and the store half of rules 10 to 13:
+>   schema 15, one operation that publishes a build with its job's success,
+>   the first build kept, the eight-build bound, the reference predicates,
+>   purge, trash, backup and restore, and the store side of diagnostics (the
+>   newest failed job keeps them). No worker calls it yet. Rule 23's
+>   assumption about a 25 MiB publication belongs here, since it is a store
+>   transaction.
+> - **R03cb, the worker.** Rules 7 and 8, the worker half of rules 11 and 13,
+>   and the store half of rule 18. The trusted worker composes the result,
+>   splits the bundler's messages into diagnostics, names the failure
+>   (`build_failed`, `limit_exceeded`, `output_rejected`) and publishes
+>   through R03ca's operation. Rule 23's assumption about the bundler's
+>   messages belongs here.
+> - **R03cc, the preview.** Rules 14 to 16 below the wire: the build target of
+>   the management preview operation, build tickets in the ticket registry
+>   with their revocation, the `/b/{ticket}/` route, the computed latest build
+>   and the head status. R03d puts the ticket and the status on the API, MCP
+>   and the CLI.
+> - **R03cd, the deadline.** Rule 20: the trusted worker ends a `react-v1` job
+>   that no execution worker claimed within ten minutes, and
+>   `GET /v1/background` reports whether an execution worker is ready.
+>
+> The order is R03ca, R03cb, R03cc, R03cd; R03cd needs only R03ca's failure
+> values. Rules 22 and 23 and the slice table are reworded to match.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),
@@ -486,7 +517,10 @@ stands.
 | R03bca  | Rule 19 without the bundler: the versioned root path and AppArmor profile name, the packaging script that `prepare.sh` then uses, its refusal to write over an existing root, and the provider's check of the owner and modes of the root, its entries and its ancestors. The fixture's root is the only one it builds.                                                                                                                       | The enforcement job: the script builds the fixture's root at the versioned path and refuses an existing one; the refusals of a modified, an extra and a missing file hold for that root; and a root with another owner, a group- or other-writable entry, a set-ID bit or an unprotected ancestor is refused.                                                              |
 | R03bcba | The rest of rule 19 for the bundler: the lock list (version, download URL, SHA-256 and licence of the bundler and each package), and the packaging script that downloads, checks and unpacks them into the root. A test template, and the in-sandbox measurement of rule 3's calls with a measuring filter in the build with `enforcement-fixture`. No profile is added.                                                                      | The enforcement job: the script's root holds the bundler and the packages within the manifest's limits; a wrong SHA-256 is refused before anything is written to the root; a changed package file is refused as a modified root. The template, a bad import and a larger input build under the measuring filter with no kill, and their calls are recorded as an artifact. |
 | R03bcbb | Rules 1 to 4 in the build with `enforcement-fixture`: `react-v1` with the filter measured in R03bcba, its argv and environment. Its note in 0057 says that the feature now holds a second profile.                                                                                                                                                                                                                                            | The enforcement job: the template builds within every limit, a bad import fails with its bounded stderr, a forbidden call is killed, and a modified root is refused.                                                                                                                                                                                                       |
-| R03c    | Rules 7 to 16, 20 and the store half of 18: composition, schema 15, publication, references, retention, diagnostics, build tickets, the `/b/` route, head status and the claim deadline.                                                                                                                                                                                                                                                      | SQLite tests on any host for each transaction, reference and retention rule, the first-build-kept rule, purge, backup, restore and the deadline; the enforcement job for a published build, a `build_failed` with diagnostics and its preview.                                                                                                                             |
+| R03ca   | Rule 9 and the store half of rules 10 to 13: schema 15, the publishing operation with the job's success, the first build kept, the eight-build bound, the reference predicates, purge, trash, backup and restore, and the newest failed job's diagnostics.                                                                                                                                                                                    | SQLite tests on any host for each transaction, reference and retention rule, the first-build-kept rule, purge, backup and restore, and a 25 MiB publication within the worker's lease.                                                                                                                                                                                     |
+| R03cb   | Rules 7 and 8, the worker half of rules 11 and 13, and the store half of 18: composition, the split of the bundler's messages into diagnostics, the failure names and the publication through R03ca.                                                                                                                                                                                                                                          | Unit tests on any host for composition and the message split; the enforcement job for a published build, a `build_failed` with its diagnostics, a `limit_exceeded` and an `output_rejected`.                                                                                                                                                                               |
+| R03cc   | Rules 14 to 16 below the wire: the build target of the management preview operation, build tickets and their revocation, the `/b/{ticket}/` route, the computed latest build and the head status.                                                                                                                                                                                                                                             | SQLite and service tests on any host for the latest build, the head status and ticket revocation; HTTP tests for the `/b/` route under the CSP sandbox; the enforcement job for the preview of a published build.                                                                                                                                                          |
+| R03cd   | Rule 20: the claim deadline at the trusted worker's claim loop, and execution-worker readiness in `GET /v1/background`.                                                                                                                                                                                                                                                                                                                       | Tests on any host with the injected clock for the deadline, and a job with an attempt that the rule leaves alone; contract and API tests for the readiness.                                                                                                                                                                                                                |
 | R03d    | Rule 17 and the wire half of 18: the public kind, `profile_unknown`, the contract, MCP and the CLI, including build tickets.                                                                                                                                                                                                                                                                                                                  | Contract, API, MCP and CLI tests, including refusals and the open-job bound.                                                                                                                                                                                                                                                                                               |
 | R03e    | The web: a build action, head status and diagnostics, and the build preview with its "latest" notice.                                                                                                                                                                                                                                                                                                                                         | Component tests, and Chromium and Firefox smoke for the request, the pending and failed states and the refusal. No smoke host runs a profile, so a successful build and its `/b/` preview are proven by component tests and by the enforcement job at the HTTP level.                                                                                                      |
 | R03f    | Rules 5 and 21: the release build for x86_64 Linux compiles the launch path and knows `react-v1`, and the operator documentation and the supported-host statement.                                                                                                                                                                                                                                                                            | Release-archive and clean-install checks of the launch path; the enforcement job runs the release binary's worker; review of the documentation.                                                                                                                                                                                                                            |
@@ -503,8 +537,8 @@ stands.
     - R03bcba: that the bundler resolves the preinstalled packages through the
       profile's environment alone, without a configuration file in the
       revision.
-    - R03c: that the bundler's messages can be split into rule 13's fields.
-    - R03c: that a 25 MiB publication fits in one SQLite transaction within
+    - R03cb: that the bundler's messages can be split into rule 13's fields.
+    - R03ca: that a 25 MiB publication fits in one SQLite transaction within
       the worker's lease.
 
 ## Alternatives considered
