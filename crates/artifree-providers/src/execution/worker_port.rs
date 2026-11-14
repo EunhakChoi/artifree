@@ -219,6 +219,7 @@ impl HeldCapacity for HeldFixture {
         let plan = AttemptPlan {
             lease: Duration::from_millis(run.lease_ms),
             program: EntryProgram::Server,
+            checkpoint_at_release: true,
             ..AttemptPlan::fixture()
         };
         let mut renew = |_heartbeat: u32| heartbeat_of(checkpoint.renew());
@@ -257,28 +258,36 @@ fn directory_identity(execution_dir: &Path, uid: u32) -> Result<String, Executio
     }
 }
 
-/// Writes a new identity file with mode 0600, then syncs it and its directory. A file that another
-/// process created first is left for `read_identity` to check.
+/// Writes a new identity file with mode 0600: the text goes to a temporary file of its own name,
+/// which is synced and then linked to `path`, so the identity file appears whole or not at all and
+/// a failed write leaves nothing that refuses a later start. A file that another process linked
+/// first is left for `read_identity` to check. The temporary name is removed either way, and the
+/// directory is synced.
 fn create_identity(execution_dir: &Path, path: &Path) -> Result<(), ExecutionStartRefusal> {
     let identity = Identity::random().map_err(|_| ExecutionStartRefusal::Identity)?;
-    let mut file = match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(()),
-        Err(_) => return Err(ExecutionStartRefusal::Identity),
-    };
-    let text = format!("{}\n", identity.hex());
-    file.write_all(text.as_bytes())
-        .map_err(|_| ExecutionStartRefusal::Identity)?;
-    file.sync_all()
-        .map_err(|_| ExecutionStartRefusal::Identity)?;
+    let temporary = execution_dir.join(format!(".directory-identity.{}.tmp", identity.hex()));
+    let written = write_synced(&temporary, &format!("{}\n", identity.hex()));
+    let linked = written.and_then(|()| match fs::hard_link(&temporary, path) {
+        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => Err(error),
+        _ => Ok(()),
+    });
+    let removed = fs::remove_file(&temporary);
+    linked.map_err(|_| ExecutionStartRefusal::Identity)?;
+    removed.map_err(|_| ExecutionStartRefusal::Identity)?;
     fs::File::open(execution_dir)
         .and_then(|directory| directory.sync_all())
         .map_err(|_| ExecutionStartRefusal::Identity)
+}
+
+/// Creates `path` exclusively with mode 0600, writes `text` and syncs it.
+fn write_synced(path: &Path, text: &str) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(text.as_bytes())?;
+    file.sync_all()
 }
 
 /// Reads an identity file that must be a private regular file of this account, holding exactly

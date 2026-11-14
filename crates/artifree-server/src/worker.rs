@@ -175,6 +175,9 @@ pub fn run(
         if shutdown.load(Ordering::Acquire) {
             return Ok(Stopped::Signal);
         }
+        // Whether this call reported a refusal; a call without one (capacity held,
+        // busy, or no port asked) ends a run of identical refusals.
+        let mut refused_now = false;
         let mut observed = |event: ClaimEvent<'_>| match event {
             ClaimEvent::Settled(record) => on_event(&WorkerEvent::Job(record)),
             ClaimEvent::Claimed(job) => on_event(&WorkerEvent::Claimed(job)),
@@ -186,9 +189,10 @@ pub fn run(
                     on_event(&WorkerEvent::Unavailable(detail));
                 }
                 last_refusal = Some(detail);
+                refused_now = true;
             }
         };
-        match worker::run_next_with(
+        let step = worker::run_next_with(
             &store,
             clock,
             &worker,
@@ -196,7 +200,11 @@ pub fn run(
             &pace,
             profiles,
             &mut observed,
-        ) {
+        );
+        if !refused_now {
+            last_refusal = None;
+        }
+        match step {
             Ok(Step::Idle) => {
                 failures = 0;
                 if options.once {

@@ -165,3 +165,42 @@ fn every_stop_reason_round_trips() -> TestResult {
     );
     Ok(())
 }
+
+/// A private temporary directory, removed when dropped.
+struct ScratchDir(std::path::PathBuf);
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+#[test]
+fn the_directory_identity_is_made_whole_once_and_leaves_no_temporary_file() -> TestResult {
+    use std::os::unix::fs::DirBuilderExt;
+    let path = std::env::temp_dir().join(format!("artifree-identity-{}", std::process::id()));
+    if path.exists() {
+        fs::remove_dir_all(&path)?;
+    }
+    fs::DirBuilder::new().mode(0o700).create(&path)?;
+    let scratch = ScratchDir(path);
+    let identity_path = scratch.0.join(DIRECTORY_IDENTITY_FILE);
+    create_identity(&scratch.0, &identity_path)?;
+    let first = fs::read_to_string(&identity_path)?;
+    create_identity(&scratch.0, &identity_path)?;
+    assert_eq!(
+        fs::read_to_string(&identity_path)?,
+        first,
+        "a second creation keeps the first identity"
+    );
+    assert_eq!(first.len(), 33, "32 hexadecimal digits and a newline");
+    let names: Vec<String> = fs::read_dir(&scratch.0)?
+        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<_, _>>()?;
+    assert_eq!(
+        names,
+        vec![DIRECTORY_IDENTITY_FILE.to_owned()],
+        "no temporary file is left"
+    );
+    Ok(())
+}

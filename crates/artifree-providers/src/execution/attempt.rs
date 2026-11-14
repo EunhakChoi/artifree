@@ -74,7 +74,7 @@ use super::registry::{self, HostIdentity, Identity, QuarantineReason, Reconciled
 use super::report::HostReport;
 #[cfg(test)]
 use super::staging::InputListing;
-use super::staging::{InputRefusal, VerifiedInput};
+use super::staging::{self, InputRefusal, VerifiedInput};
 use super::usage::{self, GroupUsage};
 use super::{AdmissionRefusal, FIXTURE, InspectionProfile, launcher, policy, read_bounded};
 use guardian_link::GuardianLink;
@@ -130,12 +130,9 @@ static QUARANTINED: AtomicBool = AtomicBool::new(false);
 /// the job's lease, the stand-in store and the guardian's test-only switches (decision 0056,
 /// amendment of 2026-11-13, the guardian).
 #[derive(Clone, Debug)]
-#[cfg_attr(
-    test,
-    expect(
-        clippy::struct_excessive_bools,
-        reason = "the plan's test-only switches are independent and named by decision 0056, amendment of 2026-11-13 (the guardian)"
-    )
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the plan's switches are independent and named by decision 0056, amendment of 2026-11-13 (the guardian), and decision 0057 rule 7"
 )]
 pub(super) struct AttemptPlan {
     /// The tool root's program that runs the stub, the bootstrap and the guardian (decision 0057
@@ -180,6 +177,11 @@ pub(super) struct AttemptPlan {
     /// `fixture()`.
     #[cfg(test)]
     pub(super) pause: Option<Pause>,
+    /// Whether the store's checkpoint is asked once more after readiness and before the release,
+    /// and the payload released only on its confirmation (decision 0042 rule 3: the generation
+    /// is compared at readiness; decision 0057 rule 7). The worker sets it; `false` in
+    /// `fixture()`, so that the provider's own tests keep their heartbeat numbering.
+    pub(super) checkpoint_at_release: bool,
 }
 
 impl AttemptPlan {
@@ -210,6 +212,7 @@ impl AttemptPlan {
             renew_regardless: false,
             #[cfg(test)]
             pause: None,
+            checkpoint_at_release: false,
         }
     }
 }
@@ -346,6 +349,9 @@ pub(super) enum NotStartedReason {
     /// The attempt's record was not written, or the host identity for it could not be read, before
     /// any resource existed (0056, amendment of 2026-11-14, the attempt registry).
     RegistryNotWritten,
+    /// The store did not answer the checkpoint asked just before the release, so the payload was
+    /// not released (decision 0042 rule 3; decision 0057 rule 7).
+    CheckpointUnavailable,
 }
 
 /// Why a launch produced no evidence of a run.
@@ -861,6 +867,25 @@ pub(super) fn launch_held(
     }
 }
 
+/// Removes the record of an attempt that ended before its group existed, so that its job can be
+/// settled at once instead of waiting for its lease (decision 0057 rules 10 and 19). Only when no
+/// group of the record's name is under `delegated` and the staged input is gone; otherwise the
+/// record stays, and the next reconciliation removes it as it would after a crash (0056, amendment
+/// of 2026-11-14).
+fn release_ungrouped(registered: &mut Registered, delegated: &Path, execution_dir: &Path) {
+    let group = delegated.join(registered.identity.group_name());
+    let no_group = matches!(
+        fs::symlink_metadata(&group),
+        Err(error) if error.kind() == io::ErrorKind::NotFound
+    );
+    if no_group
+        && staging::remove_tree(&execution_dir.join(staging::INPUT_DIR)).is_ok()
+        && registered.registry.remove(registered.identity).is_ok()
+    {
+        registered.removed = true;
+    }
+}
+
 /// The attempt's record once `launch_held` wrote it: what `run_registered` needs to remove it.
 #[derive(Debug)]
 struct Registered {
@@ -895,15 +920,23 @@ fn run_registered(
     let roots = &admission::production_roots();
     // Staged under the admission lock, after the record and before any group exists (0056,
     // amendment of 2026-11-13).
-    let staged = input
-        .stage(execution_dir)
-        .map_err(|failure| without_usage(AttemptFailure::Input(failure)))?;
+    let staged = match input.stage(execution_dir) {
+        Ok(staged) => staged,
+        Err(failure) => {
+            release_ungrouped(registered, &held.delegated, execution_dir);
+            return Err(without_usage(AttemptFailure::Input(failure)));
+        }
+    };
     let input_digest = staged.digest();
     let name = registered.identity.group_name();
-    // A failure drops `staged`, which removes it, best effort. The record stays: the next
-    // reconciliation finds no group under its name and removes the record.
-    let group = probe_group::create_probe(&held.delegated, &name)
-        .map_err(|failure| without_usage(AttemptFailure::Refused(failure)))?;
+    let group = match probe_group::create_probe(&held.delegated, &name) {
+        Ok(group) => group,
+        Err(failure) => {
+            drop(staged);
+            release_ungrouped(registered, &held.delegated, execution_dir);
+            return Err(without_usage(AttemptFailure::Refused(failure)));
+        }
+    };
     let group_path = held.delegated.join(&name);
     pause_at(plan, Phase::Created);
 
@@ -1270,7 +1303,7 @@ fn run_group(
     let mut control = start_stub(plan, roots, input, session)?;
     place_stub(group, group_path, session)?;
     pause_at(plan, Phase::Started);
-    let (readiness, start) = release(plan, roots, &mut control, group_path, session)?;
+    let (readiness, start) = release(plan, renew, roots, &mut control, group_path, session)?;
     // `await_exit` records the exit in the session itself, on every path that reaped the stub.
     let awaited = await_exit(plan, renew, session, start);
     // The stub is no longer polled and no renewal follows, so the guardian's window stops here,
@@ -1398,12 +1431,13 @@ fn lists_pid(listing: &[u8], pid: u32) -> bool {
 }
 
 /// Sends LAUNCH, reads READY before the readiness deadline, observes the group independently and
-/// only then sends RELEASE. Between the observation and RELEASE the keeper is opened, checked and
+/// only then sends RELEASE; when the plan says so, the store's checkpoint must confirm first. Between the observation and RELEASE the keeper is opened, checked and
 /// held in `session`, and the plan's plant step runs (0056 rule 5, as reworded). After RELEASE the
 /// guardian receives `L` (0056, amendment of 2026-11-13, the guardian). Returns the observation and
 /// the instant of LAUNCH.
 fn release(
     plan: &AttemptPlan,
+    renew: &mut dyn FnMut(u32) -> Heartbeat,
     roots: &AdmissionRoots<'_>,
     control: &mut UnixStream,
     group_path: &Path,
@@ -1433,6 +1467,17 @@ fn release(
     }
     // Held by the session, so that every later path drops it.
     session.keeper = Some(keeper);
+    if plan.checkpoint_at_release {
+        // A cancel, trash, purge or change of generation or authority since the claim ends the
+        // attempt here, before any payload code runs (decision 0042 rule 3; 0057 rule 7).
+        let confirmed =
+            on_answer(renew(0), plan.renew_regardless).map_err(AttemptFailure::LeaseLost)?;
+        if !confirmed {
+            return Err(AttemptFailure::NotStarted(
+                NotStartedReason::CheckpointUnavailable,
+            ));
+        }
+    }
     control
         .write_all(plan.release_record)
         .map_err(|_| AttemptFailure::NotStarted(NotStartedReason::ReleaseNotSent))?;
@@ -1872,6 +1917,8 @@ mod kernel_log;
 mod mapping_tests;
 #[cfg(test)]
 mod registry_tests;
+#[cfg(test)]
+mod release_tests;
 #[cfg(test)]
 mod renewal_tests;
 #[cfg(test)]

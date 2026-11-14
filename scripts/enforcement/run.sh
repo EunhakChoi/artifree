@@ -545,6 +545,7 @@ say "part 11: the guardian"
 # R02ah (decision 0056, amendment of 2026-11-13, the guardian): renewals against the stand-in store, each test in one process.
 run_in_scenario "$lib_binary" guardian_tests linger guardian-lease job_lease_loss_ends_the_attempt
 run_in_scenario "$lib_binary" guardian_tests linger guardian-unavailable job_an_unavailable_store_lets_the_guardian_end_it
+run_in_scenario "$lib_binary" guardian_tests linger guardian-readiness job_a_stop_at_readiness_releases_no_payload
 run_in_scenario "$lib_binary" guardian_tests linger guardian-stall job_a_stalled_supervisor_is_ended_by_the_guardian
 run_in_scenario "$lib_binary" guardian_tests hang guardian-faulty job_a_faulty_supervisor_is_ended_at_the_deadline
 run_in_scenario "$lib_binary" guardian_tests hang guardian-confirmed job_confirmed_renewals_end_at_the_deadline

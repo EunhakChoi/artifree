@@ -4,10 +4,6 @@
     clippy::print_stdout,
     reason = "Help, version, and the module inventory are the CLI protocol."
 )]
-#![expect(
-    clippy::print_stderr,
-    reason = "Command failures must be reported on stderr."
-)]
 
 use std::ffi::OsString;
 use std::net::{IpAddr, SocketAddr};

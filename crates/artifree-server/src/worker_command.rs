@@ -222,11 +222,11 @@ pub fn worker_exit(arguments: &[OsString]) -> ExitCode {
     match run_worker(arguments) {
         Ok(()) => ExitCode::SUCCESS,
         Err(WorkerFailure::Fatal(message)) => {
-            eprintln!("{message}");
+            stderr_line(&message);
             ExitCode::FAILURE
         }
         Err(WorkerFailure::Unsupported(message)) => {
-            eprintln!("{message}");
+            stderr_line(&message);
             ExitCode::from(2)
         }
     }
@@ -271,12 +271,12 @@ fn run_worker(arguments: &[OsString]) -> Result<(), WorkerFailure> {
                 drop(print_line(&line.to_string()));
             }
             match event {
-                WorkerEvent::Warning(error) => eprintln!("warning: {error}"),
+                WorkerEvent::Warning(error) => stderr_line(&format!("warning: {error}")),
                 WorkerEvent::Attempt { job, detail } => {
-                    eprintln!("attempt of job {}: {detail}", job.as_str());
+                    stderr_line(&format!("attempt of job {}: {detail}", job.as_str()));
                 }
                 WorkerEvent::Unavailable(detail) => {
-                    eprintln!("execution unavailable: {detail}");
+                    stderr_line(&format!("execution unavailable: {detail}"));
                 }
                 _ => {}
             }
@@ -436,6 +436,12 @@ fn print_line(text: &str) -> Result<(), String> {
         }
         _ => Ok(()),
     }
+}
+
+/// One line on stderr. A closed stderr is not a reason to panic or to stop: the
+/// worker may hold a lease or an unsettled attempt (decision 0057 rule 10).
+fn stderr_line(message: &str) {
+    writeln!(io::stderr().lock(), "{message}").ok();
 }
 
 #[cfg(test)]

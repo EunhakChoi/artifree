@@ -424,7 +424,7 @@ impl Store {
         )])?;
         let created = self.service()?.create(
             &owner()?,
-            &parsed::<RequestKey>("create")?,
+            &parsed::<RequestKey>("create-artifact")?,
             &parsed::<Title>("Enforcement")?,
             &package,
         )?;
@@ -458,7 +458,7 @@ impl Store {
     fn enqueue_fixture(&self, name: &str) -> Result<JobId, Box<dyn Error>> {
         let receipt = self.service()?.enqueue_profile_job(
             &owner()?,
-            &parsed::<RequestKey>(name)?,
+            &parsed::<RequestKey>(&format!("fixture-{name}"))?,
             &self.artifact()?,
             SourceRevision(1),
             &parsed::<ProfileName>("fixture")?,
@@ -470,7 +470,7 @@ impl Store {
     /// Enqueues one `verify_revision` job of the artifact, under the request key `name`.
     fn enqueue_verify(&self, name: &str) -> Result<JobId, Box<dyn Error>> {
         let owner = owner()?;
-        let key = parsed::<RequestKey>(name)?;
+        let key = parsed::<RequestKey>(&format!("verify-{name}"))?;
         let artifact = self.artifact()?;
         let receipt = self.port.enqueue_job(NewJob {
             request: RequestIdentity {
@@ -849,7 +849,7 @@ fn job_a_trash_during_the_run_is_never_published() -> TestResult {
         MetadataChange::new(None, None, Some(true)).ok_or("a trash is a metadata change")?;
     service.update(
         &owner,
-        &parsed::<RequestKey>("trash")?,
+        &parsed::<RequestKey>("trash-artifact")?,
         &artifact,
         base,
         &change,

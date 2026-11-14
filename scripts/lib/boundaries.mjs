@@ -295,7 +295,9 @@ export function checkReleaseBuilds({ whole, workflows }) {
         `${path} names ${name}: release builds use the default features (decision 0057 rule 2).`,
       );
   for (const { path, text } of workflows)
-    for (const line of text.split('\n'))
+    // A shell continuation joins its lines first, so a flag on a continuation line is part of
+    // the command it continues.
+    for (const line of text.replace(/\\\r?\n/g, ' ').split('\n'))
       if (/\bcargo\b.*\bbuild\b/.test(line))
         for (const name of RELEASE_BUILD_FORBIDDEN)
           assert.ok(

@@ -55,10 +55,18 @@ const buildLines = [
     name: '--all-features',
     line: '      - run: cargo build --release --all-features',
   },
+  {
+    name: 'enforcement-fixture',
+    line: [
+      '        run: |',
+      '          cargo build --locked -p artifree-server \\',
+      '            --features enforcement-fixture',
+    ].join('\n'),
+  },
 ];
 for (const path of workflowPaths)
-  for (const { name, line } of buildLines)
-    test(`a workflow cargo build line naming ${name} is rejected: ${path}`, () => {
+  for (const [index, { name, line }] of buildLines.entries())
+    test(`a workflow cargo build line naming ${name} is rejected (${index + 1}): ${path}`, () => {
       assert.throws(
         () =>
           checkReleaseBuilds({
