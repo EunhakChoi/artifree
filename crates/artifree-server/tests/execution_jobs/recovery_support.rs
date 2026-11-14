@@ -248,3 +248,14 @@ pub(super) fn keeps_attempts(
         thread::sleep(STEP);
     }
 }
+
+/// The one unsettled attempt of the store. Each case pauses while its job has one attempt, so an
+/// answer of any other count is an error.
+pub(super) fn only_unsettled(store: &Store) -> Result<AttemptRow, Box<dyn Error>> {
+    let rows = store.port.unsettled_attempts()?;
+    let count = rows.len();
+    let [row]: [AttemptRow; 1] = rows
+        .try_into()
+        .map_err(|_| format!("expected one unsettled attempt, found {count}"))?;
+    Ok(row)
+}
