@@ -67,8 +67,9 @@ pub(super) const MEASUREMENT: ExecutionProfile = ExecutionProfile {
 
 /// The bundler's arguments after its path (decision 0058 rule 1): bundle the entry module into
 /// `/tmp/out` as `app.js` and, when the source imports CSS, `app.css`; ES modules for the
-/// browser, the automatic JSX runtime, minified, without source maps, colour or a metafile, and
-/// at most 20 messages.
+/// browser, the automatic JSX runtime, minified, without colour and with at most 20 messages.
+/// No source map or metafile is asked for, and esbuild writes neither unless asked (its
+/// `--sourcemap` takes no `false` value).
 #[cfg(any(test, feature = "enforcement-fixture"))]
 const BUNDLER_ARGUMENTS: &[&str] = &[
     "/input/src/main.tsx",
@@ -79,7 +80,6 @@ const BUNDLER_ARGUMENTS: &[&str] = &[
     "--platform=browser",
     "--jsx=automatic",
     "--minify",
-    "--sourcemap=false",
     "--color=false",
     "--log-limit=20",
 ];
