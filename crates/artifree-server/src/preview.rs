@@ -60,6 +60,14 @@ pub enum PreviewTarget {
     Build(ProfileName),
 }
 
+impl PreviewTarget {
+    /// The first path segment of the target's links on the content origin.
+    #[must_use]
+    pub fn route(&self) -> &'static str {
+        Route::of(self).segment()
+    }
+}
+
 /// A newly issued preview link.
 #[derive(Debug)]
 pub struct IssuedTicket {
@@ -102,9 +110,9 @@ struct Ticket {
     /// The document revision: the one whose files this ticket serves. A
     /// runtime view keeps it for its whole life (decision 0054, rule 5).
     revision: SourceRevision,
-    /// The profile whose build of `revision` a build ticket serves; `None`
-    /// for a ticket that serves the revision's own files.
-    build: Option<ProfileName>,
+    /// What of `revision` the ticket serves: its own files, or its build of a
+    /// profile.
+    target: PreviewTarget,
     expires: Instant,
     runtime: Option<RuntimeTicket>,
 }
@@ -372,7 +380,9 @@ impl PreviewTickets {
         }
     }
 
-    /// Issues a ticket for the revision's own files, or returns `None` when
+    /// Issues a ticket for `target` of `revision`: its own files, or its build
+    /// of a profile (decision 0058 rule 14). Both kinds live in this registry
+    /// under the same bound and are revoked alike. Returns `None` when
     /// randomness is unavailable, the registry is full of unexpired tickets,
     /// or its lock was poisoned.
     pub fn issue(
@@ -381,32 +391,7 @@ impl PreviewTickets {
         token_id: Option<TokenId>,
         artifact: ArtifactId,
         revision: SourceRevision,
-    ) -> Option<IssuedTicket> {
-        self.insert(actor, token_id, artifact, revision, None)
-    }
-
-    /// Issues a build ticket, which serves only the build of `profile` for
-    /// `revision` (decision 0058 rule 14). It lives in the same registry as a
-    /// source ticket, under the same bound, and is revoked as one is. `None`
-    /// as for [`Self::issue`].
-    pub fn issue_build(
-        &self,
-        actor: ActorId,
-        token_id: Option<TokenId>,
-        artifact: ArtifactId,
-        revision: SourceRevision,
-        profile: ProfileName,
-    ) -> Option<IssuedTicket> {
-        self.insert(actor, token_id, artifact, revision, Some(profile))
-    }
-
-    fn insert(
-        &self,
-        actor: ActorId,
-        token_id: Option<TokenId>,
-        artifact: ArtifactId,
-        revision: SourceRevision,
-        build: Option<ProfileName>,
+        target: PreviewTarget,
     ) -> Option<IssuedTicket> {
         let secret = random_secret()?;
         // Compute every expiry before taking the lock, so an unrepresentable
@@ -430,7 +415,7 @@ impl PreviewTickets {
                 token_id,
                 artifact,
                 revision,
-                build,
+                target,
                 expires,
                 runtime: None,
             },
@@ -554,7 +539,7 @@ impl PreviewTickets {
                     token_id,
                     artifact,
                     revision,
-                    build: None,
+                    target: PreviewTarget::Source,
                     expires,
                     runtime: Some(RuntimeTicket {
                         view_id,
@@ -991,68 +976,68 @@ async fn proxy_inspection_content(
 }
 
 async fn redirect_to_directory(Path(ticket): Path<String>) -> Response {
-    directory("p", &ticket)
+    directory(Route::Source, &ticket)
 }
 
 async fn redirect_to_build_directory(Path(ticket): Path<String>) -> Response {
-    directory("b", &ticket)
+    directory(Route::Build, &ticket)
+}
+
+/// Which kind of ticket a route serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    /// `/p/` and `/r/`: a revision's own files.
+    Source,
+    /// `/b/`: a revision's build.
+    Build,
+}
+
+impl Route {
+    fn of(target: &PreviewTarget) -> Self {
+        match target {
+            PreviewTarget::Source => Self::Source,
+            PreviewTarget::Build(_) => Self::Build,
+        }
+    }
+
+    fn segment(self) -> &'static str {
+        match self {
+            Self::Source => "p",
+            Self::Build => "b",
+        }
+    }
 }
 
 /// Redirects a ticket without its trailing slash to its directory, so that
 /// relative references in the entry document resolve under the ticket.
-fn directory(route: &str, ticket: &str) -> Response {
+fn directory(route: Route, ticket: &str) -> Response {
     if ticket.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        Redirect::permanent(&format!("/{route}/{ticket}/")).into_response()
+        Redirect::permanent(&format!("/{}/{ticket}/", route.segment())).into_response()
     } else {
         plain(StatusCode::NOT_FOUND, "Not found")
     }
 }
 
 async fn serve_build_entry(State(state): State<AppState>, Path(ticket): Path<String>) -> Response {
-    serve_build(&state, &ticket, Some(PackagePath::entry())).await
+    serve(&state, Route::Build, &ticket, Some(PackagePath::entry())).await
 }
 
 async fn serve_build_file(
     State(state): State<AppState>,
     Path((ticket, path)): Path<(String, String)>,
 ) -> Response {
-    serve_build(&state, &ticket, path.parse().ok()).await
-}
-
-/// Serves one file of the build a build ticket names, under the same headers
-/// as a revision's files. A source ticket serves nothing here.
-async fn serve_build(state: &AppState, secret: &str, path: Option<PackagePath>) -> Response {
-    let (Some(ticket), Some(path)) = (state.previews().resolve(secret), path) else {
-        return plain(StatusCode::NOT_FOUND, "Not found");
-    };
-    let Ticket {
-        actor,
-        artifact,
-        revision,
-        build: Some(profile),
-        ..
-    } = ticket
-    else {
-        return plain(StatusCode::NOT_FOUND, "Not found");
-    };
-    let media_type = path.media_type();
-    let result = state
-        .run(move |artifacts| {
-            artifacts.read_build_file(&actor, &artifact, revision, &profile, &path)
-        })
-        .await;
-    file_response(state, media_type, result)
+    serve(&state, Route::Build, &ticket, path.parse().ok()).await
 }
 
 async fn serve_entry(State(state): State<AppState>, Path(ticket): Path<String>) -> Response {
-    serve(&state, &ticket, Some(PackagePath::entry())).await
+    serve(&state, Route::Source, &ticket, Some(PackagePath::entry())).await
 }
 
 async fn serve_file(
     State(state): State<AppState>,
     Path((ticket, path)): Path<(String, String)>,
 ) -> Response {
-    serve(&state, &ticket, path.parse().ok()).await
+    serve(&state, Route::Source, &ticket, path.parse().ok()).await
 }
 
 /// Runtime documents opt in at the start of their head. The bootstrap is
@@ -1120,24 +1105,36 @@ async fn serve_runtime_entry(
     }
 }
 
-async fn serve(state: &AppState, secret: &str, path: Option<PackagePath>) -> Response {
+/// Serves one file of what a ticket names, when the ticket is of the route's
+/// kind: a source ticket serves nothing under `/b/`, and a build ticket
+/// nothing under `/p/` or `/r/`.
+async fn serve(
+    state: &AppState,
+    route: Route,
+    secret: &str,
+    path: Option<PackagePath>,
+) -> Response {
     let (Some(ticket), Some(path)) = (state.previews().resolve(secret), path) else {
         return plain(StatusCode::NOT_FOUND, "Not found");
     };
+    if Route::of(&ticket.target) != route {
+        return plain(StatusCode::NOT_FOUND, "Not found");
+    }
     let Ticket {
         actor,
         artifact,
         revision,
-        build: None,
+        target,
         ..
-    } = ticket
-    else {
-        // A build ticket serves its build only, under `/b/`.
-        return plain(StatusCode::NOT_FOUND, "Not found");
-    };
+    } = ticket;
     let media_type = path.media_type();
     let result = state
-        .run(move |artifacts| artifacts.read_file(&actor, &artifact, revision, &path))
+        .run(move |artifacts| match &target {
+            PreviewTarget::Source => artifacts.read_file(&actor, &artifact, revision, &path),
+            PreviewTarget::Build(profile) => {
+                artifacts.read_build_file(&actor, &artifact, revision, profile, &path)
+            }
+        })
         .await;
     file_response(state, media_type, result)
 }
@@ -1255,7 +1252,9 @@ fn plain(status: StatusCode, message: &'static str) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{PreviewTickets, RuntimeIssueError, normalize_frame_ancestors, runtime_marker};
+    use super::{
+        PreviewTarget, PreviewTickets, RuntimeIssueError, normalize_frame_ancestors, runtime_marker,
+    };
     use artifree_domain::SourceRevision;
     use artifree_domain::identity::{ActorId, ArtifactId};
     use std::time::Duration;
@@ -1676,7 +1675,13 @@ mod tests {
         let artifact = ArtifactId::from_random([1; 16]);
         let tickets = PreviewTickets::new(Duration::from_secs(60));
         let issue = |actor: &ActorId| {
-            tickets.issue(actor.clone(), None, artifact.clone(), SourceRevision(1))
+            tickets.issue(
+                actor.clone(),
+                None,
+                artifact.clone(),
+                SourceRevision(1),
+                PreviewTarget::Source,
+            )
         };
         for _ in 0..super::MAX_LIVE_TICKETS {
             assert!(issue(&alice).is_some());

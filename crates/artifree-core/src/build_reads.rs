@@ -14,9 +14,10 @@ use artifree_domain::job::{BuildDiagnostic, JobFailure, JobId, JobState, Profile
 use artifree_domain::package::PackagePath;
 use artifree_ports::artifact_store::ArtifactStore;
 use artifree_ports::build_store::{BuildRecord, BuildSnapshot, BuildStore};
-use artifree_ports::job_store::{JobStore, JobStoreError};
+use artifree_ports::job_store::JobStore;
 
 use crate::artifacts::{ArtifactError, ArtifactService, Missing};
+use crate::jobs::job_error;
 
 /// Where the head revision's build stands (decision 0058 rule 16).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,9 +90,10 @@ impl<S: ArtifactStore + JobStore + BuildStore> ArtifactService<S> {
     ///
     /// # Errors
     ///
-    /// [`ArtifactError::NotFound`] for an artifact that is not readable, and
-    /// with [`Missing::File`] for a file the build does not hold or a build
-    /// that no longer exists; or [`ArtifactError::Unavailable`].
+    /// [`ArtifactError::NotFound`] for an artifact that is not readable or a
+    /// revision it does not have, and with [`Missing::File`] for a file the
+    /// build does not hold or a build that no longer exists; or
+    /// [`ArtifactError::Unavailable`].
     pub fn read_build_file(
         &self,
         actor: &ActorId,
@@ -100,7 +102,10 @@ impl<S: ArtifactStore + JobStore + BuildStore> ArtifactService<S> {
         profile: &ProfileName,
         path: &PackagePath,
     ) -> Result<Vec<u8>, ArtifactError> {
-        self.authorized(actor, id)?;
+        let record = self.authorized(actor, id)?;
+        if revision.0 == 0 || revision > record.current_revision {
+            return Err(ArtifactError::NotFound(Missing::Revision));
+        }
         self.store
             .build_file(id, revision, profile, path)
             .map_err(store_error)?
@@ -108,8 +113,10 @@ impl<S: ArtifactStore + JobStore + BuildStore> ArtifactService<S> {
     }
 
     /// The latest build of an artifact for `profile` and where its head
-    /// revision's build stands (decision 0058 rules 15 and 16), read in one
-    /// snapshot of the store.
+    /// revision's build stands (decision 0058 rules 15 and 16). The head, the
+    /// builds and the jobs are read in one snapshot of the store, so a
+    /// revision committed meanwhile cannot make the latest build newer than
+    /// the head.
     ///
     /// # Errors
     ///
@@ -121,17 +128,17 @@ impl<S: ArtifactStore + JobStore + BuildStore> ArtifactService<S> {
         id: &ArtifactId,
         profile: &ProfileName,
     ) -> Result<BuildStatus, ArtifactError> {
-        let head = self.authorized(actor, id)?.current_revision;
+        self.authorized(actor, id)?;
         // The artifact can move to the trash between the two reads; it is
         // then as missing as it is to the next request.
         let snapshot = self
             .store
-            .build_snapshot(id, head, profile)
+            .build_snapshot(id, profile)
             .map_err(store_error)?
             .ok_or(ArtifactError::NotFound(Missing::Artifact))?;
         Ok(BuildStatus {
-            head,
-            head_build: head_build(head, &snapshot)?,
+            head: snapshot.head,
+            head_build: head_build(&snapshot)?,
             latest: snapshot.latest,
         })
     }
@@ -140,11 +147,11 @@ impl<S: ArtifactStore + JobStore + BuildStore> ArtifactService<S> {
 /// Rule 16 on one snapshot. The latest build has the highest revision, and
 /// no revision is newer than the head, so the head has a build exactly when
 /// the latest build is the head's.
-fn head_build(head: SourceRevision, snapshot: &BuildSnapshot) -> Result<HeadBuild, ArtifactError> {
+fn head_build(snapshot: &BuildSnapshot) -> Result<HeadBuild, ArtifactError> {
     if snapshot
         .latest
         .as_ref()
-        .is_some_and(|build| build.revision == head)
+        .is_some_and(|build| build.revision == snapshot.head)
     {
         return Ok(HeadBuild::Built);
     }
@@ -166,9 +173,7 @@ fn head_build(head: SourceRevision, snapshot: &BuildSnapshot) -> Result<HeadBuil
     })
 }
 
-fn store_error(error: JobStoreError) -> ArtifactError {
-    match error {
-        JobStoreError::Unavailable(reason) => ArtifactError::Unavailable(reason),
-        other => ArtifactError::Unavailable(other.to_string()),
-    }
+/// The store's errors of these reads, which take no request key or lease.
+fn store_error(error: artifree_ports::job_store::JobStoreError) -> ArtifactError {
+    job_error(error, Missing::Artifact)
 }

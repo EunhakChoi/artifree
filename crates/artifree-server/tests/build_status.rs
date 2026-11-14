@@ -448,5 +448,18 @@ fn a_build_preview_needs_a_build_of_the_revision() -> TestResult {
         ),
         Err(ArtifactError::NotFound(Missing::File))
     );
+    for revision in [0, 3] {
+        assert_eq!(
+            fixture.service.read_build_file(
+                &fixture.owner,
+                &fixture.artifact,
+                SourceRevision(revision),
+                &fixture.profile,
+                &parsed("app.js")?
+            ),
+            Err(ArtifactError::NotFound(Missing::Revision)),
+            "a build file of revision {revision}"
+        );
+    }
     Ok(())
 }

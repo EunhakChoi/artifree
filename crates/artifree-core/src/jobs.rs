@@ -294,7 +294,7 @@ impl<S: ArtifactStore + JobStore> ArtifactService<S> {
 }
 
 /// Maps a job store failure; `missing` is what a `NotFound` names.
-fn job_error(error: JobStoreError, missing: Missing) -> ArtifactError {
+pub(crate) fn job_error(error: JobStoreError, missing: Missing) -> ArtifactError {
     match error {
         JobStoreError::NotFound => ArtifactError::NotFound(missing),
         JobStoreError::RequestKeyReused => ArtifactError::RequestKeyReused,

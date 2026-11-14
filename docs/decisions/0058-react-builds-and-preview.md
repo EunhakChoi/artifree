@@ -385,8 +385,9 @@ wire) are implemented, R03cd to R03f are not**. Roadmap: R03.
 >   media type of the path, `nosniff` and `no-store`. A build ticket serves
 >   nothing under `/p/` or `/r/`, and a source ticket serves nothing under
 >   `/b/`. One file is read per request, not the whole build.
-> - The head status is read from one store snapshot. It holds the latest
->   build (rule 15), the newest `run_profile` job of the profile for the head
+> - The head status is read from one store snapshot, so a revision
+>   committed meanwhile cannot make the latest build newer than the head. It
+>   holds the head revision, the latest build (rule 15), the newest `run_profile` job of the profile for the head
 >   revision by enqueue order, and that job's diagnostics. When the latest
 >   build is the head's, the status is built. Otherwise it is:
 >   - `pending` for a queued, retry-scheduled or running job;
@@ -395,6 +396,9 @@ wire) are implemented, R03cd to R03f are not**. Roadmap: R03.
 >     without a build.
 >     The diagnostics are empty when a later failure of the profile deleted
 >     them, as the R03ca note says.
+> - Only the newest job for the head sets the status, as rule 16 says: an
+>   older job for the head that is still running does not, even when the
+>   newest was cancelled.
 > - The read rule of 13: the status, and with it the diagnostics, is given
 >   only to a caller who may read the artifact and so its head revision, the
 >   job's. Every other caller, and every caller while the artifact is in the

@@ -611,7 +611,6 @@ impl BuildStore for SqliteStore {
     fn build_snapshot(
         &self,
         artifact: &ArtifactId,
-        revision: SourceRevision,
         profile: &ProfileName,
     ) -> Result<Option<BuildSnapshot>, JobStoreError> {
         let mut connection = self.connect()?;
@@ -619,12 +618,21 @@ impl BuildStore for SqliteStore {
         if !artifact_in_place(&snapshot, artifact)? {
             return Ok(None);
         }
-        let newest_job = newest_job(&snapshot, artifact, revision, profile)?;
+        let head: i64 = snapshot
+            .query_row(
+                "SELECT current_revision FROM artifacts WHERE id = ?1",
+                [artifact.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(unavailable)?;
+        let head = stored_revision(head)?;
+        let newest_job = newest_job(&snapshot, artifact, head, profile)?;
         let diagnostics = match &newest_job {
             Some(job) => read_diagnostics(&snapshot, &job.id)?,
             None => Vec::new(),
         };
         Ok(Some(BuildSnapshot {
+            head,
             latest: latest(&snapshot, artifact, profile)?,
             newest_job,
             diagnostics,

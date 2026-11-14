@@ -825,15 +825,10 @@ pub(crate) async fn preview(
         })
         .await?;
     let owner = actor.clone();
-    let (route, ticket) = match target {
-        PreviewTarget::Source => ("p", state.previews().issue(actor, token_id, id, revision)),
-        PreviewTarget::Build(profile) => (
-            "b",
-            state
-                .previews()
-                .issue_build(actor, token_id, id, revision, profile),
-        ),
-    };
+    let route = target.route();
+    let ticket = state
+        .previews()
+        .issue(actor, token_id, id, revision, target);
     let ticket = ticket.ok_or_else(|| {
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,

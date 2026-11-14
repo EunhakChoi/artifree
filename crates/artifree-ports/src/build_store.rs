@@ -60,10 +60,12 @@ pub enum Publication {
 /// inputs of the head status (decision 0058 rules 15 and 16).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildSnapshot {
+    /// The artifact's head revision.
+    pub head: SourceRevision,
     /// The artifact's latest build for the profile: its build with the
     /// highest revision, of any revision (rule 15).
     pub latest: Option<BuildRecord>,
-    /// The newest `run_profile` job of the profile for the revision, by
+    /// The newest `run_profile` job of the profile for the head revision, by
     /// enqueue order, in any state.
     pub newest_job: Option<JobRecord>,
     /// The diagnostics that job keeps, in their order.
@@ -192,10 +194,10 @@ pub trait BuildStore {
     /// [`JobStoreError::Unavailable`].
     fn diagnostics(&self, job: &JobId) -> Result<Vec<BuildDiagnostic>, JobStoreError>;
 
-    /// The latest build of the artifact for `profile`, the newest job of
-    /// `profile` for `revision` and that job's diagnostics, read in one
-    /// snapshot so that they agree (decision 0058 rule 16). `None` when the
-    /// artifact is in the trash or purged.
+    /// The head revision of the artifact, its latest build for `profile`, the
+    /// newest job of `profile` for the head and that job's diagnostics, read
+    /// in one snapshot so that they agree (decision 0058 rule 16). `None`
+    /// when the artifact is in the trash or purged.
     ///
     /// # Errors
     ///
@@ -203,7 +205,6 @@ pub trait BuildStore {
     fn build_snapshot(
         &self,
         artifact: &ArtifactId,
-        revision: SourceRevision,
         profile: &ProfileName,
     ) -> Result<Option<BuildSnapshot>, JobStoreError>;
 }

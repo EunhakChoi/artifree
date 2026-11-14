@@ -795,12 +795,9 @@ impl Fixture {
             .job)
     }
 
-    fn snapshot(&self, revision: u64) -> Result<Option<BuildSnapshot>, JobStoreError> {
-        self.store.build_snapshot(
-            &self.created.artifact.id,
-            SourceRevision(revision),
-            &profile(),
-        )
+    fn snapshot(&self) -> Result<Option<BuildSnapshot>, JobStoreError> {
+        self.store
+            .build_snapshot(&self.created.artifact.id, &profile())
     }
 
     fn file(&self, revision: u64, path: &str) -> Result<Option<Vec<u8>>, JobStoreError> {
@@ -813,8 +810,8 @@ impl Fixture {
     }
 }
 
-/// Rules 15 and 16 (slice R03cc): one snapshot gives the latest build, the
-/// newest job of the profile for the revision by enqueue order, and the
+/// Rules 15 and 16 (slice R03cc): one snapshot gives the head revision, the
+/// latest build, the newest job of the profile for the head by enqueue order, and the
 /// diagnostics that job keeps. A job of another revision or another profile is
 /// not the revision's.
 #[test]
@@ -832,7 +829,8 @@ fn the_snapshot_reads_the_newest_job_of_the_revision_by_enqueue_order() -> TestR
         at(210),
     )?;
 
-    let snapshot = fixture.snapshot(2)?.ok_or("the artifact is in place")?;
+    let snapshot = fixture.snapshot()?.ok_or("the artifact is in place")?;
+    assert_eq!(snapshot.head, SourceRevision(2));
     assert_eq!(snapshot.latest, Some(build.clone()));
     assert_eq!(snapshot.newest_job.map(|job| job.id), Some(older.job.id));
     assert_eq!(snapshot.diagnostics, kept);
@@ -840,7 +838,7 @@ fn the_snapshot_reads_the_newest_job_of_the_revision_by_enqueue_order() -> TestR
     let newer = fixture.enqueued(2, &profile(), "newer", 300)?;
     fixture.enqueued(1, &profile(), "other-revision", 400)?;
     fixture.enqueued(2, &parsed("fixture"), "other-profile", 500)?;
-    let snapshot = fixture.snapshot(2)?.ok_or("the artifact is in place")?;
+    let snapshot = fixture.snapshot()?.ok_or("the artifact is in place")?;
     assert_eq!(snapshot.latest, Some(build));
     assert_eq!(
         snapshot.newest_job.map(|job| (job.id, job.state)),
@@ -849,7 +847,7 @@ fn the_snapshot_reads_the_newest_job_of_the_revision_by_enqueue_order() -> TestR
     assert_eq!(snapshot.diagnostics, Vec::new());
 
     fixture.trash(1, true)?;
-    assert_eq!(fixture.snapshot(2)?, None, "the trash serves no snapshot");
+    assert_eq!(fixture.snapshot()?, None, "the trash serves no snapshot");
     Ok(())
 }
 

@@ -296,7 +296,9 @@ impl AppState {
     /// enforcement job calls it, to preview a build the real worker
     /// published: slice R03d puts the build target on the API, MCP and the
     /// CLI, and until then a build without `enforcement-fixture` has no
-    /// caller that issues one.
+    /// caller that issues one. It is a trusted test call, not a request: it
+    /// takes the actor's current state generation, so the operation's check
+    /// for a user disabled while a request ran has nothing to catch here.
     ///
     /// # Errors
     ///
