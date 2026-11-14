@@ -7,7 +7,7 @@ use std::env;
 use std::error::Error;
 use std::fs;
 use std::io;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -121,6 +121,23 @@ fn scripted_clock(base: Instant, offsets_secs: &'static [u64]) -> impl FnMut() -
     }
 }
 
+/// Clears the group and other write bits of `path` and of everything below it, so that a tree
+/// made under any umask passes the tool root's protection check. Links are left alone.
+fn seal(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    let mode = metadata.permissions().mode() & !0o022;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path)? {
+            seal(&entry?.path())?;
+        }
+    }
+    Ok(())
+}
+
 /// A host laid out like the inputs that `admit_with` reads.
 ///
 /// Every facility before the sole-occupant check passes. The group holds the provider and
@@ -132,6 +149,10 @@ struct FakeHost {
     core_pattern: PathBuf,
     cgroup_mount: PathBuf,
     tool_root: PathBuf,
+    /// The test's own account, which owns the tool root.
+    tool_owner: u32,
+    /// The scratch directory: the last ancestor of the tool root that admission checks.
+    tool_top: PathBuf,
 }
 
 impl FakeHost {
@@ -156,12 +177,16 @@ impl FakeHost {
         write_with_mode(&tool_root.join(launcher::LAUNCHER), 0o755)?;
         write_with_mode(&tool_root.join(launcher::FIXTURE_FILE), 0o755)?;
         fs::write(tool_root.join("MANIFEST"), FAKE_MANIFEST)?;
+        seal(scratch.path())?;
+        let tool_owner = fs::metadata(&tool_root)?.uid();
         Ok(Self {
             proc_self,
             osrelease,
             core_pattern,
             cgroup_mount,
             tool_root,
+            tool_owner,
+            tool_top: scratch.path().to_path_buf(),
         })
     }
 
@@ -173,6 +198,8 @@ impl FakeHost {
             core_pattern: &self.core_pattern,
             cgroup_mount: &self.cgroup_mount,
             tool_root: &self.tool_root,
+            tool_owner: self.tool_owner,
+            tool_top: &self.tool_top,
         }
     }
 

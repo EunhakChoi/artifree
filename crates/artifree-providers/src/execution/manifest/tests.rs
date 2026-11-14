@@ -7,7 +7,7 @@ use std::env;
 use std::error::Error;
 use std::fs;
 use std::io;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -15,7 +15,7 @@ use std::thread;
 
 use super::super::admission::{AdmissionRoots, admit_with};
 use super::super::{AdmissionRefusal, InspectionProfile, launcher};
-use super::{MANIFEST_FILE, verify};
+use super::{MANIFEST_FILE, ManifestIdentity, ancestor_protected, entry_protected, verify};
 
 /// The SHA-256 of `abc`, computed with `sha256sum` outside the code under test.
 const DIGEST_ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
@@ -82,6 +82,32 @@ impl Drop for Scratch {
     }
 }
 
+/// Clears the group and other write bits of `path` and of everything below it, so that a tree
+/// made under any umask passes the tool root's protection check. Links are left alone.
+fn seal(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    let mode = metadata.permissions().mode() & !0o022;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path)? {
+            seal(&entry?.path())?;
+        }
+    }
+    Ok(())
+}
+
+/// Seals the scratch tree that holds `root` and verifies `root` with its own account as the
+/// tool owner, as a production root is verified with root's.
+fn verify_own(root: &Path) -> io::Result<Result<ManifestIdentity, AdmissionRefusal>> {
+    let top = root.parent().unwrap_or(root);
+    seal(top)?;
+    let owner = fs::metadata(root)?.uid();
+    Ok(verify(root, owner, top))
+}
+
 /// The manifest of `BASE_FILES`: one line per file, with the digest and length of its contents.
 fn base_manifest() -> String {
     format!("{DIGEST_ABC} 3 bin/a\n{DIGEST_EMPTY} 0 bin/b\n{DIGEST_Z} 1 lib/x/y\n")
@@ -130,7 +156,7 @@ fn base_root(scratch: &Scratch) -> io::Result<PathBuf> {
 fn accepts_a_matching_root() -> Result<(), Box<dyn Error>> {
     let scratch = Scratch::new()?;
     let root = base_root(&scratch)?;
-    let identity = verify(&root)?;
+    let identity = verify_own(&root)??;
     assert_eq!(
         identity.sha256(),
         BASE_MANIFEST_SHA256,
@@ -145,7 +171,7 @@ fn refuses_a_changed_byte_of_the_same_length() -> Result<(), Box<dyn Error>> {
     let root = base_root(&scratch)?;
     write_files(&root, &[("bin/a", b"abd")])?;
     assert_eq!(
-        verify(&root).map(|_| ()),
+        verify_own(&root)?.map(|_| ()),
         Err(AdmissionRefusal::ToolRootMismatch),
         "a file of the listed length with other contents must differ by digest"
     );
@@ -158,7 +184,7 @@ fn refuses_a_changed_length() -> Result<(), Box<dyn Error>> {
     let root = base_root(&scratch)?;
     write_files(&root, &[("bin/a", b"abcd")])?;
     assert_eq!(
-        verify(&root).map(|_| ()),
+        verify_own(&root)?.map(|_| ()),
         Err(AdmissionRefusal::ToolRootMismatch),
         "a file longer than its listed length must be refused"
     );
@@ -181,7 +207,7 @@ fn refuses_an_extra_file_a_missing_file_and_an_unlisted_symlink() -> Result<(), 
         let root = base_root(&scratch)?;
         edit(&root)?;
         assert_eq!(
-            verify(&root).map(|_| ()),
+            verify_own(&root)?.map(|_| ()),
             Err(AdmissionRefusal::ToolRootMismatch),
             "{description} must be refused"
         );
@@ -206,7 +232,7 @@ fn refuses_a_listed_symlink() -> Result<(), Box<dyn Error>> {
         fs::remove_file(root.join("bin/b"))?;
         symlink("a", root.join("bin/b"))?;
         assert_eq!(
-            verify(&root).map(|_| ()),
+            verify_own(&root)?.map(|_| ()),
             Err(AdmissionRefusal::ToolRootMismatch),
             "{description} must be refused"
         );
@@ -298,7 +324,7 @@ fn refuses_a_missing_or_malformed_manifest() -> Result<(), Box<dyn Error>> {
         let scratch = Scratch::new()?;
         let root = make_root(&scratch, BASE_FILES, manifest.as_deref())?;
         assert_eq!(
-            verify(&root).map(|_| ()),
+            verify_own(&root)?.map(|_| ()),
             Err(AdmissionRefusal::MissingToolManifest),
             "{description} must be refused as a missing or malformed manifest"
         );
@@ -338,7 +364,7 @@ fn walk_bound_on_entries() -> Result<(), Box<dyn Error>> {
         let scratch = Scratch::new()?;
         let root = tree_of_empty_files(&scratch, count)?;
         assert_eq!(
-            verify(&root).map(|_| ()),
+            verify_own(&root)?.map(|_| ()),
             expected,
             "{count} files under d/, with MANIFEST and d/ itself"
         );
@@ -361,7 +387,7 @@ fn walk_bound_on_depth() -> Result<(), Box<dyn Error>> {
         let scratch = Scratch::new()?;
         let manifest = format!("{DIGEST_EMPTY} 0 {relative}\n");
         let root = make_root(&scratch, &[(relative, b"")], Some(manifest.as_bytes()))?;
-        assert_eq!(verify(&root).map(|_| ()), expected, "{description}");
+        assert_eq!(verify_own(&root)?.map(|_| ()), expected, "{description}");
     }
     Ok(())
 }
@@ -383,6 +409,8 @@ struct Host {
     core_pattern: PathBuf,
     cgroup_mount: PathBuf,
     tool_root: PathBuf,
+    tool_owner: u32,
+    tool_top: PathBuf,
 }
 
 impl Host {
@@ -394,6 +422,8 @@ impl Host {
             core_pattern: &self.core_pattern,
             cgroup_mount: &self.cgroup_mount,
             tool_root: &self.tool_root,
+            tool_owner: self.tool_owner,
+            tool_top: &self.tool_top,
         }
     }
 }
@@ -426,12 +456,16 @@ fn make_host(scratch: &Scratch, edit: Edit, manifest: Option<Vec<u8>>) -> io::Re
     if let Some(bytes) = manifest {
         fs::write(tool_root.join(MANIFEST_FILE), bytes)?;
     }
+    seal(scratch.path())?;
+    let tool_owner = fs::metadata(&tool_root)?.uid();
     Ok(Host {
         proc_self,
         osrelease,
         core_pattern,
         cgroup_mount,
         tool_root,
+        tool_owner,
+        tool_top: scratch.path().to_path_buf(),
     })
 }
 
@@ -485,5 +519,122 @@ fn manifest_comes_after_the_named_files_and_before_delegation() -> Result<(), Bo
         .map(|_| ());
         assert_eq!(outcome, Err(expected), "{description}");
     }
+    Ok(())
+}
+
+#[test]
+fn only_an_entry_of_the_owner_without_shared_write_or_set_id_is_protected() {
+    for mode in [0o100_755, 0o100_644, 0o040_755, 0o040_700, 0o100_444] {
+        assert!(entry_protected(7, mode, 7), "{mode:o}");
+    }
+    for mode in [
+        0o100_775, 0o100_757, 0o040_777, 0o104_755, 0o102_755, 0o042_755,
+    ] {
+        assert!(!entry_protected(7, mode, 7), "{mode:o}");
+    }
+    assert!(
+        !entry_protected(0, 0o100_755, 7),
+        "an entry of root in a root owned by 7"
+    );
+    assert!(
+        !entry_protected(8, 0o100_755, 7),
+        "an entry of another account"
+    );
+}
+
+#[test]
+fn an_ancestor_may_belong_to_root_and_be_shared_only_when_sticky() {
+    for (uid, mode) in [
+        (0, 0o040_755),
+        (7, 0o040_755),
+        (0, 0o041_777),
+        (7, 0o041_770),
+    ] {
+        assert!(ancestor_protected(uid, mode, 7), "{uid} {mode:o}");
+    }
+    for (uid, mode) in [
+        (8, 0o040_755),
+        (0, 0o040_777),
+        (0, 0o040_775),
+        (7, 0o040_757),
+        (0, 0o044_755),
+        (0, 0o042_755),
+    ] {
+        assert!(!ancestor_protected(uid, mode, 7), "{uid} {mode:o}");
+    }
+}
+
+#[test]
+fn refuses_a_root_whose_entry_others_could_change() -> Result<(), Box<dyn Error>> {
+    for (relative, mode) in [
+        ("", 0o775),
+        ("bin", 0o757),
+        ("bin/a", 0o664),
+        ("bin/a", 0o4755),
+        ("lib/x", 0o2755),
+        (MANIFEST_FILE, 0o646),
+    ] {
+        let scratch = Scratch::new()?;
+        let root = base_root(&scratch)?;
+        assert!(
+            verify_own(&root)?.is_ok(),
+            "the sealed base root is accepted"
+        );
+        fs::set_permissions(root.join(relative), fs::Permissions::from_mode(mode))?;
+        let owner = fs::metadata(&root)?.uid();
+        assert_eq!(
+            verify(&root, owner, scratch.path()).map(|_| ()),
+            Err(AdmissionRefusal::ToolRootUnprotected),
+            "{relative:?} with mode {mode:o}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn refuses_a_root_of_another_owner_or_under_a_shared_ancestor() -> Result<(), Box<dyn Error>> {
+    let scratch = Scratch::new()?;
+    let root = base_root(&scratch)?;
+    assert!(
+        verify_own(&root)?.is_ok(),
+        "the sealed base root is accepted"
+    );
+    let owner = fs::metadata(&root)?.uid();
+    assert_eq!(
+        verify(&root, owner ^ 1, scratch.path()).map(|_| ()),
+        Err(AdmissionRefusal::ToolRootUnprotected),
+        "a root that another account owns"
+    );
+    // The scratch directory is the root's parent: world-writable, it is refused, unless sticky.
+    fs::set_permissions(scratch.path(), fs::Permissions::from_mode(0o777))?;
+    assert_eq!(
+        verify(&root, owner, scratch.path()).map(|_| ()),
+        Err(AdmissionRefusal::ToolRootUnprotected),
+        "a root under a world-writable parent"
+    );
+    fs::set_permissions(scratch.path(), fs::Permissions::from_mode(0o1777))?;
+    assert!(
+        verify(&root, owner, scratch.path()).is_ok(),
+        "a root under a sticky world-writable parent is accepted"
+    );
+    fs::set_permissions(scratch.path(), fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
+#[test]
+fn refuses_a_top_that_is_no_ancestor_of_the_root() -> Result<(), Box<dyn Error>> {
+    let scratch = Scratch::new()?;
+    let root = base_root(&scratch)?;
+    assert!(
+        verify_own(&root)?.is_ok(),
+        "the sealed base root is accepted"
+    );
+    let owner = fs::metadata(&root)?.uid();
+    let elsewhere = scratch.dir("elsewhere")?;
+    assert_eq!(
+        verify(&root, owner, &elsewhere).map(|_| ()),
+        Err(AdmissionRefusal::ToolRootUnprotected),
+        "a top that is no ancestor never ends the ancestor check early"
+    );
     Ok(())
 }

@@ -45,6 +45,12 @@ pub(super) struct AdmissionRoots<'a> {
     pub(super) cgroup_mount: &'a Path,
     /// The tool root holding the launcher and the fixture.
     pub(super) tool_root: &'a Path,
+    /// The account that must own the tool root and its entries: root (0) in production. A test
+    /// names its own account, since it cannot make a root-owned tree.
+    pub(super) tool_owner: u32,
+    /// The last ancestor of the tool root whose owner and modes are checked: `/` in production.
+    /// A test names its scratch directory, since the host's own directories are not its to set.
+    pub(super) tool_top: &'a Path,
 }
 
 /// The production roots: constants only, so no caller-supplied path reaches the checks.
@@ -55,6 +61,8 @@ pub(super) fn production_roots() -> AdmissionRoots<'static> {
         core_pattern: Path::new(super::CORE_PATTERN),
         cgroup_mount: Path::new("/sys/fs/cgroup"),
         tool_root: Path::new(launcher::TOOL_ROOT),
+        tool_owner: 0,
+        tool_top: Path::new("/"),
     }
 }
 
@@ -128,7 +136,7 @@ pub(super) fn admit_with(
     launcher::check_tool_files(roots.tool_root)?;
     // Facility 4, after the two named files so that a missing one keeps the refusal that names
     // it (0056 amendment): every file against the manifest.
-    let tool_manifest = manifest::verify(roots.tool_root)?;
+    let tool_manifest = manifest::verify(roots.tool_root, roots.tool_owner, roots.tool_top)?;
     // Facilities 5 and 6 check the delegated group, facility 7 the group holding this process.
     let delegated = delegated_group(&discovered, entered.as_deref()).to_path_buf();
     let delegated = delegated.as_path();
