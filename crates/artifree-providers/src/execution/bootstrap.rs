@@ -1,6 +1,8 @@
-//! The trusted stub and bootstrap of one attempt (decision 0056 rules 3 to 5). Their only entry
-//! point is the test-support program (0056 rule 4); each takes a profile identity (and the stub the
-//! provider's input path) and nothing else, and runs no command it is given.
+//! The trusted stub and bootstrap of one attempt (decision 0056 rules 3 to 5). Their entry
+//! points are the tool root's programs, the test-support program (0056 rule 4) and the server
+//! binary's `execution` subcommands (0057 rule 4), chosen by a closed `EntryProgram`. Each takes a
+//! profile identity (and the stub the provider's input path) and nothing else, and runs no command
+//! it is given.
 //!
 //! The bootstrap's steps run in this order, with the numbers of their step documents: 1, the
 //! identity; 2, the control channel; 3, the leaked descriptors; 4, the scratch in its own mount
@@ -30,6 +32,7 @@ use rustix::process::{Resource, Rlimit};
 use rustix::thread::{CapabilitySet, CapabilitySets};
 use rustix::{io, process, stdio, thread};
 
+use super::launcher::EntryProgram;
 use super::{InspectionProfile, launcher, policy, readiness};
 
 /// The record that starts the launcher; the provider sends it to the stub.
@@ -140,6 +143,23 @@ impl std::error::Error for BootstrapFailure {}
 ///
 /// Returns `UnknownProfile` for an identity other than the fixture profile's, `InputPath` for an input path that is not absolute (checked before the launch record is read), `ControlChannel` when the next byte is not the launch record, and `LauncherNotExecuted` when `exec` returns.
 pub fn run_stub(identity: &str, input: &Path) -> Result<Infallible, BootstrapFailure> {
+    run_stub_for(EntryProgram::Fixture, identity, input)
+}
+
+/// The trusted stub for `program` (0056 rule 3): reads the launch record from descriptor 0 and then replaces itself with the launcher.
+///
+/// The provider passes the staging directory's path, and the stub puts it in the launcher's fixed list as `--ro-bind <path> /input` (the amendment of 2026-11-13, input and output). The path is the provider's, never a request's.
+///
+/// The launcher runs `program`'s bootstrap (decision 0057 rule 4). The stub returns only on failure. The launcher receives the fixed attempt arguments, that one read-only bind and an empty environment, and nothing else the caller passes reaches either.
+///
+/// # Errors
+///
+/// Returns `UnknownProfile` for an identity other than the fixture profile's, `InputPath` for an input path that is not absolute (checked before the launch record is read), `ControlChannel` when the next byte is not the launch record, and `LauncherNotExecuted` when `exec` returns.
+pub fn run_stub_for(
+    program: EntryProgram,
+    identity: &str,
+    input: &Path,
+) -> Result<Infallible, BootstrapFailure> {
     check_identity(identity)?;
     if !input.is_absolute() {
         return Err(BootstrapFailure::InputPath);
@@ -150,7 +170,7 @@ pub fn run_stub(identity: &str, input: &Path) -> Result<Infallible, BootstrapFai
     let root = Path::new(launcher::TOOL_ROOT);
     // `exec` returns only when the launcher did not start. Its error text is not reported; the failure names this step.
     let _ = Command::new(root.join(launcher::LAUNCHER))
-        .args(launcher::attempt_arguments(root, input))
+        .args(launcher::attempt_arguments_for(root, input, program))
         .env_clear()
         .exec();
     Err(BootstrapFailure::LauncherNotExecuted)

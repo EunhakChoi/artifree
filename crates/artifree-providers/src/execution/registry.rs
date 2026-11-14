@@ -480,6 +480,21 @@ impl Registry {
         Ok(())
     }
 
+    /// Whether no record of `identity` is in the registry. Any answer but "no such file" counts as
+    /// present, so a caller that settles on `true` never settles a record that may still exist.
+    #[cfg(feature = "enforcement-fixture")]
+    #[must_use]
+    pub(super) fn record_absent(&self, identity: Identity) -> bool {
+        matches!(
+            rustix::fs::statat(
+                &self.dir,
+                record_name(identity).as_str(),
+                AtFlags::SYMLINK_NOFOLLOW
+            ),
+            Err(Errno::NOENT)
+        )
+    }
+
     /// Removes the record of `identity`, then syncs the directory.
     ///
     /// # Errors

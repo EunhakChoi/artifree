@@ -411,11 +411,12 @@ fn compile(rules: BTreeMap<i64, Vec<SeccompRule>>) -> Result<BpfProgram, PolicyE
 
 /// The SHA-256 of the fixture profile's two programs, the refusal first and then the allowlist.
 /// Each instruction contributes its code (little-endian `u16`), its two jump offsets (one byte
-/// each) and its constant (little-endian `u32`), in program order.
+/// each) and its constant (little-endian `u32`), in program order. Only the launch of the test
+/// build and of the `enforcement-fixture` feature uses it (decision 0057 rule 2).
 ///
 /// # Errors
 /// Returns `PolicyError` when the fixture filters cannot be built.
-#[cfg(test)]
+#[cfg(any(test, feature = "enforcement-fixture"))]
 pub(super) fn policy_sha256() -> Result<String, PolicyError> {
     let programs = fixture_filters()?;
     let mut bytes = Vec::new();

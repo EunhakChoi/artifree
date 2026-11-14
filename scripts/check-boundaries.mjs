@@ -9,6 +9,7 @@ import {
   checkClientImport,
   checkClientManifest,
   checkPanicStrategy,
+  checkReleaseBuilds,
   moduleSpecifiers,
 } from './lib/boundaries.mjs';
 
@@ -22,6 +23,23 @@ const metadata = JSON.parse(
 );
 checkRustPackages(metadata.packages);
 checkPanicStrategy(await readFile(join(root, 'Cargo.toml'), 'utf8'));
+const read = async (path) => ({
+  path,
+  text: await readFile(join(root, path), 'utf8'),
+});
+checkReleaseBuilds({
+  whole: await Promise.all(
+    [
+      'scripts/lib/server-process.mjs',
+      'scripts/package-release.mjs',
+      'scripts/verify-container.mjs',
+      'deploy/container/Dockerfile',
+    ].map(read),
+  ),
+  workflows: await Promise.all(
+    ['.github/workflows/ci.yml', '.github/workflows/release.yml'].map(read),
+  ),
+});
 const inventory = JSON.parse(
   await readFile(
     new URL('../contracts/generated/scaffold-inventory.json', import.meta.url),

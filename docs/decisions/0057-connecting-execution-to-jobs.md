@@ -1,7 +1,7 @@
 # 0057: Connecting the Linux provider to jobs
 
-Date: 2026-11-14. Status: **accepted as a plan; R02ba (the store) is
-implemented; R02bb and R02bc are not**. Roadmap: R02b.
+Date: 2026-11-14. Status: **accepted as a plan; R02ba (the store) and R02bb
+(the worker) are implemented; R02bc is not**. Roadmap: R02b.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider, R02aa to R02ai),
@@ -45,6 +45,39 @@ implemented; R02bb and R02bc are not**. Roadmap: R02b.
 > settled-attempt trash, the empty mismatch count and the before-and-after
 > foreign key comparison each fail their case. 0030 rule 15 and 0042 rule 6 have the notes rule 14
 > asks for. Nothing executes yet: R02bb adds the worker.
+
+> **Note, 2026-11-14 (R02bb).** The worker of rules 2, 4 and 15 to 19 exists.
+> The feature `enforcement-fixture` gates the launch, the lock, the registry,
+> the staging and the collection beside the test build, and the boundary
+> checker refuses a release, container or clean-install build command that
+> names it or `--all-features`. `artifree-server execution
+bootstrap|stub|guardian` refuses with status 2 in a build without it.
+> `artifree-ports` has the `Execution` and `Checkpoint` ports; the core asks
+> for capacity before each claim, settles what reconciliation reports, claims
+> with the attempt identity the capacity drew, reads the pinned revision and
+> checks every file against its listing, then settles and publishes or fails.
+> Choices the rules left open: the provider adapter draws the attempt
+> identity, since the core has no randomness; the test-support program stays
+> in the tool root for admission's namespace check, the probe child and the
+> probe programs, beside the server binary that runs the stub, the bootstrap
+> and the guardian; the registry record stays `artifree-attempt-v1`, and the
+> v2 lines of 0056's registry amendment (database, job and fence) are left to
+> R02bc, which must also say what a v2 reader does with a v1 record; the
+> execution directory's identity is a private `directory-identity` file made
+> at first use; capacity runs the whole admission at every claim, idle polls
+> included; an unsettled row of another machine, namespace or directory that
+> is `cleanup_pending` quarantines the provider, and a `live` one is left to
+> its own worker; a launch refused before the payload ran fails the job as
+> `execution_unavailable`, and one whose verdict or output failed as
+> `internal`, both without retry; a manifest bound to a run takes the tag
+> `artifree-output-manifest-v2` with the seven run lines; a refused capacity
+> reaches stderr with its text, a quarantine's being the operator text, once
+> per run of identical refusals; when the record write fails, the attempt is
+> settled only if the registry shows no record; and a stop during shutdown
+> lets the attempt run to its end (no store operation writes `shutdown` yet).
+> The release-build cases run in the server-binary CI job with default
+> features, since `npm run check` builds with `--all-features`. The
+> enforcement job runs the worker's cases against the real binary and store.
 
 ## Context
 

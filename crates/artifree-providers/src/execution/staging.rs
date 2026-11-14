@@ -128,8 +128,11 @@ impl VerifiedInput {
             remove_tree(&path).ok();
             return Err(InputRefusal::NotStaged);
         }
+        #[cfg(not(test))]
+        drop(listing);
         Ok(StagedInput {
             path,
+            #[cfg(test)]
             listing,
             digest,
             removed: false,
@@ -260,6 +263,7 @@ fn make_owner_writable(directory: &OwnedFd) -> io::Result<()> {
 #[derive(Debug)]
 pub(super) struct StagedInput {
     path: PathBuf,
+    #[cfg(test)]
     listing: InputListing,
     digest: [u8; 32],
     removed: bool,
@@ -273,6 +277,7 @@ impl StagedInput {
     }
 
     /// The listing the staged files were checked against.
+    #[cfg(test)]
     #[must_use]
     pub(super) fn listing(&self) -> &InputListing {
         &self.listing

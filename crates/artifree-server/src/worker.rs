@@ -5,10 +5,14 @@
 //! The worker is trusted in-repository code. It has no network access of its
 //! own and no credential: it reads and writes the database file through the
 //! same store layer as the server, with the same busy timeout and
-//! write-ahead log. It does not sandbox anything, and untrusted execution
-//! (roadmap R02), React builds (R03), and provider sampling (P01) are not
-//! implemented. Two workers, or a worker and a server, may share a data
-//! directory; each transition is one atomic database transaction.
+//! write-ahead log. It does not sandbox anything. Without an execution port it
+//! runs no untrusted code. With one (a Linux build with the
+//! `enforcement-fixture` feature, started with `--execution-dir`) it can run
+//! jobs of the fixture profile of decision 0057, and no other untrusted profile
+//! exists: untrusted execution beyond that fixture (roadmap R02), React builds
+//! (R03), and provider sampling (P01) are not implemented. Two workers, or a
+//! worker and a server, may share a data directory; each transition is one
+//! atomic database transaction.
 //!
 //! The loop is synchronous. A process that wants a graceful stop sets the
 //! shared flag; the worker gives the job it holds back to the queue at its
@@ -19,8 +23,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use artifree_core::jobs::Clock;
-use artifree_core::worker::{self, ClaimEvent, Pace, Step, WorkerConfig};
+use artifree_core::worker::{self, ClaimEvent, Pace, Profiles, Step, WorkerConfig};
 use artifree_domain::job::WorkerId;
+use artifree_ports::execution::Execution;
 use artifree_ports::job_store::{JobRecord, JobStoreError};
 use artifree_providers::storage::{DATABASE_FILE, SqliteStore};
 
@@ -48,6 +53,10 @@ pub struct WorkerOptions {
     /// reading the job's files. It holds a job at a known point so a test can
     /// stop the process there.
     pub hold_file: Option<PathBuf>,
+    /// The `--execution-dir` of decision 0057 rule 18. The command opens it into
+    /// the execution port that [`run`] receives; `None` claims trusted kinds and
+    /// ends unknown-profile jobs.
+    pub execution_dir: Option<PathBuf>,
 }
 
 /// Why the worker returned.
@@ -76,6 +85,19 @@ pub enum WorkerEvent<'a> {
     Released(&'a JobRecord),
     /// The worker lost the lease of a job and wrote nothing.
     LeaseLost(&'a artifree_domain::job::JobId),
+    /// A `run_profile` attempt ended. `detail` is the provider's short word for
+    /// the end. It is diagnostics only: the process prints it on stderr and no
+    /// stdout line carries it (decision 0030 rule 13).
+    Attempt {
+        /// The job whose attempt ended.
+        job: &'a artifree_domain::job::JobId,
+        /// The provider's short word for the end, such as `succeeded`.
+        detail: &'static str,
+    },
+    /// The execution port refused capacity (decision 0057 rule 19), with the
+    /// provider's word or operator text. Diagnostics only, like `Attempt`; it
+    /// is passed once per run of identical refusals, not at every poll.
+    Unavailable(&'static str),
     /// A store call failed; the worker tries again.
     Warning(&'a JobStoreError),
 }
@@ -101,6 +123,10 @@ impl Pace for ProcessPace<'_> {
 
 /// Runs jobs until `once` finds the queue empty or `shutdown` is set.
 ///
+/// `execution` is the execution port of a worker started with
+/// `--execution-dir`. `None` claims trusted kinds and ends the jobs of profiles
+/// this build does not know (decision 0057 rules 1 and 18).
+///
 /// # Errors
 ///
 /// A message when the database does not exist or cannot be opened (a newer or
@@ -108,6 +134,7 @@ impl Pace for ProcessPace<'_> {
 /// five times in a row.
 pub fn run(
     options: &WorkerOptions,
+    execution: Option<&dyn Execution>,
     clock: &dyn Clock,
     shutdown: &AtomicBool,
     on_event: &mut dyn FnMut(&WorkerEvent<'_>),
@@ -134,16 +161,50 @@ pub fn run(
         hold_file: options.hold_file.as_deref(),
     };
     on_event(&WorkerEvent::Ready { worker: &worker });
+    // The profiles of this build are fixed for the life of the process.
+    let known = artifree_providers::execution::known_profiles();
+    let profiles = Profiles {
+        known: &known,
+        execution,
+    };
     let mut failures = 0_u32;
+    // The last refusal passed on, so that a refusal that lasts, such as a
+    // quarantine, is reported once and not at every poll.
+    let mut last_refusal: Option<&'static str> = None;
     loop {
         if shutdown.load(Ordering::Acquire) {
             return Ok(Stopped::Signal);
         }
+        // Whether this call reported a refusal; a call without one (capacity held,
+        // busy, or no port asked) ends a run of identical refusals.
+        let mut refused_now = false;
         let mut observed = |event: ClaimEvent<'_>| match event {
             ClaimEvent::Settled(record) => on_event(&WorkerEvent::Job(record)),
             ClaimEvent::Claimed(job) => on_event(&WorkerEvent::Claimed(job)),
+            ClaimEvent::Launched { job, detail } => {
+                on_event(&WorkerEvent::Attempt { job, detail });
+            }
+            ClaimEvent::Refused(detail) => {
+                if last_refusal != Some(detail) {
+                    on_event(&WorkerEvent::Unavailable(detail));
+                }
+                last_refusal = Some(detail);
+                refused_now = true;
+            }
         };
-        match worker::run_next_observed(&store, clock, &worker, &config, &pace, &mut observed) {
+        let step = worker::run_next_with(
+            &store,
+            clock,
+            &worker,
+            &config,
+            &pace,
+            profiles,
+            &mut observed,
+        );
+        if !refused_now {
+            last_refusal = None;
+        }
+        match step {
             Ok(Step::Idle) => {
                 failures = 0;
                 if options.once {
@@ -164,6 +225,9 @@ pub fn run(
             Ok(Step::LeaseLost(job)) => {
                 failures = 0;
                 on_event(&WorkerEvent::LeaseLost(&job));
+            }
+            Ok(Step::Unsettled(_)) => {
+                failures = 0;
             }
             Err(error) => {
                 failures += 1;

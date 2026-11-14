@@ -21,6 +21,51 @@ pub(super) const LAUNCHER: &str = "bin/bwrap";
 pub(super) const FIXTURE_FILE: &str = "bin/artifree-execution-fixture";
 /// The fixture's path inside the sandbox, where the tool root is bound as `/tools`.
 const FIXTURE_COMMAND: &str = "/tools/bin/artifree-execution-fixture";
+/// The server binary inside the tool root (decision 0057 rule 4).
+#[cfg(any(test, feature = "enforcement-fixture"))]
+pub(super) const SERVER_FILE: &str = "bin/artifree-server";
+/// The server binary's path inside the sandbox.
+const SERVER_COMMAND: &str = "/tools/bin/artifree-server";
+
+/// The program of the tool root that runs an attempt's stub, bootstrap and guardian (decision 0057 rule 4). Admission's namespace check and probe child always use the fixture program.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EntryProgram {
+    /// `bin/artifree-execution-fixture`, the test-support program, whose mode is its first argument.
+    Fixture,
+    /// `bin/artifree-server`, whose modes follow its `execution` subcommand.
+    Server,
+}
+
+impl EntryProgram {
+    /// The program's file inside the tool root.
+    #[cfg(any(test, feature = "enforcement-fixture"))]
+    #[must_use]
+    pub(super) fn file(self) -> &'static str {
+        match self {
+            Self::Fixture => FIXTURE_FILE,
+            Self::Server => SERVER_FILE,
+        }
+    }
+
+    /// The program's path inside the sandbox.
+    #[must_use]
+    pub(super) fn command(self) -> &'static str {
+        match self {
+            Self::Fixture => FIXTURE_COMMAND,
+            Self::Server => SERVER_COMMAND,
+        }
+    }
+
+    /// The arguments that the program takes before the mode word `bootstrap`.
+    #[must_use]
+    pub(super) fn prefix(self) -> &'static [&'static str] {
+        match self {
+            Self::Fixture => &[],
+            Self::Server => &["execution"],
+        }
+    }
+}
+
 /// The seven namespaces compared with the supervisor's own (0042 rule 1).
 pub(super) const NAMESPACES: [&str; 7] = ["user", "pid", "net", "mnt", "ipc", "uts", "cgroup"];
 /// Bound on the fixture's namespace report (this slice's choice; not an attempt bound).
@@ -120,7 +165,7 @@ const TERMINALS_MODE: &str = "0555";
 /// The size bound of that tmpfs in bytes, the smallest the kernel rounds to: one page.
 const TERMINALS_BYTES: &str = "4096";
 
-/// The attempt's fixed argument list, in launch order (0056 rule 2 with its amendments of 2026-11-12 and 2026-11-13): the shared prefix, the staged input bound read-only at `/input`, the two capabilities, the scratch's mount point, an empty tmpfs over the minimal `/dev`'s `/dev/pts`, the read-only remounts, then the fixture's `bootstrap` mode with the fixture profile's identity.
+/// The attempt's fixed argument list, in launch order (0056 rule 2 with its amendments of 2026-11-12 and 2026-11-13): the shared prefix, the staged input bound read-only at `/input`, the two capabilities, the scratch's mount point, an empty tmpfs over the minimal `/dev`'s `/dev/pts`, the read-only remounts, then `program`'s `bootstrap` mode with the fixture profile's identity.
 ///
 /// The fixed argument list binds the attempt's staging directory read-only at `/input`. Its path comes from the provider (the amendment of 2026-11-13, input and output), and it is absolute, since the stub refuses any other path before this list is built. It is never a request's.
 ///
@@ -131,8 +176,14 @@ const TERMINALS_BYTES: &str = "4096";
 /// The `--remount-ro` options come after every bind, `--proc`, `--dev` and `--dir` option, because a mount point created after a read-only remount would land on a read-only tree and fail.
 ///
 /// Nothing a request carries reaches this list, and the scratch's size and inode bounds are set by the bootstrap, not here.
+///
+/// `program` names the bootstrap's program (decision 0057 rule 4).
 #[must_use]
-pub(super) fn attempt_arguments(root: &Path, input: &Path) -> Vec<OsString> {
+pub(super) fn attempt_arguments_for(
+    root: &Path,
+    input: &Path,
+    program: EntryProgram,
+) -> Vec<OsString> {
     let mut arguments = sandbox_arguments(root);
     // The staged input, read-only at `/input` (0056 rule 2, as reworded by the amendment of 2026-11-13, input and output).
     arguments.extend([
@@ -162,13 +213,21 @@ pub(super) fn attempt_arguments(root: &Path, input: &Path) -> Vec<OsString> {
             "/dev/pts",
             "--chdir",
             "/",
-            FIXTURE_COMMAND,
-            "bootstrap",
         ]
         .map(OsString::from),
     );
+    arguments.push(program.command().into());
+    arguments.extend(program.prefix().iter().map(OsString::from));
+    arguments.push("bootstrap".into());
     arguments.push(InspectionProfile::fixture().identity().into());
     arguments
+}
+
+/// The fixture's attempt argument list, for the tests that pin it (decision 0056 rule 2).
+#[cfg(test)]
+#[must_use]
+pub(super) fn attempt_arguments(root: &Path, input: &Path) -> Vec<OsString> {
+    attempt_arguments_for(root, input, EntryProgram::Fixture)
 }
 
 /// Why a bounded run of a trusted command produced no usable output.

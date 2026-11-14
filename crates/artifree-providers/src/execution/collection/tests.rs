@@ -51,6 +51,7 @@ fn binding() -> ManifestBinding {
         tool_root_sha256: "ab".repeat(32),
         filter_sha256: "cd".repeat(32),
         input_digest: [2; 32],
+        run: None,
     }
 }
 

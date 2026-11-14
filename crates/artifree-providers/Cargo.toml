@@ -25,5 +25,11 @@ signal-hook.workspace = true
 # amendment of 2026-11-13). Only test targets enable the feature; the library keeps `sched`.
 nix = { workspace = true, features = ["signal"] }
 
+# Decision 0057 rule 2: the fixture profile and the worker's launch, for the Linux enforcement job
+# only. Release archives, the container image and the clean-install checks build without it, and
+# scripts/check-boundaries.mjs fails when one of their build commands names it.
+[features]
+enforcement-fixture = []
+
 [lints]
 workspace = true

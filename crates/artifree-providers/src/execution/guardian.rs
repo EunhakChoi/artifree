@@ -183,10 +183,11 @@ fn report_line(reason: GuardianReason, emptied: bool) -> String {
     format!("guardian {} emptied={}\n", reason.word(), u8::from(emptied))
 }
 
-// The parser serves only the provider's launch, which exists only in the test build.
+// The parser serves only the provider's launch, which runs in the test build and in the
+// enforcement-fixture build (decision 0057 rule 2).
 /// Parses a line that [`report_line`] wrote, with or without its trailing newline. Returns `None`
 /// for any other text.
-#[cfg(test)]
+#[cfg(any(test, feature = "enforcement-fixture"))]
 #[must_use]
 pub(super) fn parse_report(line: &str) -> Option<(GuardianReason, bool)> {
     let body = line.strip_suffix('\n').unwrap_or(line);

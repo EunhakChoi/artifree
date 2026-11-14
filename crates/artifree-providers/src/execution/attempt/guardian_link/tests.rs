@@ -5,11 +5,12 @@
 use std::error::Error;
 use std::io::Write;
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::super::super::guardian::READY_BYTE;
-use super::super::{AttemptFailure, NotStartedReason};
+use super::super::super::launcher::EntryProgram;
+use super::super::{AttemptFailure, NotStartedReason, Session};
 use super::{GuardianLink, read_ready_byte};
 
 /// A readiness bound that is short for a test and long for a write that has already happened.
@@ -54,16 +55,19 @@ fn silence_is_not_ready_once_the_bound_passes() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn a_guardian_that_cannot_start_refuses_the_attempt() {
-    let mut quarantined = None;
+    let mut session = Session {
+        execution_dir: PathBuf::from("/nonexistent/artifree-execution-dir"),
+        ..Session::default()
+    };
     // No such directory exists, so the spawn of its fixture program fails.
     let outcome = GuardianLink::start(
         Path::new("/nonexistent/artifree-tool-root"),
+        EntryProgram::Fixture,
         "attempt-1-1",
         Duration::from_secs(1),
         Duration::from_secs(1),
         WITHIN,
-        Path::new("/nonexistent/artifree-execution-dir"),
-        &mut quarantined,
+        &mut session,
     );
     assert_eq!(
         outcome.err(),
@@ -71,8 +75,8 @@ fn a_guardian_that_cannot_start_refuses_the_attempt() {
             NotStartedReason::GuardianNotStarted
         ))
     );
-    assert_eq!(
-        quarantined, None,
+    assert!(
+        !session.quarantined,
         "a guardian that never spawned quarantines nothing"
     );
 }

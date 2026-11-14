@@ -22,8 +22,8 @@ use super::super::guardian::GuardianReason;
 use super::resource_tests::evidence_of;
 use super::tests::{ExecutionDir, assert_no_attempt_groups, refusal_of};
 use super::{
-    AttemptFailure, AttemptPlan, FIXTURE_PAGE, Heartbeat, LeaseLoss, Pause, PauseMode, Phase,
-    launch,
+    AttemptFailure, AttemptPlan, FIXTURE_PAGE, Heartbeat, LeaseLoss, NotStartedReason, Pause,
+    PauseMode, Phase, launch,
 };
 
 /// The stand-in store of a plan: the answer to the heartbeat with the given number.
@@ -242,6 +242,49 @@ fn job_lease_loss_ends_the_attempt() -> Result<(), Box<dyn Error>> {
         assert!(
             since < JOB_LEASE,
             "the {label} attempt must end within {JOB_LEASE:?} of the release, took {since:?}"
+        );
+        assert_no_attempt_groups()?;
+    }
+    Ok(())
+}
+
+/// The store that lost the lease to a cancel before the first heartbeat.
+fn cancelled_from_the_start(_heartbeat: u32) -> Heartbeat {
+    Heartbeat::Lost(LeaseLoss::Cancelled)
+}
+
+/// With the checkpoint before the release that the worker asks for, a store that answers a stop
+/// or does not answer at readiness ends the attempt before the payload is released: no `running`
+/// marker is written, and the group is gone (decision 0042 rule 3; decision 0057 rule 7).
+#[test]
+#[ignore = "runs only in the Linux enforcement job"]
+fn job_a_stop_at_readiness_releases_no_payload() -> Result<(), Box<dyn Error>> {
+    let cases: [(Store, AttemptFailure, &str); 2] = [
+        (
+            cancelled_from_the_start,
+            AttemptFailure::LeaseLost(LeaseLoss::Cancelled),
+            "cancel",
+        ),
+        (
+            unavailable,
+            AttemptFailure::NotStarted(NotStartedReason::CheckpointUnavailable),
+            "unavailable",
+        ),
+    ];
+    for (store, expected, label) in cases {
+        let dir = ExecutionDir::new(&format!("guardian-readiness-{label}"))?;
+        let plan = AttemptPlan {
+            checkpoint_at_release: true,
+            ..renewal_plan(dir.path(), store)
+        };
+        let failure = refusal_of(launch(&plan, dir.path()))?;
+        assert_eq!(
+            failure, expected,
+            "a {label} answer at readiness must end the attempt as {expected:?}"
+        );
+        assert!(
+            !dir.path().join(RELEASE_MARKER).exists(),
+            "the {label} attempt must not release its payload"
         );
         assert_no_attempt_groups()?;
     }
