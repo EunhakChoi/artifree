@@ -6,8 +6,8 @@
 # Run as root, once for each server release, on the supported host. It assembles
 # /opt/artifree/tools/<version>, where <version> is the package version that `SERVER --version`
 # names, and loads the AppArmor launcher profile of that root. The root holds the pinned
-# launcher and its licence, SERVER as the bootstrap, the libraries both load with their
-# licences, and the manifest of every file, all owned by root without group or other write
+# launcher and its licence, SERVER as the bootstrap with its libraries and their licences, and
+# the manifest of every file, all owned by root without group or other write
 # bits, as the provider requires. The script refuses a root that exists: a root is never
 # replaced in place (decision 0042 rule 3). A failed run removes the root it made, so it can be
 # run again. Nothing is downloaded but the pinned launcher package, and it refuses to downgrade
