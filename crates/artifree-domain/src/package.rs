@@ -95,7 +95,8 @@ pub enum MediaType {
     Avif,
     /// Icon files.
     Icon,
-    /// Plain text.
+    /// Plain text, including TypeScript and JSX source, which is never
+    /// served as script (decision 0058 rule 6).
     Text,
     /// Markdown text.
     Markdown,
@@ -156,7 +157,7 @@ impl MediaType {
             Self::Webp => &["webp"],
             Self::Avif => &["avif"],
             Self::Icon => &["ico"],
-            Self::Text => &["txt"],
+            Self::Text => &["txt", "ts", "tsx", "jsx"],
             Self::Markdown => &["md"],
             Self::Csv => &["csv"],
             Self::Woff => &["woff"],
@@ -589,6 +590,22 @@ mod tests {
         assert_eq!(
             path("app.mjs").media_type().essence(),
             "text/javascript; charset=utf-8"
+        );
+    }
+
+    #[test]
+    fn source_files_are_plain_text_never_script() {
+        for value in ["src/main.tsx", "src/util.ts", "src/App.JSX"] {
+            assert_eq!(path(value).media_type(), MediaType::Text, "{value}");
+            assert_eq!(
+                path(value).media_type().essence(),
+                "text/plain; charset=utf-8",
+                "{value}"
+            );
+        }
+        assert_eq!(
+            "src/legacy.cjs".parse::<PackagePath>(),
+            Err(PathError::Extension)
         );
     }
 

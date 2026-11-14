@@ -1,7 +1,7 @@
 # 0058: React builds and their preview
 
-Date: 2026-11-14. Status: **proposed; nothing of it is implemented**.
-Roadmap: R03.
+Date: 2026-11-14. Status: **accepted; R03a (the package rules) is
+implemented, R03b to R03f are not**. Roadmap: R03.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),
@@ -9,6 +9,13 @@ Roadmap: R03.
 > its worker), [0030](0030-persistent-jobs-and-worker.md) (jobs),
 > [0003](0003-local-html-artifact-slice.md) (packages and the preview origin) and
 > [0029](0029-retention-and-cleanup.md) (content references and purge).
+
+> **Note, 2026-11-14 (R03a).** Rule 6 is implemented as three more
+> extensions of the existing plain-text type rather than a new type, so the
+> list of media types stays at 20 and a `.ts`, `.tsx` or `.jsx` file is
+> served as `text/plain; charset=utf-8` with `nosniff`, like a `.txt` file.
+> `.cjs` stays refused. The runtime SDK's list, the shared path fixtures and
+> the published `package_rules` follow, and the contract is 0.28.0.
 
 ## Context
 

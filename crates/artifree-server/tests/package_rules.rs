@@ -24,8 +24,16 @@ fn inventory_rules_are_those_the_domain_enforces() -> Result<(), Box<dyn Error>>
         }
     }
     // An extension the rules leave out is refused.
-    assert!("a.ts".parse::<PackagePath>().is_err());
-    assert!(!rules.media_types.contains_key("ts"));
+    assert!("a.cjs".parse::<PackagePath>().is_err());
+    assert!(!rules.media_types.contains_key("cjs"));
+    // Source files are listed, as plain text (decision 0058 rule 6).
+    for extension in ["ts", "tsx", "jsx"] {
+        assert_eq!(
+            rules.media_types.get(extension).map(String::as_str),
+            Some("text/plain; charset=utf-8"),
+            "{extension}"
+        );
+    }
     Ok(())
 }
 
