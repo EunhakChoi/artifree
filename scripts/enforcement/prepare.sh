@@ -132,6 +132,10 @@ install_tool_root() {
   [[ -f "$payload" && -x "$payload" ]] || fail "the payload is not an executable file: $payload"
   named="$(server_version "$server")"
   [[ "$named" == "$VERSION" ]] || fail "the server names version $named, the workspace $VERSION"
+  # The hosted runner's /opt is mode 0777, which the provider refuses as an ancestor of the root
+  # (decision 0058 rule 19). The runner is discarded after the job, so the job tightens it as an
+  # operator of a supported host would; the packaging script itself only refuses such a host.
+  chmod 0755 /opt
   begin_root
   install_launcher
   install -o root -g root -m 0755 "$fixture" "$ROOT/bin/artifree-execution-fixture"
