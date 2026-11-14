@@ -37,15 +37,41 @@ pub(super) struct PolicyError;
 pub(super) enum FilterSet {
     /// The fixture profile's refusal and allowlist.
     Fixture,
+    /// The bundler measurement's programs (decision 0058, note "R03bcb split"): the calls that
+    /// the public syscall mapping refuses kill the process, the fixture's allowlist and the calls
+    /// measured so far are allowed, and every other call is allowed and leaves a kernel record.
+    /// Only the test build and the `enforcement-fixture` build know it.
+    #[cfg(any(test, feature = "enforcement-fixture"))]
+    Measure,
 }
 
-/// The two programs of `set`, in installation order.
+/// The two programs of `set`, in installation order. For `Measure`, no call is added to the
+/// allowlist; see `filters_with`.
 ///
 /// # Errors
 /// Returns `PolicyError` when the architecture is not `x86_64` or the compiler rejects the rules.
+#[cfg(any(test, feature = "enforcement-fixture"))]
 pub(super) fn filters(set: FilterSet) -> Result<[BpfProgram; 2], PolicyError> {
+    filters_with(set, &[])
+}
+
+/// The two programs of `set`, in installation order. `measured` lists the calls a measurement
+/// has already seen; only `Measure` allows them, so that each round records only calls it has
+/// not seen before. The other sets ignore it.
+///
+/// # Errors
+/// Returns `PolicyError` when the architecture is not `x86_64` or the compiler rejects the rules.
+pub(super) fn filters_with(
+    set: FilterSet,
+    measured: &[i64],
+) -> Result<[BpfProgram; 2], PolicyError> {
     match set {
-        FilterSet::Fixture => fixture_filters(),
+        FilterSet::Fixture => {
+            let _ = measured;
+            fixture_filters()
+        }
+        #[cfg(any(test, feature = "enforcement-fixture"))]
+        FilterSet::Measure => measure_filters(measured),
     }
 }
 
@@ -290,6 +316,77 @@ pub(super) fn fixture_filters() -> Result<[BpfProgram; 2], PolicyError> {
     }
 }
 
+/// The bundler measurement's two programs: the mapping's refusals, then the logging allowlist.
+/// The refusals come first for the same reason the fixture's do: the second program's default
+/// action is `LOG`, which would let `prctl` and `seccomp` through, but the first kills them.
+///
+/// # Errors
+/// Returns `PolicyError` when the architecture is not `x86_64` or the compiler rejects the rules.
+#[cfg(any(test, feature = "enforcement-fixture"))]
+fn measure_filters(measured: &[i64]) -> Result<[BpfProgram; 2], PolicyError> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let allowed = allowlist_rules()?;
+        let mut refused: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
+        for number in refused_numbers(&allowed) {
+            refused.insert(number, Vec::new());
+        }
+        let refusal = SeccompFilter::new(
+            refused,
+            SeccompAction::Allow,
+            SeccompAction::KillProcess,
+            TargetArch::x86_64,
+        )
+        .map_err(|_| PolicyError)?;
+        let mut logged = allowed;
+        for &number in measured {
+            // A measured call that the allowlist restricts by its arguments keeps its rules, so
+            // a refused form of it is still recorded.
+            logged.entry(number).or_default();
+        }
+        let logging = SeccompFilter::new(
+            logged,
+            SeccompAction::Log,
+            SeccompAction::Allow,
+            TargetArch::x86_64,
+        )
+        .map_err(|_| PolicyError)?;
+        Ok([
+            BpfProgram::try_from(refusal).map_err(|_| PolicyError)?,
+            BpfProgram::try_from(logging).map_err(|_| PolicyError)?,
+        ])
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = measured;
+        Err(PolicyError)
+    }
+}
+
+/// The calls the measurement kills: every native call the public syscall mapping refuses
+/// outright (the probes of each class but `default`, whose calls are refused only because the
+/// fixture does not list them), and `clone3`. A call that the fixture's allowlist allows in some
+/// form (`clone`, `prlimit64`, `socket`, `setsockopt`) is not killed by number; its refused forms
+/// fall through to the logging program, and the enforcement job fails when such a record appears.
+#[cfg(all(target_arch = "x86_64", any(test, feature = "enforcement-fixture")))]
+pub(super) fn refused_numbers(allowed: &BTreeMap<i64, Vec<SeccompRule>>) -> Vec<i64> {
+    let (_, clone3_number) = CLONE3;
+    let mut numbers: Vec<i64> = super::probes::PROBES
+        .iter()
+        .filter(|probe| {
+            probe.entry == super::probes::Entry::Native
+                && probe.class != "default"
+                && matches!(probe.expect, super::probes::Expect::Refused { .. })
+        })
+        .map(|probe| i64::from(probe.number))
+        .filter(|number| !allowed.contains_key(number))
+        .chain([clone3_number])
+        .collect();
+    numbers.sort_unstable();
+    numbers.dedup();
+    numbers
+}
+
 /// The refusal program: `clone3` fails with `ENOSYS`, and every other call is allowed by this
 /// program. libc then falls back to `clone`, whose flags the allowlist can read.
 ///
@@ -454,3 +551,6 @@ mod tests;
 
 #[cfg(all(test, target_arch = "x86_64"))]
 mod filter_tests;
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod measure_tests;

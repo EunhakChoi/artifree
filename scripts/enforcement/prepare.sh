@@ -56,6 +56,12 @@ usage: prepare.sh VERB [ARGUMENT]
   nomem-slice-off     remove that slice
   tool-modify         append one byte to the payload, keeping a copy of the original
   tool-restore        restore the original payload
+  package-modify      append one byte to the react package's index.js, keeping a copy
+  package-restore     restore that file
+  measured-calls FILE write FILE to etc/measured-calls and rewrite the manifest
+  measured-calls-off  remove etc/measured-calls and rewrite the manifest
+  kernel-log-clear    clear the kernel's message buffer
+  package-with SERVER LOCK  run the packaging script for SERVER with the lock list LOCK
   tool-extra-on       add a file that the manifest does not list
   tool-extra-off      remove that file
   tool-owner-on       give the bubblewrap licence to nobody
@@ -132,6 +138,12 @@ install_tool_root() {
   [[ -f "$payload" && -x "$payload" ]] || fail "the payload is not an executable file: $payload"
   named="$(server_version "$server")"
   [[ "$named" == "$VERSION" ]] || fail "the server names version $named, the workspace $VERSION"
+  # The archives of the lock list are downloaded and checked first, as the packaging script does,
+  # so a wrong one leaves no root behind.
+  ARCHIVES="$(mktemp -d)"
+  # shellcheck disable=SC2064 # The directory is fixed now, so it is expanded now.
+  trap "rm -rf -- '$ARCHIVES'" EXIT
+  fetch_locked "$DEFAULT_LOCK" "$ARCHIVES"
   # The hosted runner's /opt is mode 0777, which the provider refuses as an ancestor of the root
   # (decision 0058 rule 19). The runner is discarded after the job, so the job tightens it as an
   # operator of a supported host would; the packaging script itself only refuses such a host.
@@ -143,6 +155,7 @@ install_tool_root() {
   install -o root -g root -m 0755 "$payload" "$ROOT/bin/artifree-execution-payload"
   copy_libraries "$payload"
   install_server "$server"
+  install_locked "$DEFAULT_LOCK" "$ARCHIVES"
   write_root_text 0644 "$ROOT/etc/scenario" exit
   write_host_address
   "$ROOT/bin/artifree-execution-fixture" write-probes "$ROOT/probes"
@@ -301,6 +314,44 @@ tool_modify() {
   [[ ! -e "$saved" ]] || fail "$saved already exists"
   cp -p -- "$payload" "$saved"
   printf 'x' >> "$payload"
+}
+
+# Appends one byte to a file of the react package and keeps a copy of the original. The manifest
+# is not rewritten, so the provider must refuse the tool root (decision 0058, R03bcba).
+package_modify() {
+  local file="$ROOT/modules/react/index.js" saved="$SAVED_DIR/react-index.original"
+  ensure_saved_dir
+  [[ -f "$file" ]] || fail "$file is missing"
+  [[ ! -e "$saved" ]] || fail "$saved already exists"
+  cp -p -- "$file" "$saved"
+  printf 'x' >> "$file"
+}
+
+package_restore() {
+  local file="$ROOT/modules/react/index.js" saved="$SAVED_DIR/react-index.original"
+  ensure_saved_dir
+  [[ -e "$saved" ]] || fail "$saved is missing"
+  install -o root -g root -m 0644 "$saved" "$file"
+  rm -- "$saved"
+}
+
+# Writes the bundler measurement's calls seen so far (decision 0058, note "R03bcb split") from
+# FILE to etc/measured-calls and rewrites the manifest. FILE holds one decimal number per line,
+# in increasing order, as the bootstrap requires.
+measured_calls() {
+  local file=$1
+  [[ -f "$file" ]] || fail "the measured calls are not a file: $file"
+  if [[ -s "$file" ]]; then
+    grep -qvE '^(0|[1-9][0-9]{0,3})$' -- "$file" && fail "the measured calls must be numbers, one per line"
+    LC_ALL=C sort -n -c -u -- "$file" || fail "the measured calls must be increasing"
+  fi
+  install -o root -g root -m 0644 -- "$file" "$ROOT/etc/measured-calls"
+  write_manifest
+}
+
+measured_calls_off() {
+  rm -f -- "$ROOT/etc/measured-calls"
+  write_manifest
 }
 
 tool_restore() {
@@ -532,6 +583,7 @@ main() {
     save-routing | routing-file | routing-pipe | profile-on | profile-off | \
       launcher-away | launcher-back | fixture-away | fixture-back | \
       nomem-slice-on | nomem-slice-off | tool-modify | tool-restore | \
+      package-modify | package-restore | measured-calls-off | kernel-log-clear | \
       tool-extra-on | tool-extra-off | tool-missing-on | tool-missing-off | \
       tool-owner-on | tool-owner-off | tool-writable-on | tool-writable-off | \
       tool-setid-on | tool-setid-off | ancestor-open-on | ancestor-open-off | \
@@ -540,6 +592,8 @@ main() {
     counters-install | listener-start | listener-stop | routing-counter-pipe | \
       routing-counter-socket | routing-absolute | counters-show) (( $# == 1 )) || usage ;;
     decoy-off) (( $# == 1 )) || usage ;;
+    measured-calls) (( $# == 2 )) || usage ;;
+    package-with) (( $# == 3 )) || usage ;;
     *) usage ;;
   esac
   if (( EUID != 0 )); then
@@ -567,6 +621,12 @@ main() {
     nomem-slice-off) nomem_slice_off ;;
     tool-modify) tool_modify ;;
     tool-restore) tool_restore ;;
+    package-modify) package_modify ;;
+    package-restore) package_restore ;;
+    measured-calls) measured_calls "$2" ;;
+    measured-calls-off) measured_calls_off ;;
+    kernel-log-clear) dmesg --clear ;;
+    package-with) "$SCRIPT_DIR/../tools/package-root.sh" "$2" "$3" ;;
     tool-extra-on) tool_extra_on ;;
     tool-extra-off) tool_extra_off ;;
     tool-owner-on) chown nobody -- "$ROOT/licenses/bubblewrap.copyright" ;;

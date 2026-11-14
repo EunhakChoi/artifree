@@ -25,6 +25,60 @@ say() {
   printf '==> %s\n' "$*" >&2
 }
 
+# The bundler measurement (decision 0058, note "R03bcb split"). Each round writes the calls seen
+# so far to the root, so the measuring filter allows them without a record, then runs each input
+# three times and reads the kernel records the bundler left. A round that records no new call and
+# loses no record ends the measurement; its calls, beyond the fixture's allowlist, are the
+# artifact bundler-calls.txt. A record of a filter kill, of another architecture, or of a call
+# that the fixture allows only in some forms fails the job.
+measure_bundler() {
+  local measured="$OUT/measured-calls.txt" round case run label records lost new
+  local test_name=execution::attempt::bundler_tests::job_the_bundler_runs_under_the_measuring_filter
+  : > "$measured"
+  for round in 1 2 3 4 5 6 7 8; do
+    sudo "$PREPARE" measured-calls "$PWD/$measured"
+    new=""
+    lost=0
+    for case in template bad-import large; do
+      for run in 1 2 3; do
+        label="measure-$round-$case-$run"
+        sudo "$PREPARE" kernel-log-clear
+        run_unit "$lib_binary" "$label" "$test_name" -p Delegate=yes --setenv="ARTIFREE_MEASURE_CASE=$case"
+        dmesg > "$OUT/$label.kernel.txt"
+        records="$(grep -F 'type=1326' -- "$OUT/$label.kernel.txt" | grep -F 'exe="/tools/bin/esbuild"' || true)"
+        if grep -Eq 'audit_lost|backlog limit exceeded|callbacks suppressed|hold queue overflow' -- "$OUT/$label.kernel.txt"; then
+          lost=1
+        fi
+        [[ -z "$records" ]] && continue
+        if grep -vq ' sig=0 ' <<< "$records"; then
+          fail "the bundler was killed by the measuring filter; see $OUT/$label.kernel.txt"
+        fi
+        if grep -vq ' arch=c000003e ' <<< "$records"; then
+          fail "the bundler made a call of another architecture; see $OUT/$label.kernel.txt"
+        fi
+        new+="$(sed -E 's/.* syscall=([0-9]+) .*/\1/' <<< "$records")"$'\n'
+      done
+    done
+    new="$(printf '%s' "$new" | grep -E '^[0-9]+$' | LC_ALL=C sort -n -u || true)"
+    if [[ -z "$new" && "$lost" == 0 ]]; then
+      for number in 41 54 56 302; do
+        if grep -qx "$number" -- "$measured"; then
+          fail "the bundler made call $number in a form the fixture refuses"
+        fi
+      done
+      while IFS= read -r number; do
+        [[ -n "$number" ]] || continue
+        printf '%s %s\n' "$number" "$(awk -v n="$number" '$1 == "#define" && $3 == n { sub(/^__NR_/, "", $2); print $2; exit }' /usr/include/x86_64-linux-gnu/asm/unistd_64.h)"
+      done < "$measured" > "$OUT/bundler-calls.txt"
+      say "the bundler needs $(wc -l < "$measured") calls beyond the fixture's allowlist (round $round)"
+      return 0
+    fi
+    printf '%s\n' "$new" | cat -- "$measured" - | grep -E '^[0-9]+$' | LC_ALL=C sort -n -u > "$measured.next"
+    mv -- "$measured.next" "$measured"
+  done
+  fail "the bundler measurement found new calls in every round; see $OUT/measured-calls.txt"
+}
+
 # libtest prints a summary for a filtered run. A filter that matches nothing still exits
 # 0, so the summary must show exactly one passed test.
 require_one_passed() {
@@ -369,12 +423,25 @@ grep -Fq "refusing to write over the existing root $ROOT" "$OUT/install-again.st
   || fail "the second install failed for another reason; see $OUT/install-again.stderr"
 [[ "$(sha256sum -- "$ROOT/MANIFEST")" == "$manifest_before" ]] \
   || fail "the refused install changed the root's manifest"
+# An archive whose SHA-256 differs from the lock list is refused before anything is written
+# (R03bcba): the packaging script fails on the digest, not on the existing root.
+awk 'done == 0 && $1 !~ /^#/ && NF == 6 { $4 = "0000000000000000000000000000000000000000000000000000000000000000"; done = 1 } { print }' \
+  scripts/tools/react-v1.lock > "$OUT/wrong-sha.lock"
+if sudo "$PREPARE" package-with "$server_bin" "$PWD/$OUT/wrong-sha.lock" 2> "$OUT/wrong-sha.stderr"; then
+  fail "the packaging script accepted an archive with a wrong SHA-256"
+fi
+grep -Fq "the lock list names 0000000000000000000000000000000000000000000000000000000000000000" \
+  "$OUT/wrong-sha.stderr" || fail "the wrong SHA-256 was refused for another reason; see $OUT/wrong-sha.stderr"
+[[ "$(sha256sum -- "$ROOT/MANIFEST")" == "$manifest_before" ]] \
+  || fail "the refused package changed the root's manifest"
 {
   printf 'bubblewrap package: %s\n' "$(dpkg-query -W -f "\${Version}" bubblewrap)"
   printf 'launcher version: %s\n' "$("$ROOT/bin/bwrap" --version)"
   printf 'launcher sha256: %s\n' "$(sha256sum -- "$ROOT/bin/bwrap")"
   printf 'server sha256: %s\n' "$(sha256sum -- "$ROOT/bin/artifree-server")"
   printf 'tool manifest sha256: %s\n' "$(sha256sum -- "$ROOT/MANIFEST")"
+  printf 'lock list sha256: %s\n' "$(sha256sum -- scripts/tools/react-v1.lock)"
+  printf 'bundler version: %s\n' "$("$ROOT/bin/esbuild" --version)"
 } >> "$OUT/environment.txt"
 
 say "part 2: the host as found, before any preparation"
@@ -440,6 +507,10 @@ say "part 5: each change to the tool root is refused by name, and is put back af
 sudo "$PREPARE" tool-modify
 run_unit "$test_binary" modified-tool job_modified_tool_is_refused -p Delegate=yes
 sudo "$PREPARE" tool-restore
+
+sudo "$PREPARE" package-modify
+run_unit "$test_binary" modified-package job_modified_tool_is_refused -p Delegate=yes
+sudo "$PREPARE" package-restore
 
 sudo "$PREPARE" tool-extra-on
 run_unit "$test_binary" extra-tool job_extra_tool_file_is_refused -p Delegate=yes
@@ -686,6 +757,10 @@ done
 run_server_job copy server-two-workers recovery_workers::job_two_workers_never_run_an_old_and_a_new_attempt_together
 run_server_job copy server-resume recovery_workers::job_queued_and_retry_jobs_resume_after_trash_and_restart
 sudo "$PREPARE" scenario exit
+
+say "part 15: the bundler's system calls under the measuring filter (0058, R03bcba)"
+measure_bundler
+sudo "$PREPARE" measured-calls-off
 
 say "restore the routing and the profile"
 sudo "$PREPARE" routing-pipe

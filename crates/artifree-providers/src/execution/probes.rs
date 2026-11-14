@@ -92,10 +92,10 @@ pub(super) struct Probe {
     pub(super) name: &'static str,
     /// The mapping class of the probe, which is a section heading of the mapping document.
     #[cfg_attr(
-        not(test),
+        not(any(test, feature = "enforcement-fixture")),
         expect(
             dead_code,
-            reason = "read only by the probe table's unit tests and the enforcement job's record checks"
+            reason = "read only by the probe table's unit tests, the enforcement job's record checks and the bundler measurement's refusals"
         )
     )]
     pub(super) class: &'static str,
@@ -109,10 +109,10 @@ pub(super) struct Probe {
     pub(super) body: Body,
     /// What the enforcement job must observe for the probe.
     #[cfg_attr(
-        not(test),
+        not(any(test, feature = "enforcement-fixture")),
         expect(
             dead_code,
-            reason = "read only by the probe table's unit tests and the enforcement job's record checks"
+            reason = "read only by the probe table's unit tests, the enforcement job's record checks and the bundler measurement's refusals"
         )
     )]
     pub(super) expect: Expect,

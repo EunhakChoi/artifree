@@ -1,9 +1,10 @@
 # 0058: React builds and their preview
 
 Date: 2026-11-14. Status: **accepted; R03a (the package rules), R03ba
-(the profile table), R03bb (the provider's verdicts) and R03bca (the
-versioned, packaged and protected tool root) are implemented, R03bcba to
-R03f are not**. Roadmap: R03.
+(the profile table), R03bb (the provider's verdicts), R03bca (the
+versioned, packaged and protected tool root) and R03bcba (the lock list, the
+packaged bundler and its measurement) are implemented, R03bcbb to R03f are
+not**. Roadmap: R03.
 
 > **Note, 2026-11-14 (slices).** R03b is split into R03ba, R03bb and R03bc,
 > and rule 5 moves to R03f. A release build compiles no attempt, worker port,
@@ -140,6 +141,36 @@ R03f are not**. Roadmap: R03.
 > 23's first assumption is split the same way: R03bcba shows that the calls
 > fit the boundary, and R03bcbb shows the limits. Rules 4, 22 and 23 and the
 > slice table are reworded to match.
+
+> **Note, 2026-11-14 (R03bcba).** `scripts/tools/react-v1.lock` names five
+> archives of the npm registry: the bundler's platform archive
+> (`@esbuild/linux-x64` 0.28.2, statically linked), the bundler's main
+> archive of the same version, only for its licence, which the platform
+> archive does not carry, and `react` 19.3.1, `react-dom` 19.3.1 and
+> `scheduler` 0.28.0. Each line gives the version, the SHA-256 of the archive,
+> its URL and its licence (MIT for all five). `package-root.sh SERVER [LOCK]`
+> downloads and checks every archive before it makes the root. It unpacks an
+> archive only when it holds nothing but directories and regular files under
+> `package/`. It installs the bundler as `bin/esbuild`, each package under
+> `modules/<name>`, and each licence under `licenses/`. The provider is
+> unchanged for jobs. The test build and the `enforcement-fixture` build know
+> one more entry beside the profiles, the bundler measurement. It has no
+> store name, so no job can name it, and its payload is the root's bundler
+> with rule 1's argv and environment. The bootstrap starts the bundler
+> directly; no test payload sits in between. Its filter is `Measure`. The
+> first program kills `clone3` and the native calls the probes of the
+> public mapping refuse, except the `default` class and calls that the
+> fixture allows in some form. The second program allows the fixture's
+> allowlist, plus the calls listed in the root's `etc/measured-calls`, and
+> logs every other call. The job measures in rounds. Each round writes the
+> calls found so far to that file and runs the template, a bad import and
+> 200 generated modules three times each. A round that records nothing new
+> and loses no kernel record ends the measurement. Its list is the artifact
+> `bundler-calls.txt`: the calls beyond the fixture's allowlist that
+> R03bcbb's filter must add. A kill, a call of another architecture or a
+> refused form of `clone`, `prlimit64`, `socket` or `setsockopt` fails the
+> job. The job also refuses a wrong SHA-256 before anything is written, and
+> refuses a changed file of the `react` package as a modified root.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),

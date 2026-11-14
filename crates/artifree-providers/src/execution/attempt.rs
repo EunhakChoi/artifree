@@ -2007,6 +2007,8 @@ fn conclude(
 }
 
 #[cfg(test)]
+mod bundler_tests;
+#[cfg(test)]
 mod crash_tests;
 mod guardian_link;
 #[cfg(test)]
