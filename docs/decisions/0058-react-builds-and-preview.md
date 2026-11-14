@@ -130,7 +130,12 @@ R03f are not**. Roadmap: R03.
 > descriptor limit is already fixed, `/input` has no parent directory with
 > its own `node_modules`, and the bundler resolves the packages through
 > rule 1's environment alone. No profile is added, so no `react-v1` job
-> exists yet. R03bcbb adds `react-v1`, with the measured set as its filter,
+> exists yet. A call that the vDSO serves leaves no record, yet on
+> another host or kernel the same code can make the real call. So the
+> filter is the measured set plus the vDSO's calls (`clock_gettime`,
+> `gettimeofday`, `time`, `getcpu`), each listed as unmeasured with its
+> reason, as the fixture's table already does for `clock_gettime`. R03bcbb
+> adds `react-v1`, with that set as its filter,
 > plus its argv, its environment and the enforcement cases of its row. Rule
 > 23's first assumption is split the same way: R03bcba shows that the calls
 > fit the boundary, and R03bcbb shows the limits. Rules 4, 22 and 23 and the
