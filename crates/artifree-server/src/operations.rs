@@ -30,7 +30,7 @@ use artifree_core::artifacts::{
 use artifree_core::assets::AssetUpload;
 use artifree_core::build_reads::HeadBuild;
 use artifree_core::data::DataMutation;
-use artifree_core::jobs::{JobPageSize, NewBuild, require_build_profile};
+use artifree_core::jobs::{JobPageSize, NewBuild};
 use artifree_core::listing::{ListQuery, PageSize, SearchText};
 use artifree_core::members::{MAX_TOKEN_BYTES, MemberLimit, MemberQuery, MemberToken};
 use artifree_core::parts::{Boundary, ByteRange, FilePart, RangeError};
@@ -826,6 +826,10 @@ pub(crate) async fn preview(
     let lookup_actor = actor.clone();
     let lookup_id = id.clone();
     let lookup_target = target.clone();
+    let build_profiles = match &target {
+        PreviewTarget::Source => Vec::new(),
+        PreviewTarget::Build(_) => state.settings().build_profiles.clone(),
+    };
     state
         .run(move |artifacts| match &lookup_target {
             PreviewTarget::Source => {
@@ -836,7 +840,13 @@ pub(crate) async fn preview(
                 Ok(())
             }
             PreviewTarget::Build(profile) => artifacts
-                .preview_build(&lookup_actor, &lookup_id, revision, profile)
+                .preview_build(
+                    &lookup_actor,
+                    &lookup_id,
+                    revision,
+                    profile,
+                    &build_profiles,
+                )
                 .map(drop),
         })
         .await?;
@@ -1576,12 +1586,7 @@ pub(crate) async fn enqueue_job(
         (WireJobKind::RunProfile, None) => {
             return Err(ApiError::invalid("profile: a run_profile job requires one"));
         }
-        // A name that cannot be a profile is not one this build knows either;
-        // it is not quoted back.
-        (WireJobKind::RunProfile, Some(name)) => Some(
-            name.parse::<ProfileName>()
-                .map_err(|_| ApiError::from(ArtifactError::ProfileUnknown))?,
-        ),
+        (WireJobKind::RunProfile, Some(name)) => Some(profile_name(&name)?),
     };
     let now = state.clock().now();
     // Only a build reads the build profiles, so a verification copies none.
@@ -1628,17 +1633,13 @@ pub(crate) async fn enqueue_job(
     })
 }
 
-/// The build profile a build preview or the head status names (decision
-/// 0058 rules 14, 16 and 17): one this server's build can build for the
-/// public. Any other, or a name that cannot be a profile, is
-/// `profile_unknown`, before anything is read, and the name is not quoted
-/// back.
-pub(crate) fn build_profile(state: &AppState, name: &str) -> Result<ProfileName, ApiError> {
-    let profile = name
-        .parse::<ProfileName>()
-        .map_err(|_| ApiError::from(ArtifactError::ProfileUnknown))?;
-    require_build_profile(&profile, &state.settings().build_profiles)?;
-    Ok(profile)
+/// The profile a build request names (decision 0058 rules 14, 16 and 17).
+/// A name that cannot be a profile is not one this build knows either: it
+/// is `profile_unknown`, and it is not quoted back. The core then checks
+/// that the profile is a build profile, before anything is read.
+pub(crate) fn profile_name(name: &str) -> Result<ProfileName, ApiError> {
+    name.parse()
+        .map_err(|_| ApiError::from(ArtifactError::ProfileUnknown))
 }
 
 /// The head status of an artifact's builds of `profile` (decision 0058 rule
@@ -1649,40 +1650,42 @@ pub(crate) async fn build_status(
     id: &str,
     profile: &str,
 ) -> Result<WireBuildStatus, ApiError> {
-    let profile = build_profile(state, profile)?;
+    let profile = profile_name(profile)?;
     let id = artifact_id(id)?;
     let name = profile.as_str().to_owned();
+    let builds = state.settings().build_profiles.clone();
     let status = state
-        .run(move |artifacts| artifacts.build_status(&actor, &id, &profile))
+        .run(move |artifacts| artifacts.build_status(&actor, &id, &profile, &builds))
         .await?;
-    let mut wire = WireBuildStatus {
-        profile: name,
-        head_revision: status.head.0,
-        latest_build_revision: status.latest.map(|build| build.revision.0),
-        status: HeadBuildStatus::None,
-        job_id: None,
-        failure: None,
-        diagnostics: Vec::new(),
-    };
-    match status.head_build {
-        HeadBuild::Built => wire.status = HeadBuildStatus::Built,
-        HeadBuild::Pending { job } => {
-            wire.status = HeadBuildStatus::Pending;
-            wire.job_id = Some(job.to_string());
-        }
+    let (head, job_id, failure, diagnostics) = match status.head_build {
+        HeadBuild::Built => (HeadBuildStatus::Built, None, None, Vec::new()),
+        HeadBuild::Pending { job } => (
+            HeadBuildStatus::Pending,
+            Some(job.to_string()),
+            None,
+            Vec::new(),
+        ),
         HeadBuild::Failed {
             job,
             failure,
             diagnostics,
-        } => {
-            wire.status = HeadBuildStatus::Failed;
-            wire.job_id = Some(job.to_string());
-            wire.failure = Some(failure_dto(failure));
-            wire.diagnostics = diagnostic_dtos(&diagnostics);
-        }
-        HeadBuild::None => {}
-    }
-    Ok(wire)
+        } => (
+            HeadBuildStatus::Failed,
+            Some(job.to_string()),
+            Some(failure_dto(failure)),
+            diagnostic_dtos(&diagnostics),
+        ),
+        HeadBuild::None => (HeadBuildStatus::None, None, None, Vec::new()),
+    };
+    Ok(WireBuildStatus {
+        profile: name,
+        head_revision: status.head.0,
+        latest_build_revision: status.latest.map(|build| build.revision.0),
+        status: head,
+        job_id,
+        failure,
+        diagnostics,
+    })
 }
 
 /// What `GET /v1/background` reports: the server's own worker (decision 0055,

@@ -87,10 +87,21 @@ impl Harness {
         key: Option<&str>,
         body: Option<&Value>,
     ) -> Result<Reply, Box<dyn std::error::Error>> {
+        self.send_as(OWNER, method, path, key, body).await
+    }
+
+    async fn send_as(
+        &self,
+        token: &str,
+        method: &str,
+        path: &str,
+        key: Option<&str>,
+        body: Option<&Value>,
+    ) -> Result<Reply, Box<dyn std::error::Error>> {
         let mut builder = Request::builder()
             .method(method)
             .uri(path)
-            .header(header::AUTHORIZATION, format!("Bearer {OWNER}"));
+            .header(header::AUTHORIZATION, format!("Bearer {token}"));
         if let Some(key) = key {
             // A key is 8-128 characters; the tests name them briefly.
             builder = builder.header("idempotency-key", format!("test-key-{key}"));
@@ -431,9 +442,76 @@ async fn the_head_status_follows_the_newest_build_job_of_the_head() -> TestResul
     Ok(())
 }
 
+/// Rule 13 as R03cc implements it: another user, who holds no name, gets the
+/// answer for an artifact nobody holds, though the revision has a build.
+#[tokio::test]
+async fn another_user_finds_no_build_of_the_owners_artifact() -> TestResult {
+    let harness = Harness::building()?;
+    let artifact = harness.artifact().await?;
+    harness.build(&artifact, "build-1", 1).await?;
+    harness.publish_due_build()?;
+    let user = harness
+        .send("POST", "/v1/users", None, Some(&json!({ "label": "bob" })))
+        .await?;
+    assert_eq!(user.status, StatusCode::CREATED, "{}", user.text);
+    let issued = harness
+        .send(
+            "POST",
+            "/v1/tokens",
+            None,
+            Some(&json!({ "name": "bob", "user_id": user.json()?["id"] })),
+        )
+        .await?;
+    assert_eq!(issued.status, StatusCode::CREATED, "{}", issued.text);
+    let bob = issued.json()?["secret"]
+        .as_str()
+        .ok_or("no token secret")?
+        .to_owned();
+
+    let absent = "art_00000000000000000000000000000000";
+    let mut answers = Vec::new();
+    for id in [artifact.as_str(), absent] {
+        let preview = harness
+            .send_as(
+                &bob,
+                "POST",
+                &format!("/v1/artifacts/{id}/revisions/1/builds/react-v1/previews"),
+                Some("bob-preview"),
+                Some(&json!({})),
+            )
+            .await?;
+        let status = harness
+            .send_as(
+                &bob,
+                "GET",
+                &format!("/v1/artifacts/{id}/builds/react-v1"),
+                None,
+                None,
+            )
+            .await?;
+        for reply in [preview, status] {
+            assert_eq!(
+                (reply.status, reply.code()),
+                (StatusCode::NOT_FOUND, "not_found".to_owned()),
+                "{id}: {}",
+                reply.text
+            );
+            answers.push(reply.text.replace(id, "<id>"));
+        }
+    }
+    assert_eq!(
+        answers[..2],
+        answers[2..],
+        "bob tells a held name from none"
+    );
+    // The owner still previews it.
+    let owned = harness.build_preview(&artifact, 1, "react-v1").await?;
+    assert_eq!(owned.status, StatusCode::CREATED, "{}", owned.text);
+    Ok(())
+}
+
 /// Rule 13 as R03cc implements it: in the trash, and for an artifact nobody
-/// holds, both routes answer `not_found`. Another user is refused in
-/// `multi_user.rs`.
+/// holds, both routes answer `not_found`.
 #[tokio::test]
 async fn the_build_routes_find_nothing_in_the_trash() -> TestResult {
     let harness = Harness::building()?;

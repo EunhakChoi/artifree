@@ -1496,7 +1496,11 @@ export class ArtifreeClient {
     return this.json(
       'GET',
       `/v1/artifacts/${encodeURIComponent(id)}/builds/${encodeURIComponent(profile)}`,
-      parseBuildStatus,
+      // A status of another profile than the one asked for is not an answer.
+      (value) => {
+        const status = parseBuildStatus(value);
+        return status?.profile === profile ? status : undefined;
+      },
       { signal: options.signal },
     );
   }

@@ -1909,7 +1909,7 @@ async fn create_build_preview(
     path: Result<Path<(String, u64, String)>, PathRejection>,
 ) -> Result<Response, ApiError> {
     let Path((id, revision, profile)) = path?;
-    let profile = operations::build_profile(&state, &profile)?;
+    let profile = operations::profile_name(&profile)?;
     let preview = operations::preview(
         &state,
         auth.actor,

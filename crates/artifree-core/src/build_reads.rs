@@ -19,7 +19,7 @@ use artifree_ports::build_store::{BuildRecord, BuildSnapshot, BuildStore};
 use artifree_ports::job_store::{JobRecord, JobStore};
 
 use crate::artifacts::{ArtifactError, ArtifactService, Missing};
-use crate::jobs::job_error;
+use crate::jobs::{job_error, require_build_profile};
 
 /// Where the head revision's build stands (decision 0058 rule 16).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,10 +62,13 @@ pub struct BuildStatus {
 
 impl<S: ArtifactStore + JobStore + BuildStore> ArtifactService<S> {
     /// The build a build preview of `revision` serves (decision 0058 rule
-    /// 14), checked as a source preview checks its revision.
+    /// 14), checked as a source preview checks its revision. `profile` must
+    /// pass [`require_build_profile`] for `build_profiles`, the build
+    /// profiles this build knows, before anything is read.
     ///
     /// # Errors
     ///
+    /// [`ArtifactError::ProfileUnknown`] for any other profile;
     /// [`ArtifactError::NotFound`] for an artifact that is not readable, a
     /// revision it does not have, or, with [`Missing::Build`], a revision
     /// without a build for `profile`; or [`ArtifactError::Unavailable`].
@@ -75,7 +78,9 @@ impl<S: ArtifactStore + JobStore + BuildStore> ArtifactService<S> {
         id: &ArtifactId,
         revision: SourceRevision,
         profile: &ProfileName,
+        build_profiles: &[ProfileName],
     ) -> Result<BuildRecord, ArtifactError> {
+        require_build_profile(profile, build_profiles)?;
         let record = self.authorized(actor, id)?;
         if revision.0 == 0 || revision > record.current_revision {
             return Err(ArtifactError::NotFound(Missing::Revision));
@@ -118,10 +123,12 @@ impl<S: ArtifactStore + JobStore + BuildStore> ArtifactService<S> {
     /// revision's build stands (decision 0058 rules 15 and 16). The head, the
     /// builds and the jobs are read in one snapshot of the store, so a
     /// revision committed meanwhile cannot make the latest build newer than
-    /// the head.
+    /// the head. `profile` must pass [`require_build_profile`] for
+    /// `build_profiles`, before anything is read.
     ///
     /// # Errors
     ///
+    /// [`ArtifactError::ProfileUnknown`] for any other profile;
     /// [`ArtifactError::NotFound`] for an artifact that is not readable, or
     /// [`ArtifactError::Unavailable`].
     pub fn build_status(
@@ -129,7 +136,9 @@ impl<S: ArtifactStore + JobStore + BuildStore> ArtifactService<S> {
         actor: &ActorId,
         id: &ArtifactId,
         profile: &ProfileName,
+        build_profiles: &[ProfileName],
     ) -> Result<BuildStatus, ArtifactError> {
+        require_build_profile(profile, build_profiles)?;
         self.authorized(actor, id)?;
         // The artifact can move to the trash between the two reads; it is
         // then as missing as it is to the next request.

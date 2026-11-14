@@ -982,7 +982,8 @@ const HEAD_BUILD_STATUSES: readonly HeadBuildStatus[] = [
 /**
  * Parses `GET /v1/artifacts/{id}/builds/{profile}` (decision 0058 rule 16).
  * A `pending` or `failed` status names its job and no other does; only a
- * `failed` one has a failure and diagnostics; and the latest build is never
+ * `failed` one has a failure, and only a `build_failed` one has diagnostics,
+ * at most 20; and the latest build is never
  * newer than the head, and is the head's when it is `built`.
  */
 export function parseBuildStatus(value: unknown): BuildStatus | undefined {
@@ -1013,7 +1014,9 @@ export function parseBuildStatus(value: unknown): BuildStatus | undefined {
     (status === 'pending' || status === 'failed') !==
       (jobId.set !== undefined) ||
     (status === 'failed') !== (failure.set !== undefined) ||
-    (status !== 'failed' && diagnostics.length > 0)
+    // Only a `build_failed` job keeps diagnostics, at most 20 (rule 13).
+    (failure.set !== 'build_failed' && diagnostics.length > 0) ||
+    diagnostics.length > 20
   )
     return undefined;
   const parsed: BuildStatus = { profile, head_revision, status };

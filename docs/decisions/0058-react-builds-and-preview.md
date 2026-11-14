@@ -679,7 +679,9 @@ Roadmap: R03.
 > - One check decides which profiles a request may name, for the enqueue
 >   of a build, a build preview and the head status alike
 >   (`artifree_core::jobs::require_build_profile`): `react-v1`, where the
->   server's build profiles hold it. It runs before anything is read, so a
+>   server's build profiles hold it. The core's `enqueue_build`,
+>   `preview_build` and `build_status` each run it, before anything is
+>   read, so every caller shares it and a
 >   profile that is not a build profile answers `profile_unknown` whatever
 >   the artifact is, and the name is not quoted back. An artifact that
 >   cannot be read is then `not_found`, as is a revision without that
@@ -687,8 +689,9 @@ Roadmap: R03.
 > - `BuildStatus` is one closed object: `profile`, `head_revision`,
 >   `latest_build_revision` when there is a latest build, `status`, and
 >   `job_id`, `failure` and `diagnostics` only where the split note puts
->   them. The client refuses any other combination, and a latest build
->   newer than the head, as an invalid response.
+>   them. The client refuses any other combination, diagnostics on a
+>   failure other than `build_failed` or more than 20 of them, and a latest
+>   build newer than the head, as an invalid response.
 > - MCP's `create_preview` takes `profile`; without it the tool previews
 >   the revision's files as before. `get_build_status` is a read tool.
 > - The CLI's `artifact preview --build <profile>` previews the current
@@ -698,8 +701,9 @@ Roadmap: R03.
 > - The isolation tables cover both routes and the tool: another user
 >   gets the answer for an artifact nobody holds. The holder's build
 >   preview there is `not_found`, since no worker publishes a build in
->   that test; the holder's build preview is proven with a published
->   build in `build_status_api.rs` and through MCP.
+>   that test. With a published build, `build_status_api.rs` proves that
+>   another user gets the answer for an artifact nobody holds while the
+>   owner gets the ticket, and MCP proves the owner's ticket too.
 > - The web request gate still knows only the source preview route; the
 >   web's build action, status and diagnostics are R03e.
 

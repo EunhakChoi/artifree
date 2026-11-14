@@ -2308,6 +2308,12 @@ test('A build preview and the build status are requested on their routes and che
       status: 'built',
     },
     { head_revision: 2, status: 'none' },
+    { ...failed, failure: 'lease_expired' },
+    { ...failed, profile: 'react-v2' },
+    {
+      ...failed,
+      diagnostics: Array.from({ length: 21 }, () => ({ message: 'no' })),
+    },
   ]) {
     answer = broken;
     assert.equal(

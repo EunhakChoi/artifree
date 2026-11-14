@@ -801,8 +801,8 @@ enum Holder {
     Closes,
     /// The holder's revision has no build, since no worker runs here: the
     /// holder is told the build is missing (`404`), as anyone is for names
-    /// nobody holds. The answer to a holder with a build is proven in
-    /// `build_status_api.rs`.
+    /// nobody holds. Another user against a revision with a build, and the
+    /// holder's ticket, are proven in `build_status_api.rs`.
     Unbuilt,
 }
 

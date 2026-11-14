@@ -248,9 +248,7 @@ pub(crate) async fn dispatch(
                     profile,
                 } = parse(arguments)?;
                 let target = match profile {
-                    Some(profile) => {
-                        PreviewTarget::Build(operations::build_profile(state, &profile)?)
-                    }
+                    Some(profile) => PreviewTarget::Build(operations::profile_name(&profile)?),
                     None => PreviewTarget::Source,
                 };
                 operations::preview(
