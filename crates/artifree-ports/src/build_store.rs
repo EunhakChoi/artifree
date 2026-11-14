@@ -25,6 +25,11 @@ use crate::job_store::{JobRecord, JobStoreError, Lease, ProfileBinding};
 /// The most builds an artifact keeps (decision 0058 rule 12).
 pub const MAX_BUILDS_PER_ARTIFACT: usize = 8;
 
+/// How long a job of a build profile may wait for its first claim by an
+/// execution worker, in milliseconds from its enqueue (decision 0058 rule
+/// 20): ten minutes.
+pub const CLAIM_DEADLINE_MS: i64 = 10 * 60 * 1000;
+
 /// One stored build.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildRecord {
@@ -193,6 +198,24 @@ pub trait BuildStore {
     ///
     /// [`JobStoreError::Unavailable`].
     fn diagnostics(&self, job: &JobId) -> Result<Vec<BuildDiagnostic>, JobStoreError>;
+
+    /// Ends as `execution_unavailable`, in one transaction, every queued
+    /// `run_profile` job of one of `profiles` that was enqueued at or before
+    /// `enqueued_by`, has no attempt row and whose artifact is in place
+    /// (decision 0058 rule 20, slice R03cda), and returns them as ended. A job
+    /// with an attempt row, even one that a graceful release gave back, is
+    /// left to 0057. A claim takes the same write lock, so a job is either
+    /// claimed or ended, never both.
+    ///
+    /// # Errors
+    ///
+    /// [`JobStoreError::Unavailable`].
+    fn expire_unclaimed(
+        &self,
+        profiles: &[ProfileName],
+        enqueued_by: UnixMillis,
+        now: UnixMillis,
+    ) -> Result<Vec<JobRecord>, JobStoreError>;
 
     /// The head revision of the artifact, its latest build for `profile`, the
     /// newest job of `profile` for the head and that job's diagnostics, read

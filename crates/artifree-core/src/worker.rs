@@ -38,7 +38,7 @@ use artifree_domain::job::{
 };
 use artifree_domain::package::FilePackage;
 use artifree_ports::artifact_store::{ArtifactStore, StoreError};
-use artifree_ports::build_store::{BuildPublication, BuildStore};
+use artifree_ports::build_store::{BuildPublication, BuildStore, CLAIM_DEADLINE_MS};
 use artifree_ports::execution::{
     BoundRun, Capacity, Checkpoint as CheckpointPort, CheckpointUnavailable, Execution,
     HeldCapacity, LaunchFailure, LaunchOutcome, PinnedInput, ProfileOutput, ProfileRun,
@@ -323,6 +323,33 @@ pub fn run_next_with<S: ArtifactStore + JobStore + BuildStore + ExecutionPresenc
     run_claimed(&stores, clock, worker, config, pace, profiles, on_claim)
 }
 
+/// Ends the jobs of this build's build profiles that no execution worker
+/// claimed within [`CLAIM_DEADLINE_MS`] of their enqueue, as
+/// `execution_unavailable` (decision 0058 rule 20, slice R03cda), and reports
+/// each as [`ClaimEvent::Settled`]. Every worker does this before its claim, so
+/// the trusted worker, which always runs, ends them when no execution worker
+/// does. A worker without the build store, or a build without a build
+/// profile, ends nothing.
+fn expire_unclaimed<S>(
+    stores: &Stores<'_, S>,
+    clock: &dyn Clock,
+    profiles: Profiles<'_>,
+    on_claim: &mut dyn FnMut(ClaimEvent<'_>),
+) -> Result<(), JobStoreError> {
+    let Some(builds) = stores.builds else {
+        return Ok(());
+    };
+    if profiles.builds.is_empty() {
+        return Ok(());
+    }
+    let now = clock.now();
+    let enqueued_by = UnixMillis(now.0.saturating_sub(CLAIM_DEADLINE_MS));
+    for record in builds.expire_unclaimed(profiles.builds, enqueued_by, now)? {
+        on_claim(ClaimEvent::Settled(&record));
+    }
+    Ok(())
+}
+
 /// The body of [`run_next_with`] and [`run_next_observed`].
 fn run_claimed<S: ArtifactStore + JobStore>(
     stores: &Stores<'_, S>,
@@ -334,6 +361,7 @@ fn run_claimed<S: ArtifactStore + JobStore>(
     on_claim: &mut dyn FnMut(ClaimEvent<'_>),
 ) -> Result<Step, JobStoreError> {
     let store = stores.store;
+    expire_unclaimed(stores, clock, profiles, on_claim)?;
     let mut held = match profiles.execution {
         Some(execution) => {
             // Only a worker that can run a build counts as ready (decision
