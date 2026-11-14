@@ -1,0 +1,300 @@
+# 0058: React builds and their preview
+
+Date: 2026-11-14. Status: **proposed; nothing of it is implemented**.
+Roadmap: R03.
+
+> Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
+> [0056](0056-linux-provider-delivery.md) (the provider),
+> [0057](0057-connecting-execution-to-jobs.md) (the `run_profile` kind and
+> its worker), [0030](0030-persistent-jobs-and-worker.md) (jobs),
+> [0003](0003-local-html-artifact-slice.md) (packages and the preview origin) and
+> [0029](0029-retention-and-cleanup.md) (content references and purge).
+
+## Context
+
+R02 ends with an untrusted worker that runs one profile, the repository's
+fixture, and only in a build with the `enforcement-fixture` feature
+(0057 rules 2 and 21). A release build knows no profile, so every
+`run_profile` job there ends as `execution_unavailable`, and no host is
+called supported. The collected output is counted and dropped (0057
+rule 12). The roadmap row R03 asks for the first real use of that worker:
+build React/TSX source with one fixed template and dependency policy, serve
+only the output of the revision that was built, keep the last good build
+across errors, late results and consecutive saves, and show status and
+errors to agents, the CLI and the web.
+
+The earlier records leave these parts to R03:
+
+- **0042 rule 2:** only a reviewed, fixed profile chooses the executable,
+  its arguments, its environment, its dependency set and its output root.
+  No caller supplies any of them.
+- **0042 rule 3:** an operator-installed, versioned tool root with a complete
+  digest manifest and licences; no download and no lifecycle script at run
+  time; "R03 starts with preinstalled fixed dependencies"; no discovery
+  through `PATH`, npm settings, project configuration or a shell.
+- **0042 rule 5:** the limits (1 GiB, one CPU, 120 s, 64 tasks, a 128 MiB
+  scratch, 256 output files of at most 5 MiB and 25 MiB in total, 1 MiB of
+  log, 256 descriptors). Changing them amends 0042.
+- **0042 rule 7:** R03 owns durable build bytes and preview selection,
+  transactional publication of references, orphan cleanup and the last
+  successful preview. A late or older result never replaces a newer
+  revision's preview. Logs are untrusted text. No object storage and no
+  second source write path.
+- **0042 rule 1 and 0057 rule 3:** the public kind and its wire error
+  vocabulary.
+- **0056 rules 4 and 6:** the server binary refuses until R03 adds the first
+  real profile; packaging the tool root for operators is R03's, and so is the
+  documentation of the host and the second worker unit.
+- **0042 section 8:** R03's presentation changes need Chromium and Firefox
+  smoke checks.
+
+Packages today follow 0003: at most 256 files of 5 MiB and 25 MiB in
+total, an `index.html`, and a closed list of 20 media types that has no
+`.ts`, `.tsx`, `.jsx` or `.cjs`. The same rules are mirrored in the runtime
+SDK and the shared path fixtures, and published as `package_rules`. A
+preview ticket is bound to one revision and serves that revision's files
+from the separate origin under `/p/{ticket}/` and `/r/{ticket}/`.
+
+## Decisions
+
+Each slice that changes a rule of an earlier record adds a dated note to
+that record in the same change, as R02 did; until then the earlier rule
+stands.
+
+### The profile
+
+1. **One profile, `react-v1`, whose payload is one bundler.** The payload is
+   a statically linked esbuild executable from the tool root. No Node.js
+   runtime, package manager or shell is in the root. The bootstrap still
+   takes only the profile's identity (0056 rule 3); the profile, not the job,
+   holds the rest:
+   - argv: bundle `/input/src/main.tsx` into `/tmp/out` as `app.js` and,
+     when the source imports CSS, `app.css`; ES module format, browser
+     platform, the automatic JSX runtime, minified, no source maps, no
+     colour, a bounded message count, and `metafile` off;
+   - environment: only the module directory of the root's preinstalled
+     packages and a setting that keeps the bundler's runtime within one
+     CPU and 64 tasks. No other variable is passed;
+   - output root: `/tmp/out`, as for the fixture.
+2. **A fixed dependency set.** The root holds `react`, `react-dom` and
+   `scheduler` at one pinned version each, unpacked, with their licences.
+   An import of any other bare module fails the build. The set changes only
+   with a new profile name (`react-v2`) and a new tool root; a job pins its
+   profile, so a job enqueued under one set never runs under another.
+3. **Its own system call filter.** `react-v1` gets an allow list measured
+   from the bundler on the supported host, kept separate from the fixture's
+   table. A call outside it ends the attempt (rule 18 names the failure).
+4. **The limits of 0042 rule 5 are unchanged.** If the bundler cannot build
+   the template within them, R03b amends 0042; it does not raise a limit in
+   code.
+5. **Which builds know `react-v1`.** This amends 0056 rule 4 and 0057
+   rule 2. The server built for x86_64 Linux knows `react-v1` in its release
+   build; the fixture stays behind `enforcement-fixture`. A server built for
+   any other target knows no profile, as today, and refuses an enqueue of
+   `react-v1` with `profile_unknown` (rule 17), so a job is never queued
+   where no worker could run it. On a known target, a host that fails
+   readiness is handled by rule 20.
+
+### The source and the output
+
+6. **Package rules accept source files.** `.ts`, `.tsx` and `.jsx` join the
+   media types (served as `text/plain` on the preview origin, never as
+   script), together with the runtime SDK's mirror, the shared fixtures and
+   `package_rules`. This bumps the contract. The other limits of 0003 do not
+   change. A package still needs `index.html`.
+7. **A fixed template layout.** A buildable revision has `index.html` and
+   `src/main.tsx`; other files under `src/` are bundler input. The
+   `index.html` loads the bundle with exactly
+   `<script type="module" src="./app.js"></script>` and refers to no path
+   under `src/`; R03c's composition checks both and refuses the build
+   otherwise, so a successful build never references a missing file. The
+   worker stages the whole pinned revision as today (0057 rule 8). Nothing
+   in the revision chooses an entry point, a flag or a dependency.
+8. **The trusted worker composes the result.** After a passing verdict
+   (0056 rule 5) the worker takes the collected bundler output and adds the
+   pinned revision's files outside `src/` by digest. A path that both
+   contain, a bundler output other than `app.js` and `app.css`, an
+   `index.html` that breaks rule 7, or a result that breaks a package rule
+   ends the job as `output_rejected`. The bundler never writes `index.html`.
+
+### Durable builds
+
+9. **Schema 15.** It adds two tables and rebuilds `jobs` once, so that R03c
+   needs no second rebuild:
+   - `builds`: the artifact, the revision, the profile, the job, the tool
+     digest, the file count, the total size and the time of publication;
+   - `build_files`: each path with its size and SHA-256, whose bytes are
+     rows of the existing `blobs` table;
+   - `jobs.failure` gains `build_failed`, `limit_exceeded` and
+     `output_rejected` (rule 18); the change feed's kinds are unchanged;
+   - `job_diagnostics`: the rows of rule 13.
+10. **One build per revision and profile, the first one kept.** At most one
+    build exists for an artifact, revision and profile. A later success for
+    the same three publishes nothing new: its job ends `succeeded` and names
+    the build that already exists, so a page served from that build never
+    sees its files change.
+11. **Publication is one transaction with the job's success.** The blobs, the
+    build rows and the job's terminal state are written in the transaction
+    that checks the binding of 0042 rule 7 again. A failed check writes none
+    of them, so no build exists without its job's success and no blob is
+    added outside it. 0057 rule 12 (counts only) is amended for `react-v1`.
+12. **Reference rules and retention.** `build_files.digest` joins every
+    predicate that keeps a blob (`remove_files`, `count_unreferenced`,
+    `remove_unreferenced_content`) and the test that no binary column can
+    hide a content digest. Purge deletes the artifact's builds and its jobs'
+    diagnostics in its transaction. Trash keeps them and serves none. Backup
+    copies them; restore keeps them, bound to the same revisions. An
+    artifact keeps at most eight builds: the publishing transaction removes
+    the oldest by publication time, never the latest build of rule 15 and
+    never the one it publishes. Removed builds' blobs follow the existing
+    reclamation.
+13. **Structured, bounded diagnostics.** This amends 0030 rules 9 and 11 for
+    `react-v1` only. A `build_failed` job keeps at most 20 diagnostics, each
+    a package path, a line, a column and a message of at most 512 bytes:
+    valid UTF-8 (invalid bytes replaced), no control character, and the
+    `/input/` prefix rewritten to the package-relative path. The bundler's
+    quoted source excerpt is dropped, but a message can still name source
+    text (an import specifier, an identifier), so diagnostics are read only
+    by whoever may read the job's revision, through the job, and there is no
+    log endpoint. Only the newest failed `react-v1` job of an artifact keeps
+    diagnostics: when another one ends, the earlier rows are deleted in that
+    transaction. A succeeded job keeps none.
+
+### Preview selection
+
+14. **A build preview per revision.** The preview origin gains `/b/{ticket}/`.
+    A build ticket is bound to one artifact, one revision and one profile,
+    and serves only that build's files under the existing CSP sandbox. It
+    is issued by the existing management preview operation given a build
+    target, and lives in the same ticket registry, so token revocation,
+    actor disable and trash revoke it as they revoke a source ticket. The
+    API, MCP and the CLI all issue it. A target revision without a build is
+    refused at issue.
+15. **"Latest" is computed, not stored.** The latest build of an artifact for
+    a profile is its build with the highest revision number. A late or
+    older result can only add a build for its own revision, so it never
+    replaces a newer one (0042 rule 7), and consecutive saves keep the last
+    good build until a newer one succeeds.
+16. **Head status.** When the head revision has no build, the reads report
+    the state of the newest `react-v1` job for the head by enqueue order:
+    `pending` (queued, retry scheduled or running), `failed` with that job's
+    failure and diagnostics, or `none`. Older jobs for the head are listed
+    with the job reads but do not set the status.
+
+### The public kind
+
+17. **`run_profile` is public with `profile: "react-v1"`.** The existing
+    `POST /v1/artifacts/{id}/jobs` accepts it, pinning a target revision and
+    taking an idempotency key as 0030 rule 2 does. There is no base-revision
+    precondition, since the job writes no source: any revision of the
+    artifact can be built, including one older than the head. The open-job
+    bound applies. The job reads, the change feed, MCP and the CLI show the
+    kind for a known profile. An enqueue of a profile this build does not
+    know answers `profile_unknown`. R03 enqueues only on request; it does
+    not build on every save and does not coalesce.
+18. **The failure vocabulary.** None of these is retried:
+    - `build_failed`: the bundler exited non-zero (with diagnostics), or the
+      filter of rule 3 ended it (with one fixed diagnostic);
+    - `limit_exceeded`: a limit of 0042 rule 5 ended the attempt;
+    - `output_rejected`: rule 8 refused the result.
+
+    `execution_unavailable`, cleanup failures and lease loss keep their
+    meaning. R03b extends the provider's verdict so these cases are told
+    apart and the bundler's stderr is handed to the worker within the 1 MiB
+    log bound; today all three reach `internal`.
+
+### The operator's side
+
+19. **A packaging script, not packaged bytes.** The repository holds a lock
+    list and a script that an operator runs as root for each server
+    release. The lock list names, for the bundler and each package, its
+    version, download URL, SHA-256 and licence. The script assembles the
+    whole root the provider admits, as `scripts/enforcement/prepare.sh` does
+    for the fixture: the pinned launcher and its licence, the server binary
+    as the bootstrap, the libraries they load, the bundler, the packages,
+    the licences and the manifest, with the owner and modes the provider
+    checks, and the AppArmor launcher profile the supported host needs for
+    unprivileged user namespaces. The root's path carries a version that the
+    server build names (`/opt/artifree/tools/<version>`, replacing the fixed
+    `v1`); since the bootstrap is the server binary, each server release
+    names a new version, and the script refuses to write over an existing
+    one (0042 rule 3: no in-place replacement). The enforcement job builds
+    its root with the same script. Nothing of the root is committed, and no
+    download runs in a worker or a build.
+20. **A build never waits forever.** On a known target, a `react-v1` job
+    that no execution worker has claimed within ten minutes of its enqueue
+    ends as `execution_unavailable`; the trusted worker, which always runs,
+    ends it at its claim loop. A job that has an attempt is governed by
+    0057 and is not ended by this rule. `GET /v1/background` reports whether
+    an execution worker is ready, so the web and the CLI can say why builds
+    do not start.
+21. **A supported host.** When R03f lands, Ubuntu 24.04 on x86_64, prepared
+    by the script of rule 19, is the supported host. The operator
+    documentation describes that preparation and the second worker unit
+    (0056 rule 6). Other hosts are not supported.
+
+### Slices
+
+22. R03 is delivered in this order. Each slice passes `npm run check` and
+    `npm run build`; slices that touch the worker also pass the enforcement
+    job, and R03e passes Chromium and Firefox smoke.
+
+| Slice | What it adds                                                                                                                                                                                          | Proven where                                                                                                                                                                                                                                   |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R03a  | Rule 6: the media types, the SDK mirror, the fixtures, `package_rules` and the contract bump.                                                                                                         | Unit and contract tests on any host; a `.tsx` file is accepted and served as text; mutations of the new types.                                                                                                                                 |
+| R03b  | Rules 1 to 5, 19 and the provider half of 18: the profile, its filter, the verdicts and stderr hand-off, the versioned root path, the lock list and the packaging script used by the enforcement job. | The enforcement job: the template builds within every limit; a bad import, a forbidden call and a limit each give their own verdict; a modified root is refused.                                                                               |
+| R03c  | Rules 7 to 16, 20 and the store half of 18: composition, schema 15, publication, references, retention, diagnostics, build tickets, the `/b/` route, head status and the claim deadline.              | SQLite tests on any host for each transaction, reference and retention rule, the first-build-kept rule, purge, backup, restore and the deadline; the enforcement job for a published build, a `build_failed` with diagnostics and its preview. |
+| R03d  | Rule 17 and the wire half of 18: the public kind, `profile_unknown`, the contract, MCP and the CLI, including build tickets.                                                                          | Contract, API, MCP and CLI tests, including refusals and the open-job bound.                                                                                                                                                                   |
+| R03e  | The web: a build action, head status and diagnostics, and the build preview with its "latest" notice.                                                                                                 | Component tests and Chromium and Firefox smoke.                                                                                                                                                                                                |
+| R03f  | Rule 21: the operator documentation and the supported-host statement.                                                                                                                                 | Review; the enforcement job follows the documented steps.                                                                                                                                                                                      |
+
+### What a slice still has to settle
+
+23. These are assumptions the named slice must prove, and amend this record
+    if they fail:
+    - R03b: that the bundler builds the template under the limits of 0042
+      rule 5 with one CPU and 64 tasks, and that its system calls fit a
+      filter no wider than the boundary allows.
+    - R03b: that the bundler resolves the preinstalled packages through the
+      profile's environment alone, without a configuration file in the
+      revision, and that its messages can be split into rule 13's fields.
+    - R03c: that a 25 MiB publication fits in one SQLite transaction within
+      the worker's lease.
+
+## Alternatives considered
+
+- **A Node.js runtime with a JavaScript bundler.** Rejected for R03: a
+  larger root, more system calls and a loader to package, with no gain for
+  one fixed template.
+- **Installing packages per build.** Rejected: 0042 rule 3 forbids downloads
+  at run time and needs its own specification with networking.
+- **Committing the tool root or its packages.** Rejected: vendor bundles do
+  not belong in the repository (AGENTS.md, provenance).
+- **A stored "current build" pointer.** Rejected: a computed latest needs no
+  update order, so a late result cannot win a race.
+- **Replacing a revision's build with a later success.** Rejected: an open
+  build preview would change under its reader, and a slower earlier job
+  would win.
+- **Free-text build logs with the job.** Rejected: 0030 keeps job failures
+  free of text; structured, bounded rows for the newest failure are the
+  smallest amendment that lets a user fix a build.
+- **Generating `index.html` in the worker.** Rejected for R03: the template
+  owns its page, and checking one fixed script line is enough to keep a
+  build from referencing a missing file.
+- **Building on every save.** Deferred: it needs coalescing and a policy for
+  the open-job bound. R03 builds on request.
+- **Serving the build under `/p/`.** Rejected: a revision's source and its
+  build are different packages, and one ticket must name one.
+
+## Consequences
+
+- A release server for x86_64 Linux can run untrusted code for the first
+  time, on a prepared host with an operator-installed root and a second
+  worker unit. Each server release needs its root prepared again.
+- The store keeps build bytes beside revision bytes, under the same
+  reclamation, and a purge removes them.
+- Jobs may hold bounded, structured build diagnostics, the first job text
+  derived from source.
+- The contract gains source media types, a public kind, `profile_unknown`,
+  three failures, build tickets and a build preview route.
+- T01b can add the first React template on top of R03.
