@@ -17,11 +17,15 @@ use artifree_ports::artifact_store::StoreError;
 use artifree_ports::build_store::{
     BuildPublication, BuildRecord, BuildSnapshot, BuildStore, MAX_BUILDS_PER_ARTIFACT, Publication,
 };
-use artifree_ports::job_store::{JobRecord, JobStoreError, Lease, ProfileCounts, Retry};
+use artifree_ports::job_store::{
+    JobRecord, JobStoreError, Lease, ProfileCounts, READY_WINDOW_MS, Retry,
+};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
-use super::{artifact_in_place, attempts, fail, held, profile_job, read_job};
+use super::{
+    artifact_in_place, attempts, end, fail, held, profile_job, read_job, record_job_change, written,
+};
 use crate::storage::{
     SqliteStore, corrupt, sql_revision, stored_path, stored_revision, unavailable,
 };
@@ -528,6 +532,106 @@ fn newest_job(
     read_job(connection, &id)
 }
 
+/// The jobs that rule 20 ends (decision 0058): queued `run_profile` jobs of
+/// one of the named profiles (`:p0` to `:pN`, `placeholders` of them),
+/// enqueued at or before `:enqueued_by`, without an attempt row, of an
+/// artifact in place and an enabled actor, while no execution worker is ready
+/// at `:now`. The claim's own condition and the readiness read are shared,
+/// not copied.
+fn unclaimed(placeholders: &str) -> String {
+    format!(
+        concat!(
+            "FROM jobs j JOIN artifacts a ON a.id = j.artifact_id
+     WHERE j.kind = 'run_profile' AND j.state = 'queued' AND j.created_at <= :enqueued_by
+       AND j.profile IN ({}) AND ",
+            in_place_and_enabled!(),
+            "
+       AND NOT EXISTS (SELECT 1 FROM execution_attempts e WHERE e.job_id = j.id)
+       AND NOT ",
+            a_worker_is_ready!()
+        ),
+        placeholders
+    )
+}
+
+/// The named parameters of [`unclaimed`] for `profiles`, with the list of
+/// their placeholders.
+struct Unclaimed {
+    placeholders: String,
+    names: Vec<String>,
+    profiles: Vec<String>,
+    enqueued_by: i64,
+    now: i64,
+}
+
+impl Unclaimed {
+    fn new(profiles: &[ProfileName], enqueued_by: UnixMillis, now: UnixMillis) -> Self {
+        let names: Vec<String> = (0..profiles.len())
+            .map(|index| format!(":p{index}"))
+            .collect();
+        Self {
+            placeholders: names.join(", "),
+            names,
+            profiles: profiles
+                .iter()
+                .map(|profile| profile.as_str().to_owned())
+                .collect(),
+            enqueued_by: enqueued_by.0,
+            now: now.0,
+        }
+    }
+
+    fn params(&self) -> Vec<(&str, &dyn rusqlite::ToSql)> {
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![
+            (":enqueued_by", &self.enqueued_by),
+            (":now", &self.now),
+            (":window", &READY_WINDOW_MS),
+        ];
+        for (name, profile) in self.names.iter().zip(&self.profiles) {
+            params.push((name.as_str(), profile));
+        }
+        params
+    }
+}
+
+/// The jobs that rule 20 ends: queued `run_profile` jobs of `profiles`,
+/// enqueued at or before `enqueued_by`, without an attempt row, of an artifact
+/// in place and an enabled actor, while no execution worker is ready at `now`.
+/// Each ends as `execution_unavailable`, with its change recorded (the record
+/// keeps `run_profile` out of the change feed until R03d).
+fn expire(
+    transaction: &Transaction<'_>,
+    query: &Unclaimed,
+    now: UnixMillis,
+) -> Result<Vec<JobRecord>, StoreError> {
+    let candidates = {
+        let mut statement = transaction
+            .prepare(&format!(
+                "SELECT j.id {} ORDER BY j.created_at, j.id",
+                unclaimed(&query.placeholders)
+            ))
+            .map_err(unavailable)?;
+        let rows = statement
+            .query_map(query.params().as_slice(), |row| row.get::<_, String>(0))
+            .map_err(unavailable)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(unavailable)?
+    };
+    let mut ended = Vec::new();
+    for id in candidates {
+        let id: JobId = id.parse().map_err(corrupt)?;
+        end(
+            transaction,
+            &id,
+            JobState::Failed,
+            Some(JobFailure::ExecutionUnavailable),
+            now,
+        )?;
+        record_job_change(transaction, &id)?;
+        ended.push(written(transaction, &id)?);
+    }
+    Ok(ended)
+}
+
 impl BuildStore for SqliteStore {
     fn publish_build(
         &self,
@@ -591,6 +695,36 @@ impl BuildStore for SqliteStore {
             return Ok(None);
         }
         Ok(read_files(&snapshot, artifact, revision, profile)?)
+    }
+
+    fn expire_unclaimed(
+        &self,
+        profiles: &[ProfileName],
+        enqueued_by: UnixMillis,
+        now: UnixMillis,
+    ) -> Result<Vec<JobRecord>, JobStoreError> {
+        if profiles.is_empty() {
+            return Ok(Vec::new());
+        }
+        // A read first, with the same condition, so that a worker's every
+        // poll does not take the write lock; the write decides again inside
+        // its transaction.
+        let query = Unclaimed::new(profiles, enqueued_by, now);
+        let any: bool = self
+            .connect()?
+            .query_row(
+                &format!(
+                    "SELECT EXISTS (SELECT 1 {})",
+                    unclaimed(&query.placeholders)
+                ),
+                query.params().as_slice(),
+                |row| row.get(0),
+            )
+            .map_err(unavailable)?;
+        if !any {
+            return Ok(Vec::new());
+        }
+        Ok(self.write(|transaction| expire(transaction, &query, now))?)
     }
 
     fn build_file(

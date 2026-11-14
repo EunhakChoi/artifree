@@ -24,9 +24,10 @@ use std::time::Duration;
 
 use artifree_core::jobs::Clock;
 use artifree_core::worker::{self, ClaimEvent, Pace, Profiles, Step, WorkerConfig};
+use artifree_domain::identity::UnixMillis;
 use artifree_domain::job::{AttemptIdentity, WorkerId};
 use artifree_ports::execution::Execution;
-use artifree_ports::job_store::{JobRecord, JobStore, JobStoreError};
+use artifree_ports::job_store::{JobRecord, JobStore, JobStoreError, READY_WINDOW_MS};
 use artifree_providers::storage::{DATABASE_FILE, SqliteStore};
 
 /// How often a sleeping worker looks at the shutdown flag.
@@ -144,7 +145,13 @@ pub fn run(
 ) -> Result<Stopped, String> {
     let (store, worker) = open_store(&options.data_dir)?;
     let lease_ms = u64::try_from(options.lease.as_millis()).unwrap_or(u64::MAX);
-    let config = WorkerConfig::with_lease_ms(lease_ms);
+    let config = WorkerConfig {
+        // The claim deadline waits one readiness window from the start, so
+        // that execution workers started with this one mark themselves seen
+        // first (decision 0058 rule 20).
+        deadline_from: UnixMillis(clock.now().0.saturating_add(READY_WINDOW_MS)),
+        ..WorkerConfig::with_lease_ms(lease_ms)
+    };
     let pace = ProcessPace {
         shutdown,
         hold_file: options.hold_file.as_deref(),

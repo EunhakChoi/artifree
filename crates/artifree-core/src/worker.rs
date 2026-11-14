@@ -38,7 +38,7 @@ use artifree_domain::job::{
 };
 use artifree_domain::package::FilePackage;
 use artifree_ports::artifact_store::{ArtifactStore, StoreError};
-use artifree_ports::build_store::{BuildPublication, BuildStore};
+use artifree_ports::build_store::{BuildPublication, BuildStore, CLAIM_DEADLINE_MS};
 use artifree_ports::execution::{
     BoundRun, Capacity, Checkpoint as CheckpointPort, CheckpointUnavailable, Execution,
     HeldCapacity, LaunchFailure, LaunchOutcome, PinnedInput, ProfileOutput, ProfileRun,
@@ -92,6 +92,11 @@ pub struct WorkerConfig {
     pub heartbeat_ms: u64,
     /// The backoff between attempts.
     pub retry: RetryPolicy,
+    /// The time from which this worker applies the claim deadline of decision
+    /// 0058 rule 20. A worker process sets it a readiness window after its
+    /// start, so that at a start or after a restore, when no execution worker
+    /// has marked itself seen yet, the first poll does not end the backlog.
+    pub deadline_from: UnixMillis,
 }
 
 impl WorkerConfig {
@@ -102,6 +107,7 @@ impl WorkerConfig {
             lease_ms,
             heartbeat_ms: (lease_ms / 3).max(1),
             retry: RetryPolicy::default(),
+            deadline_from: UnixMillis(i64::MIN),
         }
     }
 }
@@ -323,6 +329,36 @@ pub fn run_next_with<S: ArtifactStore + JobStore + BuildStore + ExecutionPresenc
     run_claimed(&stores, clock, worker, config, pace, profiles, on_claim)
 }
 
+/// Ends the jobs of this build's build profiles that no execution worker
+/// claimed within [`CLAIM_DEADLINE_MS`] of their enqueue, as
+/// `execution_unavailable` while no execution worker is ready (decision 0058
+/// rule 20, slice R03cdb), and reports each as [`ClaimEvent::Settled`]. Every
+/// worker does this after asking for capacity and before its claim, so an
+/// execution worker given capacity has marked itself seen first and ends
+/// nothing, and the trusted worker, which always runs, ends them when no
+/// execution worker is ready. A worker without the build store, or before
+/// [`WorkerConfig::deadline_from`], ends nothing.
+fn expire_unclaimed<S>(
+    stores: &Stores<'_, S>,
+    clock: &dyn Clock,
+    config: &WorkerConfig,
+    profiles: Profiles<'_>,
+    on_claim: &mut dyn FnMut(ClaimEvent<'_>),
+) -> Result<(), JobStoreError> {
+    let Some(builds) = stores.builds else {
+        return Ok(());
+    };
+    let now = clock.now();
+    if now.0 < config.deadline_from.0 {
+        return Ok(());
+    }
+    let enqueued_by = UnixMillis(now.0.saturating_sub(CLAIM_DEADLINE_MS));
+    for record in builds.expire_unclaimed(profiles.builds, enqueued_by, now)? {
+        on_claim(ClaimEvent::Settled(&record));
+    }
+    Ok(())
+}
+
 /// The body of [`run_next_with`] and [`run_next_observed`].
 fn run_claimed<S: ArtifactStore + JobStore>(
     stores: &Stores<'_, S>,
@@ -346,6 +382,7 @@ fn run_claimed<S: ArtifactStore + JobStore>(
         }
         None => None,
     };
+    expire_unclaimed(stores, clock, config, profiles, on_claim)?;
     let claim = store.claim_job(JobClaim {
         worker,
         now: clock.now(),

@@ -7,8 +7,8 @@ packaged bundler and its measurement), R03bcbb (the `react-v1` profile in
 the build with `enforcement-fixture`), R03ca (the store of builds and
 diagnostics), R03cb (the worker's composition, diagnostics and failures),
 R03cc (build tickets, the `/b/` route and the head status, below the
-wire) and R03cda (the execution readiness, schema 16) are implemented,
-R03cdb to R03f are not**. Roadmap: R03.
+wire), R03cda (the execution readiness, schema 16) and R03cdb (the
+claim deadline) are implemented, R03d to R03f are not**. Roadmap: R03.
 
 > **Note, 2026-11-14 (slices).** R03b is split into R03ba, R03bb and R03bc,
 > and rule 5 moves to R03f. A release build compiles no attempt, worker port,
@@ -519,6 +519,44 @@ R03cdb to R03f are not**. Roadmap: R03.
 >   and keeps the server's worker status. The web and the CLI do not show
 >   the readiness yet.
 
+> **Note, 2026-11-15 (R03cdb).** The deadline is implemented as the split
+> note describes it.
+>
+> - `BuildStore::expire_unclaimed` ends, in one write transaction, each
+>   queued `run_profile` job of the given build profiles that:
+>   - was enqueued ten minutes or more before now (`CLAIM_DEADLINE_MS`);
+>   - has no attempt row;
+>   - has its artifact in place;
+>   - belongs to an enabled actor;
+>     and only while no `execution_workers` row is within the readiness
+>     window of now.
+> - A read decides first whether any job qualifies, so an idle poll takes
+>   no write lock.
+> - Each end is recorded through the job-change recording, which keeps
+>   `run_profile` out of the change feed until R03d. The worker reports
+>   each end as a settled claim event.
+> - Every worker's loop calls it after asking for capacity and before the
+>   claim. An execution worker given capacity has therefore marked itself
+>   seen first and ends nothing; it claims the old job instead.
+> - A worker without the build store, or a build that knows no build
+>   profile (a release build until R03f), ends nothing.
+> - A running job always has an attempt row, so the queued-state
+>   condition and the attempt condition guard it twice.
+> - The readiness condition is the one the readiness read uses, a row
+>   within the window before or after now, and the profiles are compared in
+>   the same SQL, so the read that skips the write and the write agree.
+> - A worker process applies the deadline only from one readiness window
+>   after its start (`WorkerConfig::deadline_from`). At a start, or after a
+>   restore empties `execution_workers`, an execution worker that runs has
+>   not marked itself seen yet; without this wait the first poll of the
+>   trusted worker would end the whole backlog. The wait only delays an end,
+>   so it never ends a job that rule 20 keeps.
+> - Known limitation: an execution worker marks itself seen when it is given
+>   capacity and when it renews a build's lease, not while it runs a verify
+>   job. A verify job reads one bounded revision, so it ends well within the
+>   readiness window; a verify renewal cannot mark the row, because the
+>   trusted worker runs verify jobs too and must never look ready.
+
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),
 > [0057](0057-connecting-execution-to-jobs.md) (the `run_profile` kind and
@@ -788,7 +826,7 @@ stands.
 | R03cb   | Rules 7 and 8, and the worker half of rules 11, 13 and 18: composition, the split of the bundler's messages into diagnostics, the failure names (including resolver configuration as `build_failed`) and the publication through R03ca.                                                                                                                                                                                                        | Unit tests on any host for composition and the message split; the enforcement job for a published build, a `build_failed` with its diagnostics, a filter kill as `build_failed` with its fixed diagnostic, resolver configuration as `build_failed`, a `limit_exceeded` and an `output_rejected`.                                                                          |
 | R03cc   | Rules 14 to 16 below the wire, and the read rule of 13: the build target of the management preview operation, build tickets and their revocation, the `/b/{ticket}/` route, and the head status on R03ca's latest-build query.                                                                                                                                                                                                                 | SQLite and service tests on any host for the head status, ticket revocation and the refusal of diagnostics to a caller who may not read the revision; HTTP tests for the `/b/` route under the CSP sandbox; the enforcement job for the preview of a published build.                                                                                                      |
 | R03cda  | Rule 20's readiness: schema 16 with `execution_workers`, the execution worker's row written at capacity and at each lease renewal (at most once a minute), deleted at a refusal and emptied at a restore, and `execution.ready` in `GET /v1/background`, with contract 0.29.0.                                                                                                                                                                 | Store and core tests with the injected clock for the row at capacity and at a renewal, the one-minute rewrite, the refusal, the pruning, the window's edges and the restore; contract and API tests for the readiness; the enforcement job, where a worker with capacity makes it ready.                                                                                   |
-| R03cdb  | Rule 20's deadline, after R03cda: every worker's claim loop ends a known build profile's queued job with no attempt row, outside the trash and of an enabled actor, ten minutes after its enqueue as `execution_unavailable` while no execution worker is ready.                                                                                                                                                                               | Tests on any host with the injected clock for the deadline's edge, a ready worker, a job with an attempt row, a job in the trash, a disabled user's job, a profile that is not a build profile, an execution worker's loop and a job claimed first; the enforcement job unchanged.                                                                                         |
+| R03cdb  | Rule 20's deadline, after R03cda: every worker's claim loop ends a known build profile's queued job with no attempt row, outside the trash and of an enabled actor, ten minutes after its enqueue as `execution_unavailable` while no execution worker is ready.                                                                                                                                                                               | Tests on any host with the injected clock for the deadline's edge, a ready worker, a job with an attempt row, a job in the trash, a disabled user's job, a profile that is not a build profile, an execution worker's loop, a job claimed first, a worker row seen after now and a worker's start-up wait; the enforcement job unchanged.                                  |
 | R03d    | Rule 17 and the wire half of 18: the public kind, `profile_unknown`, the contract, MCP and the CLI, including build tickets.                                                                                                                                                                                                                                                                                                                   | Contract, API, MCP and CLI tests, including refusals and the open-job bound.                                                                                                                                                                                                                                                                                               |
 | R03e    | The web: a build action, head status and diagnostics, and the build preview with its "latest" notice.                                                                                                                                                                                                                                                                                                                                          | Component tests, and Chromium and Firefox smoke for the request, the pending and failed states and the refusal. No smoke host runs a profile, so a successful build and its `/b/` preview are proven by component tests and by the enforcement job at the HTTP level.                                                                                                      |
 | R03f    | Rules 5 and 21: the release build for x86_64 Linux compiles the launch path and knows `react-v1`, and the operator documentation and the supported-host statement.                                                                                                                                                                                                                                                                             | Release-archive and clean-install checks of the launch path; the enforcement job runs the release binary's worker; review of the documentation.                                                                                                                                                                                                                            |
