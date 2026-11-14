@@ -31,6 +31,24 @@ use seccompiler::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct PolicyError;
 
+/// The system call filter of an execution profile (decision 0058 rule 3). Each profile names
+/// one, and the bootstrap installs only that one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum FilterSet {
+    /// The fixture profile's refusal and allowlist.
+    Fixture,
+}
+
+/// The two programs of `set`, in installation order.
+///
+/// # Errors
+/// Returns `PolicyError` when the architecture is not `x86_64` or the compiler rejects the rules.
+pub(super) fn filters(set: FilterSet) -> Result<[BpfProgram; 2], PolicyError> {
+    match set {
+        FilterSet::Fixture => fixture_filters(),
+    }
+}
+
 /// The syscalls the allowlist allows unconditionally, as `(name, number)` pairs sorted by number.
 /// The names serve review and the table test; the numbers are what the filter uses. `clone3` is
 /// listed too, so that the refusal's `ENOSYS` is its result and not a kill (see `clone3_refusal`).
@@ -409,16 +427,16 @@ fn compile(rules: BTreeMap<i64, Vec<SeccompRule>>) -> Result<BpfProgram, PolicyE
     BpfProgram::try_from(filter).map_err(|_| PolicyError)
 }
 
-/// The SHA-256 of the fixture profile's two programs, the refusal first and then the allowlist.
+/// The SHA-256 of the two programs of `set`, the refusal first and then the allowlist.
 /// Each instruction contributes its code (little-endian `u16`), its two jump offsets (one byte
 /// each) and its constant (little-endian `u32`), in program order. Only the launch of the test
 /// build and of the `enforcement-fixture` feature uses it (decision 0057 rule 2).
 ///
 /// # Errors
-/// Returns `PolicyError` when the fixture filters cannot be built.
+/// Returns `PolicyError` when the filters cannot be built.
 #[cfg(any(test, feature = "enforcement-fixture"))]
-pub(super) fn policy_sha256() -> Result<String, PolicyError> {
-    let programs = fixture_filters()?;
+pub(super) fn policy_sha256(set: FilterSet) -> Result<String, PolicyError> {
+    let programs = filters(set)?;
     let mut bytes = Vec::new();
     for program in &programs {
         for instruction in program {

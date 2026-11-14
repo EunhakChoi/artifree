@@ -45,9 +45,10 @@ use super::attempt::{
 use super::cgroup;
 use super::guardian::GuardianReason;
 use super::launcher::EntryProgram;
+use super::profile;
 use super::registry::{self, Identity, QuarantineReason, RecordRun};
 use super::staging::{InputListing, VerifiedInput};
-use super::{AdmissionRefusal, FIXTURE_PROFILE, read_bounded};
+use super::{AdmissionRefusal, read_bounded};
 
 /// The file of the execution directory that holds its identity (decision 0057 rule 6).
 const DIRECTORY_IDENTITY_FILE: &str = "directory-identity";
@@ -228,7 +229,12 @@ impl HeldCapacity for HeldFixture {
         input: PinnedInput,
         checkpoint: &dyn Checkpoint,
     ) -> LaunchOutcome {
-        if self.launched || run.attempt != self.attempt || run.profile.as_str() != FIXTURE_PROFILE {
+        // The job's profile name selects a reviewed profile, and nothing else of the request does
+        // (decision 0058 rule 1).
+        let Some(profile) = profile::by_name(run.profile.as_str()) else {
+            return not_launched("not-launched");
+        };
+        if self.launched || run.attempt != self.attempt {
             return not_launched("not-launched");
         }
         self.launched = true;
@@ -240,6 +246,8 @@ impl HeldCapacity for HeldFixture {
         let plan = AttemptPlan {
             lease: Duration::from_millis(run.lease_ms),
             program: EntryProgram::Server,
+            profile,
+            stub_arguments: profile.stub_arguments,
             checkpoint_at_release: true,
             pause: pause.phase,
             ..AttemptPlan::fixture()

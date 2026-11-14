@@ -79,6 +79,9 @@ mod manifest;
 mod policy;
 #[cfg(target_os = "linux")]
 mod probe_group;
+// The execution profiles (decision 0058 rules 1 and 3, R03ba).
+#[cfg(target_os = "linux")]
+mod profile;
 // The generated probe programs of the enforcement job (decision 0056, amendment of 2026-11-13).
 #[cfg(target_os = "linux")]
 mod probes;
