@@ -597,8 +597,8 @@ impl Unclaimed {
 /// The jobs that rule 20 ends: queued `run_profile` jobs of `profiles`,
 /// enqueued at or before `enqueued_by`, without an attempt row, of an artifact
 /// in place and an enabled actor, while no execution worker is ready at `now`.
-/// Each ends as `execution_unavailable`, with its change recorded (the record
-/// keeps `run_profile` out of the change feed until R03d).
+/// Each ends as `execution_unavailable`, with its change recorded (a row in the
+/// change feed for a public build, none for a hidden job).
 fn expire(
     transaction: &Transaction<'_>,
     query: &Unclaimed,

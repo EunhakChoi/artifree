@@ -302,6 +302,7 @@ pub(crate) fn build_settings(
         allow_remote_mcp: options.allow_remote_mcp,
         clock: std::sync::Arc::new(artifree_core::jobs::SystemClock),
         worker_status: WorkerStatusHandle::default(),
+        build_profiles: artifree_providers::execution::build_profiles(),
     }
 }
 

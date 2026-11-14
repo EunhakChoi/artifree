@@ -18,7 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use artifree_domain::SourceRevision;
 use artifree_domain::identity::{ActorId, ArtifactId, InvalidValue, RequestKey, UnixMillis};
-use artifree_domain::job::{JobId, JobKind, ProfileName};
+use artifree_domain::job::{JobId, JobKind, PUBLIC_PROFILE, ProfileName};
 use artifree_ports::artifact_store::{ArtifactStore, RequestIdentity};
 use artifree_ports::job_store::{
     ExecutionPresence, JobCancel, JobListing, JobPosition, JobReceipt, JobRecord, JobStore,
@@ -99,6 +99,21 @@ pub struct JobPage {
 
 const TOKEN_VERSION: &str = "j1";
 
+/// A public build to enqueue (decision 0058 rule 17): a revision of an
+/// artifact, the profile it is built with, and the build profiles this build
+/// knows, of which the profile must be one.
+#[derive(Debug, Clone, Copy)]
+pub struct NewBuild<'a> {
+    /// The artifact.
+    pub artifact: &'a ArtifactId,
+    /// The revision to build; any revision it has, the head or older.
+    pub revision: SourceRevision,
+    /// The profile named by the request.
+    pub profile: &'a ProfileName,
+    /// The build profiles this build knows.
+    pub build_profiles: &'a [ProfileName],
+}
+
 impl<S: ArtifactStore + JobStore> ArtifactService<S> {
     /// Enqueues a job of `kind` pinned to `revision` of an artifact `actor`
     /// may read.
@@ -146,17 +161,48 @@ impl<S: ArtifactStore + JobStore> ArtifactService<S> {
             .map_err(|error| job_error(error, Missing::Artifact))
     }
 
-    /// Enqueues a `run_profile` job with `profile`, pinned like
-    /// [`Self::enqueue_job`] pins a verification: actor, artifact, revision,
-    /// kind and profile. Only tests call it. No HTTP route, MCP tool or CLI
-    /// command reaches it (decision 0057 rule 3), and no worker of this build
-    /// runs the kind, so a worker ends the job as `execution_unavailable`
-    /// (decision 0057 rule 1). The job is hidden from [`Self::job`] and
-    /// [`Self::jobs`] and does not count toward the actor's open jobs.
+    /// Enqueues a public build: a `run_profile` job of `profile` (decision
+    /// 0058 rule 17). `profile` must be [`PUBLIC_PROFILE`] and one of
+    /// `build_profiles`, the build profiles this build knows; any other is
+    /// refused before anything is read or written. The job is pinned as
+    /// [`Self::enqueue_profile_job`] pins it, and counts toward the actor's
+    /// open jobs.
     ///
     /// # Errors
     ///
-    /// As [`Self::enqueue_job`], except that the open-job bound does not apply.
+    /// [`ArtifactError::ProfileUnknown`] for a profile this build cannot build
+    /// for the public, otherwise as [`Self::enqueue_job`].
+    pub fn enqueue_build(
+        &self,
+        actor: &ActorId,
+        key: &RequestKey,
+        build: &NewBuild<'_>,
+        now: UnixMillis,
+    ) -> Result<JobReceipt, ArtifactError> {
+        if build.profile.as_str() != PUBLIC_PROFILE || !build.build_profiles.contains(build.profile)
+        {
+            return Err(ArtifactError::ProfileUnknown);
+        }
+        self.enqueue_profile_job(
+            actor,
+            key,
+            build.artifact,
+            build.revision,
+            build.profile,
+            now,
+        )
+    }
+
+    /// Enqueues a `run_profile` job with `profile`, pinned like
+    /// [`Self::enqueue_job`] pins a verification: actor, artifact, revision,
+    /// kind and profile. It checks no profile: [`Self::enqueue_build`] is the
+    /// public enqueue, and tests call this one for the profiles no request
+    /// can name. A job of a profile other than [`PUBLIC_PROFILE`] is hidden
+    /// from [`Self::job`] and [`Self::jobs`] (decision 0057 rule 3).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::enqueue_job`].
     pub fn enqueue_profile_job(
         &self,
         actor: &ActorId,

@@ -2,7 +2,9 @@
 //! rule 3): they are hidden from every read, write no `job_changed` row, do not
 //! count toward the open-job bound of 16, and cannot be cancelled. The
 //! `verify_revision` jobs that share the store keep their behavior beside them
-//! (decision 0042, rule 6).
+//! (decision 0042, rule 6). A job of the public profile, `react-v1`, is the
+//! exception (decision 0058 rule 17): it is read, listed, cancelled, fed and
+//! counted as a verification is, beside a hidden one.
 //!
 //! Time is a number each call is given, so every test moves it by hand.
 
@@ -14,7 +16,8 @@ use artifree_domain::change::ChangeSequence;
 use artifree_domain::identity::{ActorId, ArtifactId, UnixMillis};
 use artifree_domain::job::{
     AttemptIdentity, CheckpointAnswer, Finding, JobFailure, JobId, JobKind, JobState,
-    MAX_ACTIVE_JOBS_PER_ACTOR, Problem, ProfileName, Revocation, VerifyReport, WorkerId,
+    MAX_ACTIVE_JOBS_PER_ACTOR, PUBLIC_PROFILE, Problem, ProfileName, Revocation, VerifyReport,
+    WorkerId,
 };
 use artifree_domain::{MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
@@ -720,4 +723,102 @@ fn verify_revision_is_unchanged_with_run_profile_rows_present() -> TestResult {
 
     let done = complete_verify_job(&fixture)?;
     trash_then_purge(&fixture, attempt, &done)
+}
+
+/// The one profile whose jobs are public (decision 0058 rule 17).
+fn public_profile() -> Result<ProfileName, Box<dyn Error>> {
+    let profile: ProfileName = PUBLIC_PROFILE.parse()?;
+    Ok(profile)
+}
+
+/// A job of the public profile is read, listed and cancelled as a
+/// verification is, while a job of another profile beside it stays hidden.
+#[test]
+fn a_public_build_job_is_read_listed_and_cancelled() -> TestResult {
+    let fixture = Fixture::new()?;
+    let public = fixture
+        .enqueue_profile("public", 2, &public_profile()?, 1_000)?
+        .job;
+    let hidden = fixture
+        .enqueue_profile("hidden", 2, &fixture_profile()?, 1_001)?
+        .job;
+
+    assert_eq!(
+        fixture.store.job(&public.id)?.map(|job| job.id),
+        Some(public.id.clone()),
+        "a public build job is read"
+    );
+    assert_eq!(fixture.store.job(&hidden.id)?, None, "a hidden job is not");
+    assert_eq!(
+        job_ids(&listing_of(&fixture, None, 100)?),
+        vec![public.id.clone()],
+        "the listing holds the public build job only"
+    );
+    let cancelled = fixture.cancel("cancel-p", &public.id, 1_100)?.job;
+    assert_eq!(
+        cancelled.state,
+        JobState::Cancelled,
+        "a public build job is cancelled"
+    );
+    Ok(())
+}
+
+/// The enqueue of a public build job appends a `job_changed` row that names
+/// it; that of a hidden job appends none.
+#[test]
+fn a_public_build_job_appends_a_job_changed_row() -> TestResult {
+    let fixture = Fixture::new()?;
+    let mark = head(&fixture.store, &fixture.owner)?;
+    let public = fixture
+        .enqueue_profile("public", 2, &public_profile()?, 1_000)?
+        .job;
+    assert_job_row(
+        &only(
+            rows_after(&fixture.store, &fixture.owner, mark)?,
+            "the enqueue of a public build job",
+        )?,
+        &public.id,
+        fixture.id(),
+    );
+
+    let mark = head(&fixture.store, &fixture.owner)?;
+    fixture.enqueue_profile("hidden", 2, &fixture_profile()?, 1_001)?;
+    assert_eq!(
+        rows_after(&fixture.store, &fixture.owner, mark)?.len(),
+        0,
+        "the enqueue of a hidden job appends no row"
+    );
+    Ok(())
+}
+
+/// The actor's sixteen open jobs count public build jobs and verifications
+/// together, and leave a hidden job out.
+#[test]
+fn public_build_jobs_count_toward_the_bound_of_sixteen() -> TestResult {
+    let fixture = Fixture::new()?;
+    let public = public_profile()?;
+    for index in 0..MAX_ACTIVE_JOBS_PER_ACTOR - 1 {
+        let now = 1_000 + i64::try_from(index)?;
+        fixture.enqueue_profile(&format!("run-{index}"), 2, &public, now)?;
+    }
+    fixture.enqueue_profile("hidden", 2, &fixture_profile()?, 1_500)?;
+    fixture.enqueue("verify-last", 2, 2_000)?;
+
+    assert_eq!(
+        refusal(
+            fixture.enqueue_profile("run-over", 2, &public, 3_000),
+            "a seventeenth public build job",
+        )?,
+        JobStoreError::LimitReached,
+        "fifteen builds and a verification are sixteen"
+    );
+    assert_eq!(
+        refusal(
+            fixture.enqueue("verify-over", 2, 3_001),
+            "a seventeenth verification",
+        )?,
+        JobStoreError::LimitReached,
+        "the builds count toward a verification's bound too"
+    );
+    Ok(())
 }

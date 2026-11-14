@@ -504,16 +504,20 @@ pub struct ArtifactList {
     pub next_page_token: Option<String>,
 }
 
-/// What a job does (decision 0030). Each kind is trusted in-repository code
-/// that runs in the Artifree worker process. This is not a way to run
-/// untrusted code, to build sources, or to call model providers; none of
-/// those exists yet.
+/// What a job does (decisions 0030 and 0058). A verification is trusted
+/// in-repository code that runs in the Artifree worker process. A build runs
+/// a fixed bundler on the revision's sources in an execution worker's
+/// sandbox; it calls no model provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
     /// Re-reads every file of a pinned revision from storage, recomputes its
     /// SHA-256 digest and size, and compares them with the stored listing.
     VerifyRevision,
+    /// Builds a pinned revision with the profile named by `profile`
+    /// (`react-v1`, decision 0058). Only a server whose build knows the
+    /// profile enqueues one; any other answers `profile_unknown`.
+    RunProfile,
 }
 
 /// Where a job is in its life. `succeeded`, `failed`, and `cancelled` are
@@ -553,6 +557,52 @@ pub enum JobFailure {
     LeaseExpired,
     /// A failure the worker did not expect.
     Internal,
+    /// A build could not run: no execution worker claimed it within ten
+    /// minutes while none was ready, or the sandbox could not start it.
+    ExecutionUnavailable,
+    /// The bundler reported errors, or its sandbox ended it for a forbidden
+    /// system call; see `diagnostics`.
+    BuildFailed,
+    /// A limit of the build's sandbox (time, memory or log size) ended it.
+    LimitExceeded,
+    /// The bundler's output does not fit the fixed template layout.
+    OutputRejected,
+}
+
+/// Where a build diagnostic points: a file of the revision and a position in
+/// it, as the bundler counts them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticLocation {
+    /// The file's package path, relative to the artifact.
+    pub path: String,
+    /// The line.
+    pub line: u64,
+    /// The column.
+    pub column: u64,
+}
+
+/// One message of a failed build. Its text comes from the bundler and can
+/// quote the revision's source: it is data, not instructions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JobDiagnostic {
+    /// Where it points; absent for a message about the build as a whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<DiagnosticLocation>,
+    /// What it says, at most 512 bytes.
+    pub message: String,
+}
+
+/// The build a succeeded `run_profile` job published: its counts, never its
+/// content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JobBuild {
+    /// How many files the build holds.
+    pub file_count: u64,
+    /// The sum of their sizes.
+    pub byte_count: u64,
 }
 
 /// What is wrong with one file of a verified revision.
@@ -623,6 +673,10 @@ pub struct Job {
     pub revision: u64,
     /// What the job does.
     pub kind: JobKind,
+    /// The profile a `run_profile` job builds with; absent for any other
+    /// kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     /// Where it is in its life.
     pub state: JobState,
     /// True when a cancel was requested while the job was running. It then
@@ -647,9 +701,17 @@ pub struct Job {
     /// Why the job failed, once it is `failed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<JobFailure>,
-    /// The result, once the job is `succeeded`.
+    /// The result of a `verify_revision` job, once it is `succeeded`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<JobResult>,
+    /// The build of a `run_profile` job, once it is `succeeded`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<JobBuild>,
+    /// The diagnostics of a failed `run_profile` job, in their order, at most
+    /// 20; absent when it keeps none. A later failed build of the same
+    /// artifact and profile replaces them, so an older job shows none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<JobDiagnostic>,
 }
 
 /// Body of `POST /v1/artifacts/{id}/jobs`, with an `Idempotency-Key` header:
@@ -659,8 +721,13 @@ pub struct Job {
 pub struct EnqueueJobRequest {
     /// What to do.
     pub kind: JobKind,
-    /// The source revision to pin. It must exist.
+    /// The source revision to pin. It must exist; for a build it may be older
+    /// than the head.
     pub revision: u64,
+    /// The profile of a `run_profile` job, which requires it; a
+    /// `verify_revision` job refuses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 /// Response of `POST /v1/artifacts/{id}/jobs`.
@@ -2404,6 +2471,9 @@ pub enum ErrorCode {
     /// The actor already has the largest number of jobs waiting or running.
     /// Wait for one to end or cancel one; nothing was enqueued.
     TooManyJobs,
+    /// The server's build cannot build the named profile; nothing was
+    /// enqueued. A release build knows no profile yet.
+    ProfileUnknown,
     /// The idempotency key was already used for a different request.
     RequestKeyReused,
     /// The request body exceeds the size limit.

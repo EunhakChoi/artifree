@@ -8,16 +8,17 @@ use artifree_contracts::api::{
     AgentSessionList, AppData, Artifact, ArtifactKind as WireKind, ArtifactList, Asset, AssetList,
     BackgroundStatus, CancelJobResponse, CommitResponse, ConflictingFile, ContentEncoding,
     CopiedPart, CreateArtifactRequest, CreateRuntimeViewRequest, DataMembers, DataWriteResponse,
-    DeleteAssetRequest, DeleteAssetResponse, DeleteDataRequest, DuplicateArtifactRequest,
-    DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorBody,
-    ErrorCode, ExecutionStatus, ExportRuntime, FileChange as WireChange, FileEdit as WireEdit,
-    FileUpload, Handoff, HandoffState, Job as WireJob, JobFailure as WireFailure,
-    JobKind as WireJobKind, JobList, JobMismatch, JobProblem, JobResult, JobState as WireJobState,
-    JobVerdict, JsonValue, ListArtifactsQuery, ListJobsQuery, ListSort, Preview,
-    PurgeArtifactRequest, PurgeArtifactResponse, ReadDataMembersQuery,
-    RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse, RestoreRevisionRequest,
-    Revision, RevisionFile, RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata,
-    RuntimeView, SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest, SourceExportFormat,
+    DeleteAssetRequest, DeleteAssetResponse, DeleteDataRequest, DiagnosticLocation,
+    DuplicateArtifactRequest, DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest,
+    EnqueueJobResponse, ErrorBody, ErrorCode, ExecutionStatus, ExportRuntime,
+    FileChange as WireChange, FileEdit as WireEdit, FileUpload, Handoff, HandoffState,
+    Job as WireJob, JobBuild, JobDiagnostic, JobFailure as WireFailure, JobKind as WireJobKind,
+    JobList, JobMismatch, JobProblem, JobResult, JobState as WireJobState, JobVerdict, JsonValue,
+    ListArtifactsQuery, ListJobsQuery, ListSort, Preview, PurgeArtifactRequest,
+    PurgeArtifactResponse, ReadDataMembersQuery, RemoveUnreferencedContentRequest,
+    RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionFile,
+    RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata, RuntimeView,
+    SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest, SourceExportFormat,
     SourceExportManifest, StageHandoffRequest, UnreferencedContent as WireContent,
     UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest, UploadAssetRequest,
     UploadAssetResponse,
@@ -28,7 +29,7 @@ use artifree_core::artifacts::{
 };
 use artifree_core::assets::AssetUpload;
 use artifree_core::data::DataMutation;
-use artifree_core::jobs::JobPageSize;
+use artifree_core::jobs::{JobPageSize, NewBuild};
 use artifree_core::listing::{ListQuery, PageSize, SearchText};
 use artifree_core::members::{MAX_TOKEN_BYTES, MemberLimit, MemberQuery, MemberToken};
 use artifree_core::parts::{Boundary, ByteRange, FilePart, RangeError};
@@ -40,14 +41,16 @@ use artifree_domain::assets::{
 };
 use artifree_domain::data::{DataChange, DataError, DataPath, DataValue};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, StateGeneration, Title, TokenId};
-use artifree_domain::job::{JobFailure, JobId, JobKind, JobState, Problem};
+use artifree_domain::job::{
+    BuildDiagnostic, JobFailure, JobId, JobKind, JobState, Problem, ProfileName, is_public_job,
+};
 use artifree_domain::package::{
     ENTRY_PATH, FileChange, FilePackage, MAX_CHANGES, MAX_FILES, PackagePath,
 };
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
     ArtifactRecord, CommitReceipt, ContentSetDigest, Delivery, FileEdit, FileExpectation,
-    ListOrder, RevisionRecord, UnreferencedContent, parse_sha256,
+    FileMismatch, ListOrder, RevisionRecord, UnreferencedContent, parse_sha256,
 };
 use artifree_ports::asset_store::{AssetContent, AssetStoreError};
 use artifree_ports::data_store::OutboxFence;
@@ -147,6 +150,28 @@ impl ApiError {
             message,
         )
     }
+    /// The `file_conflict` error of an edit whose files changed, with the
+    /// current revision and the files.
+    fn file_conflict(
+        current: SourceRevision,
+        files: Vec<FileMismatch>,
+        total: usize,
+        message: String,
+    ) -> Self {
+        let mut conflict = Self::new(StatusCode::CONFLICT, ErrorCode::FileConflict, message);
+        conflict.body.current_revision = Some(current.0);
+        conflict.body.conflicting_files = Some(
+            files
+                .into_iter()
+                .map(|file| ConflictingFile {
+                    path: file.path.to_string(),
+                    current_sha256: file.current.map(|digest| hex(&digest)),
+                })
+                .collect(),
+        );
+        conflict.body.conflicting_files_total = Some(total as u64);
+        conflict
+    }
 }
 
 impl From<ArtifactError> for ApiError {
@@ -166,22 +191,7 @@ impl From<ArtifactError> for ApiError {
                 current,
                 files,
                 total,
-            } => {
-                let mut conflict =
-                    Self::new(StatusCode::CONFLICT, ErrorCode::FileConflict, message);
-                conflict.body.current_revision = Some(current.0);
-                conflict.body.conflicting_files = Some(
-                    files
-                        .into_iter()
-                        .map(|file| ConflictingFile {
-                            path: file.path.to_string(),
-                            current_sha256: file.current.map(|digest| hex(&digest)),
-                        })
-                        .collect(),
-                );
-                conflict.body.conflicting_files_total = Some(total as u64);
-                conflict
-            }
+            } => Self::file_conflict(current, files, total, message),
             ArtifactError::MetadataConflict { current } => {
                 let mut conflict =
                     Self::new(StatusCode::CONFLICT, ErrorCode::MetadataConflict, message);
@@ -200,6 +210,11 @@ impl From<ArtifactError> for ApiError {
             ArtifactError::TooManyJobs => {
                 Self::new(StatusCode::CONFLICT, ErrorCode::TooManyJobs, message)
             }
+            ArtifactError::ProfileUnknown => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                ErrorCode::ProfileUnknown,
+                message,
+            ),
             ArtifactError::OutboxBindingChanged => Self::new(
                 StatusCode::CONFLICT,
                 ErrorCode::OutboxBindingChanged,
@@ -1550,12 +1565,56 @@ pub(crate) async fn enqueue_job(
 ) -> Result<EnqueueJobResponse, ApiError> {
     let id = artifact_id(id)?;
     let revision = revision_number(request.revision)?;
-    let kind = match request.kind {
-        WireJobKind::VerifyRevision => JobKind::VerifyRevision,
+    let profile = match (request.kind, request.profile) {
+        (WireJobKind::VerifyRevision, None) => None,
+        (WireJobKind::VerifyRevision, Some(_)) => {
+            return Err(ApiError::invalid(
+                "profile: only a run_profile job names one",
+            ));
+        }
+        (WireJobKind::RunProfile, None) => {
+            return Err(ApiError::invalid("profile: a run_profile job requires one"));
+        }
+        // A name that cannot be a profile is not one this build knows either;
+        // it is not quoted back.
+        (WireJobKind::RunProfile, Some(name)) => Some(
+            name.parse::<ProfileName>()
+                .map_err(|_| ApiError::from(ArtifactError::ProfileUnknown))?,
+        ),
     };
     let now = state.clock().now();
-    let receipt = state
-        .run(move |artifacts| artifacts.enqueue_job(&actor, &key, &id, revision, kind, now))
+    // Only a build reads the build profiles, so a verification copies none.
+    let builds = if profile.is_some() {
+        state.settings().build_profiles.clone()
+    } else {
+        Vec::new()
+    };
+    let (receipt, diagnostics) = state
+        .run(move |artifacts| {
+            let receipt = match &profile {
+                None => artifacts.enqueue_job(
+                    &actor,
+                    &key,
+                    &id,
+                    revision,
+                    JobKind::VerifyRevision,
+                    now,
+                )?,
+                Some(profile) => artifacts.enqueue_build(
+                    &actor,
+                    &key,
+                    &NewBuild {
+                        artifact: &id,
+                        revision,
+                        profile,
+                        build_profiles: &builds,
+                    },
+                    now,
+                )?,
+            };
+            let diagnostics = artifacts.job_diagnostics(&receipt.job)?;
+            Ok((receipt, diagnostics))
+        })
         .await?;
     if receipt.delivery == Delivery::Committed {
         // The commit may append a `job_changed` row to the owner's feed
@@ -1563,7 +1622,7 @@ pub(crate) async fn enqueue_job(
         state.feed().committed();
     }
     Ok(EnqueueJobResponse {
-        job: job_dto(&receipt.job)?,
+        job: job_dto(&receipt.job, &diagnostics)?,
         replayed: receipt.delivery == Delivery::Replayed,
     })
 }
@@ -1592,10 +1651,14 @@ pub(crate) async fn show_job(
     id: &str,
 ) -> Result<WireJob, ApiError> {
     let id = job_id(id)?;
-    let job = state
-        .run(move |artifacts| artifacts.job(&actor, &id))
+    let (job, diagnostics) = state
+        .run(move |artifacts| {
+            let job = artifacts.job(&actor, &id)?;
+            let diagnostics = artifacts.job_diagnostics(&job)?;
+            Ok((job, diagnostics))
+        })
         .await?;
-    job_dto(&job)
+    job_dto(&job, &diagnostics)
 }
 
 /// A page of the actor's jobs: those of the artifact `artifact` names, or all
@@ -1614,16 +1677,23 @@ pub(crate) async fn list_jobs(
         .map_err(|error| ApiError::invalid(format!("limit: {error}")))?
         .unwrap_or_default();
     let page_token = query.page_token;
-    let page = state
+    let (page, diagnostics) = state
         .run(move |artifacts| {
-            artifacts.jobs(&actor, artifact.as_ref(), page_token.as_deref(), limit)
+            let page = artifacts.jobs(&actor, artifact.as_ref(), page_token.as_deref(), limit)?;
+            let diagnostics = page
+                .jobs
+                .iter()
+                .map(|job| artifacts.job_diagnostics(job))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((page, diagnostics))
         })
         .await?;
     Ok(JobList {
         jobs: page
             .jobs
             .iter()
-            .map(job_dto)
+            .zip(&diagnostics)
+            .map(|(job, diagnostics)| job_dto(job, diagnostics))
             .collect::<Result<Vec<_>, _>>()?,
         next_page_token: page.next_page_token,
     })
@@ -1637,8 +1707,12 @@ pub(crate) async fn cancel_job(
 ) -> Result<CancelJobResponse, ApiError> {
     let id = job_id(id)?;
     let now = state.clock().now();
-    let receipt = state
-        .run(move |artifacts| artifacts.cancel_job(&actor, &key, &id, now))
+    let (receipt, diagnostics) = state
+        .run(move |artifacts| {
+            let receipt = artifacts.cancel_job(&actor, &key, &id, now)?;
+            let diagnostics = artifacts.job_diagnostics(&receipt.job)?;
+            Ok((receipt, diagnostics))
+        })
         .await?;
     if receipt.delivery == Delivery::Committed {
         // The commit may append a `job_changed` row to the owner's feed
@@ -1646,7 +1720,7 @@ pub(crate) async fn cancel_job(
         state.feed().committed();
     }
     Ok(CancelJobResponse {
-        job: job_dto(&receipt.job)?,
+        job: job_dto(&receipt.job, &diagnostics)?,
         replayed: receipt.delivery == Delivery::Replayed,
     })
 }
@@ -2050,37 +2124,39 @@ pub(crate) fn data_base(value: u64) -> Result<AppDataVersion, ApiError> {
     Ok(AppDataVersion(value))
 }
 
-/// Converts a job record to its wire form.
+/// Converts a job record and the diagnostics a read shows with it to its
+/// wire form.
 ///
-/// A `run_profile` job is never returned by a read (decision 0057 rule 3: hidden
-/// from GET /v1/jobs, GET /v1/jobs/{id}, the feed, MCP and CLI); should one
-/// reach here it is answered as not found, never mapped onto a wire value.
-fn job_dto(record: &JobRecord) -> Result<WireJob, ApiError> {
+/// The store returns only public jobs (decision 0058 rule 17): a hidden job
+/// (decision 0057 rule 3) that reached here anyway is answered as not found,
+/// never mapped onto a wire value.
+fn job_dto(record: &JobRecord, diagnostics: &[BuildDiagnostic]) -> Result<WireJob, ApiError> {
+    if !is_public_job(record.kind, record.profile.as_ref()) {
+        return Err(ApiError::not_found("job not found"));
+    }
     let kind = match record.kind {
         JobKind::VerifyRevision => WireJobKind::VerifyRevision,
-        JobKind::RunProfile => return Err(ApiError::not_found("job not found")),
+        JobKind::RunProfile => WireJobKind::RunProfile,
     };
-    let failure = match record.failure {
-        None => None,
-        Some(JobFailure::RevisionUnavailable) => Some(WireFailure::RevisionUnavailable),
-        Some(JobFailure::StorageUnavailable) => Some(WireFailure::StorageUnavailable),
-        Some(JobFailure::LeaseExpired) => Some(WireFailure::LeaseExpired),
-        Some(JobFailure::Internal) => Some(WireFailure::Internal),
-        // Only a run_profile job ends this way, and no read returns one.
-        Some(
-            JobFailure::ExecutionUnavailable
-            | JobFailure::BuildFailed
-            | JobFailure::LimitExceeded
-            | JobFailure::OutputRejected,
-        ) => {
-            return Err(ApiError::not_found("job not found"));
-        }
-    };
+    let failure = record.failure.map(|failure| match failure {
+        JobFailure::RevisionUnavailable => WireFailure::RevisionUnavailable,
+        JobFailure::StorageUnavailable => WireFailure::StorageUnavailable,
+        JobFailure::LeaseExpired => WireFailure::LeaseExpired,
+        JobFailure::Internal => WireFailure::Internal,
+        JobFailure::ExecutionUnavailable => WireFailure::ExecutionUnavailable,
+        JobFailure::BuildFailed => WireFailure::BuildFailed,
+        JobFailure::LimitExceeded => WireFailure::LimitExceeded,
+        JobFailure::OutputRejected => WireFailure::OutputRejected,
+    });
     Ok(WireJob {
         id: record.id.to_string(),
         artifact_id: record.artifact.to_string(),
         revision: record.revision.0,
         kind,
+        profile: record
+            .profile
+            .as_ref()
+            .map(|profile| profile.as_str().to_owned()),
         state: match record.state {
             JobState::Queued => WireJobState::Queued,
             JobState::Running => WireJobState::Running,
@@ -2120,6 +2196,24 @@ fn job_dto(record: &JobRecord) -> Result<WireJob, ApiError> {
                 .collect(),
             truncated: report.is_truncated(),
         }),
+        build: record.counts.as_ref().map(|counts| JobBuild {
+            file_count: counts.files,
+            byte_count: counts.bytes,
+        }),
+        diagnostics: diagnostics
+            .iter()
+            .map(|diagnostic| JobDiagnostic {
+                location: diagnostic
+                    .location
+                    .as_ref()
+                    .map(|location| DiagnosticLocation {
+                        path: location.path.to_string(),
+                        line: u64::from(location.line),
+                        column: u64::from(location.column),
+                    }),
+                message: diagnostic.message.as_str().to_owned(),
+            })
+            .collect(),
     })
 }
 

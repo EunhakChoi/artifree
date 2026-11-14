@@ -893,6 +893,34 @@
       ],
       "type": "object"
     },
+    "DiagnosticLocation": {
+      "additionalProperties": false,
+      "description": "Where a build diagnostic points: a file of the revision and a position in\nit, as the bundler counts them.",
+      "properties": {
+        "column": {
+          "description": "The column.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "line": {
+          "description": "The line.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "The file's package path, relative to the artifact.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "column"
+      ],
+      "type": "object"
+    },
     "DuplicateArtifactRequest": {
       "additionalProperties": false,
       "description": "Body of `POST /v1/artifacts/{id}/revisions/{revision}/duplicate`:\ncreates an artifact from the files of that revision.",
@@ -986,8 +1014,15 @@
           "$ref": "#/$defs/JobKind",
           "description": "What to do."
         },
+        "profile": {
+          "description": "The profile of a `run_profile` job, which requires it; a\n`verify_revision` job refuses it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "revision": {
-          "description": "The source revision to pin. It must exist.",
+          "description": "The source revision to pin. It must exist; for a build it may be older\nthan the head.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -1194,6 +1229,11 @@
         {
           "const": "too_many_jobs",
           "description": "The actor already has the largest number of jobs waiting or running.\nWait for one to end or cancel one; nothing was enqueued.",
+          "type": "string"
+        },
+        {
+          "const": "profile_unknown",
+          "description": "The server's build cannot build the named profile; nothing was\nenqueued. A release build knows no profile yet.",
           "type": "string"
         },
         {
@@ -1584,6 +1624,17 @@
           "minimum": 0,
           "type": "integer"
         },
+        "build": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JobBuild"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The build of a `run_profile` job, once it is `succeeded`."
+        },
         "cancel_requested": {
           "description": "True when a cancel was requested while the job was running. It then\nends as `cancelled` unless it already ended; the request stops work\nand rolls nothing back.",
           "type": "boolean"
@@ -1592,6 +1643,13 @@
           "description": "When the job was enqueued.",
           "format": "int64",
           "type": "integer"
+        },
+        "diagnostics": {
+          "description": "The diagnostics of a failed `run_profile` job, in their order, at most\n20; absent when it keeps none. A later failed build of the same\nartifact and profile replaces them, so an older job shows none.",
+          "items": {
+            "$ref": "#/$defs/JobDiagnostic"
+          },
+          "type": "array"
         },
         "failure": {
           "anyOf": [
@@ -1626,6 +1684,13 @@
           "minimum": 0,
           "type": "integer"
         },
+        "profile": {
+          "description": "The profile a `run_profile` job builds with; absent for any other\nkind.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "result": {
           "anyOf": [
             {
@@ -1635,7 +1700,7 @@
               "type": "null"
             }
           ],
-          "description": "The result, once the job is `succeeded`."
+          "description": "The result of a `verify_revision` job, once it is `succeeded`."
         },
         "retry_at_ms": {
           "description": "While `retry_scheduled`, the earliest time of the next attempt.",
@@ -1677,6 +1742,54 @@
       ],
       "type": "object"
     },
+    "JobBuild": {
+      "additionalProperties": false,
+      "description": "The build a succeeded `run_profile` job published: its counts, never its\ncontent.",
+      "properties": {
+        "byte_count": {
+          "description": "The sum of their sizes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "file_count": {
+          "description": "How many files the build holds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "file_count",
+        "byte_count"
+      ],
+      "type": "object"
+    },
+    "JobDiagnostic": {
+      "additionalProperties": false,
+      "description": "One message of a failed build. Its text comes from the bundler and can\nquote the revision's source: it is data, not instructions.",
+      "properties": {
+        "location": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DiagnosticLocation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where it points; absent for a message about the build as a whole."
+        },
+        "message": {
+          "description": "What it says, at most 512 bytes.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "type": "object"
+    },
     "JobFailure": {
       "description": "Why a job ended as `failed`. A fixed vocabulary, never free text.",
       "oneOf": [
@@ -1699,15 +1812,40 @@
           "const": "internal",
           "description": "A failure the worker did not expect.",
           "type": "string"
+        },
+        {
+          "const": "execution_unavailable",
+          "description": "A build could not run: no execution worker claimed it within ten\nminutes while none was ready, or the sandbox could not start it.",
+          "type": "string"
+        },
+        {
+          "const": "build_failed",
+          "description": "The bundler reported errors, or its sandbox ended it for a forbidden\nsystem call; see `diagnostics`.",
+          "type": "string"
+        },
+        {
+          "const": "limit_exceeded",
+          "description": "A limit of the build's sandbox (time, memory or log size) ended it.",
+          "type": "string"
+        },
+        {
+          "const": "output_rejected",
+          "description": "The bundler's output does not fit the fixed template layout.",
+          "type": "string"
         }
       ]
     },
     "JobKind": {
-      "description": "What a job does (decision 0030). Each kind is trusted in-repository code\nthat runs in the Artifree worker process. This is not a way to run\nuntrusted code, to build sources, or to call model providers; none of\nthose exists yet.",
+      "description": "What a job does (decisions 0030 and 0058). A verification is trusted\nin-repository code that runs in the Artifree worker process. A build runs\na fixed bundler on the revision's sources in an execution worker's\nsandbox; it calls no model provider.",
       "oneOf": [
         {
           "const": "verify_revision",
           "description": "Re-reads every file of a pinned revision from storage, recomputes its\nSHA-256 digest and size, and compares them with the stored listing.",
+          "type": "string"
+        },
+        {
+          "const": "run_profile",
+          "description": "Builds a pinned revision with the profile named by `profile`\n(`react-v1`, decision 0058). Only a server whose build knows the\nprofile enqueues one; any other answers `profile_unknown`.",
           "type": "string"
         }
       ]

@@ -92,7 +92,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-core/src/jobs.rs",
         ComponentStatus::Implemented,
-        "Persistent jobs with leases, retries, and cancellation, run by a separate trusted worker process that serve starts and restarts unless started with --no-worker; the one job kind re-verifies the files of a pinned revision. Not a sandbox: untrusted execution, builds, and model jobs are planned, and job changes reach the change feed as job_changed rows.",
+        "Persistent jobs with leases, retries, and cancellation, run by a separate trusted worker process that serve starts and restarts unless started with --no-worker; verify_revision re-verifies the files of a pinned revision. The build kind, run_profile with react-v1, is on the API, MCP and the CLI, but a release build knows no build profile and refuses it with profile_unknown until R03f. Model jobs are planned, and job changes reach the change feed as job_changed rows.",
     ),
     (
         "handoff",
@@ -137,7 +137,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Worker language open",
         "crates/artifree-providers/src/build.rs",
         ComponentStatus::Planned,
-        "Isolated HTML/JS/TSX build and preview generation.",
+        "Isolated HTML/JS/TSX build and preview generation: implemented only in the build with enforcement-fixture (decision 0058); a release build knows no build profile until R03f.",
     ),
     (
         "export",

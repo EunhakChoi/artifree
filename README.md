@@ -20,7 +20,10 @@ save its artifact's uploaded assets, each through a bound bridge after its own
 connection-scoped user grant; with their own grants it can also read and
 write its artifact's application data. One persistent job, `verify_revision`, re-checks a revision's stored files
 against their digests in a separate worker process that a persistent server
-starts and restarts by itself (`--no-worker` turns that off). Publishing, roles and sharing, build and
+starts and restarts by itself (`--no-worker` turns that off). The build kind,
+`run_profile` with `profile: "react-v1"`, is on the API, MCP and the CLI, but a
+release build knows no build profile yet and refuses it with `profile_unknown`
+([decision 0058](docs/decisions/0058-react-builds-and-preview.md)). Publishing, roles and sharing, build and
 conversion workers, sandboxed execution of untrusted code, and external
 identity (OAuth, passwords, login sessions) are not implemented. The module inventory shown by the UI and
 CLI is a build-time snapshot, not live server health.
@@ -132,7 +135,10 @@ Jobs are the first background work ([decision 0030](docs/decisions/0030-persiste
 `verify_revision` job, which recomputes the SHA-256 and size of every file of
 that revision from the database and reports `ok` or the first 50 mismatches;
 `job show`, `job list`, and `job cancel <job> --idempotency-key <key>` follow
-and stop it. A persistent `serve` starts one worker process and starts it again when
+and stop it. `job enqueue <id> --revision <n> --build react-v1` asks for a
+build instead; a release build refuses it with `profile_unknown` until a
+release can build ([decision 0058](docs/decisions/0058-react-builds-and-preview.md)),
+and `--profile` still names the connection profile. A persistent `serve` starts one worker process and starts it again when
 it exits ([decision 0055](docs/decisions/0055-operating-background-work.md));
 `GET /v1/background` says whether it runs. With `--no-worker` (or
 `ARTIFREE_NO_WORKER=1`), and in a one-shot session, a job stays `queued` until

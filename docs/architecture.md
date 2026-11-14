@@ -191,7 +191,7 @@ in the Rust core.
 | `POST /v1/handoffs/{id}/send`                                                      | Confirm sending the staged delivery                     |
 | `POST /v1/handoffs/{id}/cancel`                                                    | Cancel before the agent may have received it            |
 | `GET /v1/changes`                                                                  | Committed changes as server-sent events                 |
-| `POST /v1/artifacts/{id}/jobs`                                                     | Queue a `verify_revision` job (`Idempotency-Key`)       |
+| `POST /v1/artifacts/{id}/jobs`                                                     | Queue a verification or a build (`Idempotency-Key`)     |
 | `GET /v1/artifacts/{id}/jobs`                                                      | One artifact's jobs, newest first, pages                |
 | `GET /v1/jobs`                                                                     | The actor's jobs, newest first, pages                   |
 | `GET /v1/jobs/{id}`                                                                | One job: state, attempts, result or failure             |

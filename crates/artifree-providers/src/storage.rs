@@ -39,6 +39,18 @@
 //! Request keys and feed rows are retained indefinitely. Server profiles with
 //! `PostgreSQL` and object storage remain planned.
 
+/// The condition that a job `j` is public (decision 0058 rule 17): a
+/// verification, or a `run_profile` job of the one public profile,
+/// [`artifree_domain::job::PUBLIC_PROFILE`]. Only a public job is read,
+/// listed, cancelled, fed or counted toward the actor's open jobs; any other
+/// stays hidden (decision 0057 rule 3). A test checks the literal against the
+/// constant.
+macro_rules! public_job {
+    () => {
+        "(j.kind = 'verify_revision' OR (j.kind = 'run_profile' AND j.profile = 'react-v1'))"
+    };
+}
+
 mod assets;
 mod data;
 mod jobs;
@@ -1244,18 +1256,22 @@ fn record_data_change(
 /// state or `cancel_requested` it changed (decision 0055, rule 7). The row goes
 /// to the feed of the job's owner and names the artifact's current revision and
 /// metadata revision (rule 8). A job of an artifact in the trash or purged gets
-/// none, because nothing of it is readable (rule 9). A `run_profile` job gets none
-/// either: no `job_changed` row is ever written for it, so its transitions consume
-/// no actor sequence (decision 0057 rule 3).
+/// none, because nothing of it is readable (rule 9). A hidden job, a `run_profile`
+/// job of a profile other than the public one, gets none either, so its
+/// transitions consume no actor sequence (decision 0057 rule 3); a public build
+/// gets its rows as a verification does (decision 0058 rule 17).
 fn record_job_change(transaction: &Transaction<'_>, job: &JobId) -> Result<(), StoreError> {
     let (actor, artifact_id, revision, metadata, hidden): (String, String, i64, i64, bool) =
         transaction
             .query_row(
-                "SELECT j.actor, j.artifact_id, a.current_revision, a.metadata_revision,
-                     a.deleted_at IS NOT NULL OR a.purged_at IS NOT NULL
-                         OR j.kind <> 'verify_revision'
-                 FROM jobs j JOIN artifacts a ON a.id = j.artifact_id
-                 WHERE j.id = ?1",
+                concat!(
+                    "SELECT j.actor, j.artifact_id, a.current_revision, a.metadata_revision,
+                         a.deleted_at IS NOT NULL OR a.purged_at IS NOT NULL OR NOT ",
+                    public_job!(),
+                    "
+                     FROM jobs j JOIN artifacts a ON a.id = j.artifact_id
+                     WHERE j.id = ?1"
+                ),
                 [job.as_str()],
                 |row| {
                     Ok((
@@ -1678,6 +1694,14 @@ mod tests {
     use artifree_ports::artifact_store::RequestFingerprint;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// The SQL condition of a public job names the profile the domain makes
+    /// public, so the two cannot drift apart.
+    #[test]
+    fn the_public_job_condition_names_the_public_profile() {
+        let named = format!("j.profile = '{}'", artifree_domain::job::PUBLIC_PROFILE);
+        assert!(public_job!().contains(&named), "{}", public_job!());
+    }
 
     /// A store in its own directory, with one artifact of two files in the
     /// trash, ready to be purged.

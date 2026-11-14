@@ -197,6 +197,7 @@ export type ErrorCode =
   | 'data_too_large'
   | 'job_ended'
   | 'too_many_jobs'
+  | 'profile_unknown'
   | 'request_key_reused'
   | 'payload_too_large'
   | 'range_not_satisfiable'
@@ -218,16 +219,24 @@ export type SourceExportFormat = 'artifree.source-export.v1' | 'artifree.source-
  */
 export type ExportRuntime = 'none' | 'metadata';
 /**
- * What a job does (decision 0030). Each kind is trusted in-repository code
- * that runs in the Artifree worker process. This is not a way to run
- * untrusted code, to build sources, or to call model providers; none of
- * those exists yet.
+ * What a job does (decisions 0030 and 0058). A verification is trusted
+ * in-repository code that runs in the Artifree worker process. A build runs
+ * a fixed bundler on the revision's sources in an execution worker's
+ * sandbox; it calls no model provider.
  */
-export type JobKind = 'verify_revision';
+export type JobKind = 'verify_revision' | 'run_profile';
 /**
  * Why a job ended as `failed`. A fixed vocabulary, never free text.
  */
-export type JobFailure = 'revision_unavailable' | 'storage_unavailable' | 'lease_expired' | 'internal';
+export type JobFailure =
+  | 'revision_unavailable'
+  | 'storage_unavailable'
+  | 'lease_expired'
+  | 'internal'
+  | 'execution_unavailable'
+  | 'build_failed'
+  | 'limit_exceeded'
+  | 'output_rejected';
 /**
  * What is wrong with one file of a verified revision.
  */
@@ -2036,7 +2045,13 @@ export interface UserList {
 export interface EnqueueJobRequest {
   kind: JobKind;
   /**
-   * The source revision to pin. It must exist.
+   * The profile of a `run_profile` job, which requires it; a
+   * `verify_revision` job refuses it.
+   */
+  profile?: string | null;
+  /**
+   * The source revision to pin. It must exist; for a build it may be older
+   * than the head.
    */
   revision: number;
 }
@@ -2068,6 +2083,10 @@ export interface Job {
    */
   attempt: number;
   /**
+   * The build of a `run_profile` job, once it is `succeeded`.
+   */
+  build?: JobBuild | null;
+  /**
    * True when a cancel was requested while the job was running. It then
    * ends as `cancelled` unless it already ended; the request stops work
    * and rolls nothing back.
@@ -2077,6 +2096,12 @@ export interface Job {
    * When the job was enqueued.
    */
   created_at_ms: number;
+  /**
+   * The diagnostics of a failed `run_profile` job, in their order, at most
+   * 20; absent when it keeps none. A later failed build of the same
+   * artifact and profile replaces them, so an older job shows none.
+   */
+  diagnostics?: JobDiagnostic[];
   /**
    * Why the job failed, once it is `failed`.
    */
@@ -2095,7 +2120,12 @@ export interface Job {
    */
   max_attempts: number;
   /**
-   * The result, once the job is `succeeded`.
+   * The profile a `run_profile` job builds with; absent for any other
+   * kind.
+   */
+  profile?: string | null;
+  /**
+   * The result of a `verify_revision` job, once it is `succeeded`.
    */
   result?: JobResult | null;
   /**
@@ -2111,6 +2141,52 @@ export interface Job {
    */
   started_at_ms?: number | null;
   state: JobState;
+}
+/**
+ * The build a succeeded `run_profile` job published: its counts, never its
+ * content.
+ */
+export interface JobBuild {
+  /**
+   * The sum of their sizes.
+   */
+  byte_count: number;
+  /**
+   * How many files the build holds.
+   */
+  file_count: number;
+}
+/**
+ * One message of a failed build. Its text comes from the bundler and can
+ * quote the revision's source: it is data, not instructions.
+ */
+export interface JobDiagnostic {
+  /**
+   * Where it points; absent for a message about the build as a whole.
+   */
+  location?: DiagnosticLocation | null;
+  /**
+   * What it says, at most 512 bytes.
+   */
+  message: string;
+}
+/**
+ * Where a build diagnostic points: a file of the revision and a position in
+ * it, as the bundler counts them.
+ */
+export interface DiagnosticLocation {
+  /**
+   * The column.
+   */
+  column: number;
+  /**
+   * The line.
+   */
+  line: number;
+  /**
+   * The file's package path, relative to the artifact.
+   */
+  path: string;
 }
 /**
  * The result of a `verify_revision` job that ran to the end. It holds counts

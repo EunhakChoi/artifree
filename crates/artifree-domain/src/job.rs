@@ -33,6 +33,23 @@ pub const MAX_FINDINGS: usize = 50;
 /// The most characters a profile name has (decision 0057 rule 1).
 pub const MAX_PROFILE_NAME_CHARS: usize = 32;
 
+/// The one profile whose `run_profile` jobs are public (decision 0058 rule
+/// 17). A job of it is read, listed, cancelled, fed and counted as a
+/// verification is, in every build; a build enqueues one only when it knows
+/// the profile as a build profile. A job of any other profile stays hidden as
+/// decision 0057 rule 3 hides it.
+pub const PUBLIC_PROFILE: &str = "react-v1";
+
+/// Whether a job of `kind` and `profile` is public: every `verify_revision`
+/// job, and a `run_profile` job of [`PUBLIC_PROFILE`].
+#[must_use]
+pub fn is_public_job(kind: JobKind, profile: Option<&ProfileName>) -> bool {
+    match kind {
+        JobKind::VerifyRevision => true,
+        JobKind::RunProfile => profile.is_some_and(|profile| profile.as_str() == PUBLIC_PROFILE),
+    }
+}
+
 /// An opaque job identifier: `job_` followed by 32 lowercase hex digits.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct JobId(String);

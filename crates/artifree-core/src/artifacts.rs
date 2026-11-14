@@ -122,6 +122,9 @@ pub enum ArtifactError {
     /// The actor already has the largest number of jobs waiting or running
     /// (decision 0030).
     TooManyJobs,
+    /// The profile is not one this build can build for the public (decision
+    /// 0058 rule 17); nothing was enqueued.
+    ProfileUnknown,
     /// An opt-in data write no longer matches its admitted authority.
     OutboxBindingChanged,
     /// The application data was prepared against an older version; nothing
@@ -185,6 +188,7 @@ impl fmt::Display for ArtifactError {
             }
             Self::TooManyJobs => formatter
                 .write_str("too many jobs are waiting or running; wait for one or cancel one"),
+            Self::ProfileUnknown => formatter.write_str("this server cannot build that profile"),
             Self::OutboxBindingChanged => formatter.write_str("outbox binding changed"),
             Self::DataConflict { current } => write!(
                 formatter,

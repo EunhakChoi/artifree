@@ -2100,10 +2100,120 @@ test('A job reply that breaks the contract is an invalid response, not a guess',
   );
 });
 
+const build = {
+  ...job,
+  kind: 'run_profile',
+  profile: 'react-v1',
+};
+
+test('A build job is enqueued with its profile and read with its counts or diagnostics', async () => {
+  const sent = [];
+  let answer;
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      sent.push(init.body);
+      return Response.json(answer);
+    },
+  });
+  answer = { job: build, replayed: false };
+  assert.deepEqual(
+    await client.enqueueJob(
+      artifact.id,
+      { kind: 'run_profile', revision: 1, profile: 'react-v1' },
+      { idempotencyKey: 'test-key-1' },
+    ),
+    answer,
+  );
+  assert.deepEqual(JSON.parse(sent[0]), {
+    kind: 'run_profile',
+    revision: 1,
+    profile: 'react-v1',
+  });
+  const built = {
+    ...build,
+    state: 'succeeded',
+    finished_at_ms: 9,
+    build: { file_count: 3, byte_count: 120 },
+  };
+  answer = built;
+  assert.deepEqual(await client.getJob(job.id), built);
+  const failed = {
+    ...build,
+    state: 'failed',
+    finished_at_ms: 9,
+    failure: 'build_failed',
+    diagnostics: [
+      {
+        location: { path: 'src/main.tsx', line: 1, column: 16 },
+        message: 'Could not resolve "left-pad"',
+      },
+      { message: 'The build was stopped' },
+    ],
+  };
+  answer = failed;
+  assert.deepEqual(await client.getJob(job.id), failed);
+  for (const failure of [
+    'execution_unavailable',
+    'limit_exceeded',
+    'output_rejected',
+  ]) {
+    answer = { ...build, state: 'failed', finished_at_ms: 9, failure };
+    assert.equal((await client.getJob(job.id)).failure, failure);
+  }
+});
+
+test('A build reply that breaks the contract is an invalid response', async () => {
+  const good = {
+    ...build,
+    state: 'failed',
+    finished_at_ms: 9,
+    failure: 'build_failed',
+    diagnostics: [{ message: 'no' }],
+  };
+  let answer = good;
+  const client = clientWith(() => Response.json(answer));
+  assert.deepEqual(await client.getJob(job.id), good);
+  const { profile: _profile, ...unnamed } = build;
+  for (const broken of [
+    unnamed,
+    { ...job, profile: 'react-v1' },
+    { ...build, profile: 7 },
+    {
+      ...build,
+      state: 'succeeded',
+      finished_at_ms: 9,
+      result: {
+        verdict: 'ok',
+        files_checked: 1,
+        bytes_checked: 1,
+        mismatch_count: 0,
+        mismatches: [],
+        truncated: false,
+      },
+    },
+    { ...job, build: { file_count: 1, byte_count: 1 } },
+    { ...job, diagnostics: [{ message: 'no' }] },
+    { ...build, build: { file_count: -1, byte_count: 1 } },
+    { ...good, diagnostics: [{ message: 7 }] },
+    { ...good, diagnostics: [{ message: 'no', location: { path: 'a' } }] },
+    { ...good, diagnostics: 'none' },
+  ]) {
+    answer = broken;
+    assert.equal(
+      (await failure(client.getJob(job.id))).code,
+      'invalid_response',
+      JSON.stringify(broken),
+    );
+  }
+});
+
 test('The job error codes keep their own names and statuses', async () => {
   for (const [status, code] of [
     [409, 'job_ended'],
     [409, 'too_many_jobs'],
+    [422, 'profile_unknown'],
   ]) {
     const client = clientWith(() =>
       Response.json({ error: { code, message: 'no' } }, { status }),

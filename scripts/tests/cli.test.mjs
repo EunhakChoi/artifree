@@ -363,6 +363,7 @@ test('CLI job commands send the right requests and refuse bad usage before sendi
       ['enqueue', artifactId, '--revision', '0'],
       ['enqueue', artifactId, '--revision', '1.5'],
       ['enqueue', '--revision', '1'],
+      ['enqueue', artifactId, '--revision', '1', '--build', ''],
       ['show'],
       ['show', jobId, 'extra'],
       ['list', 'extra'],
@@ -398,6 +399,18 @@ test('CLI job commands send the right requests and refuse bad usage before sendi
     ]);
     await run(['list']);
     await run(['cancel', jobId, '--idempotency-key', 'cli-job-key-2']);
+    // --build queues a build; --profile keeps naming the connection profile.
+    const built = await run([
+      'enqueue',
+      artifactId,
+      '--revision',
+      '2',
+      '--build',
+      'react-v1',
+      '--idempotency-key',
+      'cli-job-key-3',
+    ]);
+    assert.equal(built.status, 0, built.stderr);
     assert.deepEqual(requests, [
       [
         'POST',
@@ -414,6 +427,12 @@ test('CLI job commands send the right requests and refuse bad usage before sendi
       ],
       ['GET', '/v1/jobs', undefined, undefined],
       ['POST', `/v1/jobs/${jobId}/cancel`, 'cli-job-key-2', {}],
+      [
+        'POST',
+        `/v1/artifacts/${artifactId}/jobs`,
+        'cli-job-key-3',
+        { kind: 'run_profile', revision: 2, profile: 'react-v1' },
+      ],
     ]);
   } finally {
     server.close();

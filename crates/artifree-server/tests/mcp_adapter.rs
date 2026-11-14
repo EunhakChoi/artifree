@@ -11,7 +11,7 @@ use std::time::Duration;
 use artifree_core::artifacts::ArtifactService;
 use artifree_domain::SourceRevision;
 use artifree_domain::identity::{ActorId, RequestKey, Title, UnixMillis};
-use artifree_domain::job::JobKind;
+use artifree_domain::job::{JobKind, ProfileName};
 use artifree_domain::package::{FilePackage, PackagePath};
 use artifree_providers::storage::SqliteStore;
 use artifree_server::auth::AccessToken;
@@ -49,7 +49,20 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        Self::configured(None)
+    }
+
+    /// A server whose build knows `react-v1` as a build profile (decision
+    /// 0058 rule 17).
+    fn building() -> Self {
+        Self::configured(Some(vec![parsed("react-v1")]))
+    }
+
+    /// A server with the build's own build profiles, or `build_profiles`.
+    fn configured(build_profiles: Option<Vec<ProfileName>>) -> Self {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let defaults = Settings::default();
+        let build_profiles = build_profiles.unwrap_or(defaults.build_profiles.clone());
         let directory = std::env::temp_dir().join(format!(
             "artifree-mcp-{}-{}",
             std::process::id(),
@@ -74,7 +87,8 @@ impl Harness {
                 frame_ancestors: "http://127.0.0.1:*".into(),
                 limits: RequestLimits::default(),
                 change_streams: changes::DEFAULT_STREAMS_PER_ACTOR,
-                ..Settings::default()
+                build_profiles,
+                ..defaults
             },
         )
         .unwrap_or_else(|error| panic!("cannot build state: {error}"));
@@ -1803,5 +1817,80 @@ async fn http_and_mcp_read_the_same_asset() -> TestResult {
         "MCP metadata"
     );
     assert_eq!(metadata["asset"], mcp["structuredContent"]["asset"]);
+    Ok(())
+}
+
+/// Decision 0058 rule 17 through MCP: `enqueue_job` builds a revision with
+/// `profile`, with the HTTP semantics, and a build that cannot build the
+/// profile refuses it with `profile_unknown`.
+#[tokio::test]
+async fn agents_enqueue_a_build_with_its_profile() -> TestResult {
+    let harness = Harness::building();
+    let created = harness
+        .call(
+            "create_artifact",
+            json!({
+                "title": "Page", "idempotency_key": "build-create-1",
+                "files": [{ "path": "index.html", "encoding": "utf8", "content": "<p>x</p>" }]
+            }),
+        )
+        .await?;
+    let artifact = created["structuredContent"]["artifact"]["id"].clone();
+    let queued = harness
+        .call(
+            "enqueue_job",
+            json!({
+                "artifact_id": artifact, "revision": 1, "kind": "run_profile",
+                "profile": "react-v1", "idempotency_key": "build-enqueue-1"
+            }),
+        )
+        .await?;
+    assert_eq!(queued["isError"], false, "{queued}");
+    let job = &queued["structuredContent"]["job"];
+    assert_eq!(
+        (job["kind"].clone(), job["profile"].clone()),
+        (json!("run_profile"), json!("react-v1"))
+    );
+    let shown = harness
+        .call("get_job", json!({ "job_id": job["id"] }))
+        .await?;
+    assert_eq!(shown["structuredContent"]["profile"], "react-v1");
+
+    let refused = harness
+        .call(
+            "enqueue_job",
+            json!({
+                "artifact_id": artifact, "revision": 1, "kind": "run_profile",
+                "profile": "fixture", "idempotency_key": "build-enqueue-2"
+            }),
+        )
+        .await?;
+    assert_eq!(error_code(&refused), "profile_unknown");
+
+    let release = Harness::configured(Some(Vec::new()));
+    let created = release
+        .call(
+            "create_artifact",
+            json!({
+                "title": "Page", "idempotency_key": "build-create-2",
+                "files": [{ "path": "index.html", "encoding": "utf8", "content": "<p>x</p>" }]
+            }),
+        )
+        .await?;
+    let refused = release
+        .call(
+            "enqueue_job",
+            json!({
+                "artifact_id": created["structuredContent"]["artifact"]["id"], "revision": 1,
+                "kind": "run_profile", "profile": "react-v1",
+                "idempotency_key": "build-enqueue-3"
+            }),
+        )
+        .await?;
+    assert_eq!(
+        error_code(&refused),
+        "profile_unknown",
+        "a release build knows no profile"
+    );
     Ok(())
 }

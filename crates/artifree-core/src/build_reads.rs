@@ -6,15 +6,16 @@
 //! serving when access ends because every file read checks it again. The
 //! head status gives a failed job's diagnostics, which can name source text,
 //! only to a caller who may read the head revision, which is the job's
-//! (rule 13). Nothing here is on the API, MCP or the CLI yet (slice R03d).
+//! (rule 13). The job reads show a failed job's diagnostics (slice R03da);
+//! the build preview and the head status reach the wire in slice R03db.
 
 use artifree_domain::SourceRevision;
 use artifree_domain::identity::{ActorId, ArtifactId};
-use artifree_domain::job::{BuildDiagnostic, JobFailure, JobId, JobState, ProfileName};
+use artifree_domain::job::{BuildDiagnostic, JobFailure, JobId, JobKind, JobState, ProfileName};
 use artifree_domain::package::PackagePath;
 use artifree_ports::artifact_store::ArtifactStore;
 use artifree_ports::build_store::{BuildRecord, BuildSnapshot, BuildStore};
-use artifree_ports::job_store::JobStore;
+use artifree_ports::job_store::{JobRecord, JobStore};
 
 use crate::artifacts::{ArtifactError, ArtifactService, Missing};
 use crate::jobs::job_error;
@@ -141,6 +142,28 @@ impl<S: ArtifactStore + JobStore + BuildStore> ArtifactService<S> {
             head_build: head_build(&snapshot)?,
             latest: snapshot.latest,
         })
+    }
+
+    /// The diagnostics a job read shows with `job` (decision 0058 rule 13 and
+    /// its R03d split note): those it keeps, for a failed `run_profile` job,
+    /// and none for any other. `job` must come from a call that answers only
+    /// the actor who enqueued it while it may read the artifact outside the
+    /// trash: [`Self::job`], [`Self::jobs`], or the receipt of
+    /// [`Self::enqueue_build`], [`Self::enqueue_job`] or [`Self::cancel_job`],
+    /// whose store writes refuse an artifact in the trash and whose core
+    /// checks the actor first. That is the read rule of 13, so no other check
+    /// is made here.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::Unavailable`].
+    pub fn job_diagnostics(&self, job: &JobRecord) -> Result<Vec<BuildDiagnostic>, ArtifactError> {
+        if job.kind != JobKind::RunProfile || job.state != JobState::Failed {
+            return Ok(Vec::new());
+        }
+        self.store
+            .diagnostics(&job.id)
+            .map_err(|error| job_error(error, Missing::Job))
     }
 }
 

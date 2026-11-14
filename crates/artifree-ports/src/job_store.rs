@@ -383,7 +383,8 @@ impl From<StoreError> for JobStoreError {
 pub trait JobStore {
     /// Enqueues a job pinned to a revision, or returns the stored receipt of
     /// the same request. One step decides the artifact, the revision, the key,
-    /// and the actor's limit. A `run_profile` request is refused with
+    /// and the actor's limit, which counts every public job of either kind. A
+    /// `run_profile` request is refused with
     /// [`JobStoreError::InvalidRequest`]; use [`JobStore::enqueue_profile_job`].
     ///
     /// # Errors
@@ -395,22 +396,27 @@ pub trait JobStore {
 
     /// Enqueues a `run_profile` job, as [`JobStore::enqueue_job`] does for
     /// `verify_revision`: the same request keys, the same artifact and
-    /// revision checks, and the same replay. It does not count toward the
-    /// actor's limit (decision 0057 rule 3). Only tests call it; no HTTP, MCP
-    /// or CLI path does.
+    /// revision checks, and the same replay. A job of
+    /// [`artifree_domain::job::PUBLIC_PROFILE`] is public (decision 0058 rule
+    /// 17): the actor's limit applies to its enqueue and it counts toward it.
+    /// A job of any other profile is hidden (decision 0057 rule 3): it is
+    /// neither bounded nor counted. The store checks no profile against a
+    /// build; the core does.
     ///
     /// # Errors
     ///
-    /// [`JobStoreError::NotFound`], [`JobStoreError::RequestKeyReused`], or
+    /// [`JobStoreError::NotFound`], [`JobStoreError::RequestKeyReused`],
+    /// [`JobStoreError::LimitReached`] for a public job, or
     /// [`JobStoreError::Unavailable`].
     fn enqueue_profile_job(&self, request: NewProfileJob<'_>) -> Result<JobReceipt, JobStoreError>;
 
     /// Cancels a job of the actor. A job that has not started ends as
     /// cancelled at once; a running job gets `cancel_requested` and ends as
     /// cancelled when its worker reaches a checkpoint. The same request
-    /// replays. A job that ended is [`JobStoreError::Conflict`]. A
-    /// `run_profile` job is [`JobStoreError::NotFound`], and no request key is
-    /// recorded.
+    /// replays. A job that ended is [`JobStoreError::Conflict`]. A hidden job
+    /// (a `run_profile` job of a profile other than
+    /// [`artifree_domain::job::PUBLIC_PROFILE`]) is [`JobStoreError::NotFound`],
+    /// and no request key is recorded.
     ///
     /// # Errors
     ///
@@ -419,8 +425,8 @@ pub trait JobStore {
     fn cancel_job(&self, request: JobCancel<'_>) -> Result<JobReceipt, JobStoreError>;
 
     /// One job, as stored. It does not check the artifact or the actor. A
-    /// `run_profile` job is not returned: the answer is `None`, as for a job
-    /// that does not exist.
+    /// hidden job is not returned: the answer is `None`, as for a job that
+    /// does not exist.
     ///
     /// # Errors
     ///
@@ -428,8 +434,7 @@ pub trait JobStore {
     fn job(&self, id: &JobId) -> Result<Option<JobRecord>, JobStoreError>;
 
     /// Up to `listing.limit` jobs of an actor whose artifact is outside the
-    /// trash and not purged, newest first. `run_profile` jobs are not
-    /// returned.
+    /// trash and not purged, newest first. Hidden jobs are not returned.
     ///
     /// # Errors
     ///
