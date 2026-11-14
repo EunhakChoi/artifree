@@ -362,6 +362,28 @@ impl Worker {
         })?;
         Ok((attempt, group))
     }
+
+    /// Waits until the attempt of its job runs its payload: the attempt is started and a process
+    /// of its group is the payload, which exists only after the release. Returns the group.
+    fn released_attempt(&self, store: &Store) -> Result<PathBuf, Box<dyn Error>> {
+        let (_, group) = self.started_attempt(store)?;
+        poll(within(DEADLINE), "the released payload", || {
+            Ok(runs_the_payload(&group).then_some(()))
+        })?;
+        Ok(group)
+    }
+}
+
+/// Whether a process of `group` is the payload, by its command name (the kernel keeps the first
+/// 15 bytes of the program's file name). A group or a process that vanished counts as no.
+fn runs_the_payload(group: &Path) -> bool {
+    let Ok(procs) = fs::read_to_string(group.join("cgroup.procs")) else {
+        return false;
+    };
+    procs.lines().any(|pid| {
+        fs::read_to_string(format!("/proc/{pid}/comm"))
+            .is_ok_and(|comm| PAYLOAD.starts_with(comm.trim_end()) && !comm.trim_end().is_empty())
+    })
 }
 
 impl Drop for Worker {
@@ -968,7 +990,9 @@ fn job_a_stalled_worker_ends_the_attempt_by_the_guardian() -> TestResult {
     store.create_artifact()?;
     let job = store.enqueue_fixture("stalled-worker")?;
     let mut worker = Worker::spawn(&scratch, &LEASE_3)?;
-    let (_, group) = worker.started_attempt(&store)?;
+    // Stopped only after the release: a stop before it would end the attempt at readiness, with
+    // another reason than the guardian's renewal window.
+    let group = worker.released_attempt(&store)?;
     worker.signal("STOP")?;
     thread::sleep(STALL);
     worker.signal("CONT")?;
