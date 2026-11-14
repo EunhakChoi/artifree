@@ -1075,7 +1075,7 @@ fn verdict_case(case: &str) -> Result<(&'static str, usize, usize), Box<dyn Erro
 /// A run that fails ends with its own verdict, and the provider hands the payload's stderr to the
 /// worker within the log bound: a non-zero exit, a filter kill, the wall time, the memory and the
 /// log bound each have their own word on the worker's stderr (decision 0058 rule 18, slice
-/// R03bb). The worker still fails each job as `internal` until R03c.
+/// R03bb). The fixture is no build profile, so the worker fails each job as `internal`.
 #[test]
 #[ignore = "runs only in the Linux enforcement job"]
 fn job_a_failed_run_reports_its_own_verdict() -> TestResult {
@@ -1102,7 +1102,7 @@ fn job_a_failed_run_reports_its_own_verdict() -> TestResult {
     assert_eq!(
         store.job_row(&job)?.failure.as_deref(),
         Some(JobFailure::Internal.as_str()),
-        "until R03c a failed {case} run fails its job as internal"
+        "a failed {case} run of the fixture fails its job as internal"
     );
     assert_eq!(
         store.attempt_of(&job)?.state,
@@ -1111,6 +1111,11 @@ fn job_a_failed_run_reports_its_own_verdict() -> TestResult {
     );
     Ok(())
 }
+
+// --- builds (decision 0058, slice R03cb) -------------------------------------------
+
+#[path = "execution_jobs/builds.rs"]
+mod builds;
 
 // --- the recovery matrix of R02bc (decision 0057 rule 20) -------------------------
 

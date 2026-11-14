@@ -17,6 +17,7 @@ use rustix::fs::{self, AtFlags, Mode, OFlags, StatxFlags};
 use rustix::fs::{Dir, FileType};
 
 use super::super::collection::{self, CollectedOutput, CollectionRefusal, ManifestBinding};
+use super::super::profile::OutputRule;
 use super::super::readiness::{self, GroupObservation};
 use super::super::staging::RESOLVE;
 use super::NotStartedReason;
@@ -126,8 +127,9 @@ impl Keeper {
     pub(super) fn collect(
         self,
         binding: &ManifestBinding,
+        rule: OutputRule,
     ) -> Result<CollectedOutput, CollectionRefusal> {
-        let output = collection::collect(&self.output_root, binding);
+        let output = collection::collect(&self.output_root, binding, rule);
         drop(self);
         output
     }

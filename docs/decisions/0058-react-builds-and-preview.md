@@ -4,8 +4,9 @@ Date: 2026-11-14. Status: **accepted; R03a (the package rules), R03ba
 (the profile table), R03bb (the provider's verdicts), R03bca (the
 versioned, packaged and protected tool root), R03bcba (the lock list, the
 packaged bundler and its measurement), R03bcbb (the `react-v1` profile in
-the build with `enforcement-fixture`) and R03ca (the store of builds and
-diagnostics) are implemented, R03cb to R03f are not**. Roadmap: R03.
+the build with `enforcement-fixture`), R03ca (the store of builds and
+diagnostics) and R03cb (the worker's composition, diagnostics and failures)
+are implemented, R03cc to R03f are not**. Roadmap: R03.
 
 > **Note, 2026-11-14 (slices).** R03b is split into R03ba, R03bb and R03bc,
 > and rule 5 moves to R03f. A release build compiles no attempt, worker port,
@@ -302,6 +303,59 @@ diagnostics) are implemented, R03cb to R03f are not**. Roadmap: R03.
 >   25 MiB (six files, the package limit) took about 0.6 s in a debug build
 >   and 0.14 s in a release build, under a load average below 2, against
 >   the worker's default lease of 30 s. The test asserts half the lease.
+
+> **Note, 2026-11-15 (R03cb).** The worker half is implemented. The worker
+> is given the build profiles of its build with the profiles it knows. A job
+> of a build profile ends through R03ca's `BuildStore`; a job of any other
+> profile, the fixture's, keeps the ends of 0057, so each of its failed runs
+> is still `internal`.
+>
+> - The composition of rules 7 and 8 is a pure function of the core. The
+>   bundle must be `app.js` and at most `app.css`. The revision's
+>   `index.html` must be UTF-8 and hold the element of rule 7 exactly once.
+>   "Refers to a path under `src/`" is read as any `src/` in any ASCII case,
+>   which also refuses text that only names the directory; the template has
+>   none. Only `index.html` is checked, as rule 7 says. A path the bundle and
+>   the revision both hold, or two that differ only by case, ends the job as
+>   `output_rejected`, as does a result that breaks another package rule.
+> - A build profile's output is collected under the package rules without
+>   the entry document, which the composition adds. The domain gains
+>   `FileSet` for such a set, and the resolver configuration rule of the
+>   R03bcbb note moves into the domain, so that the provider's refusal and
+>   the worker's diagnostic name the same files.
+> - The split of rule 13 reads each error header, `✘ [ERROR] <text>` (or
+>   `X [ERROR]`), and takes the first non-empty line after it as the
+>   location when it reads `<path>:<line>:<column>:` and the path lies under
+>   the input mount, printed absolute or relative to a directory at or
+>   beside the root. Any other location is dropped and the message kept, as
+>   are warnings, notes, the quoted excerpt and the closing count. Paths
+>   under the mount in a message are rewritten as rule 13 says; a control
+>   character becomes a space and the text is cut at a character boundary
+>   within 512 bytes. A non-zero exit with no message that can be read keeps
+>   one fixed diagnostic instead, so a failed build always says something.
+> - The ends: a non-zero exit is `build_failed` with the split messages; a
+>   filter kill is `build_failed` with its fixed diagnostic; resolver
+>   configuration is `build_failed` with one fixed diagnostic that names the
+>   first such path in path order, which settles the input refusal of the
+>   R03bcbb note (the provider reports it as a launch failure of its own); a
+>   limit is `limit_exceeded`; an output that collection or composition
+>   refuses is `output_rejected`. A refusal before the payload stays
+>   `execution_unavailable`, another failed verdict or an output bound to
+>   another run stays `internal`, and a stop stays a lost lease.
+> - The `react-v1` filter check of the R03bcbb note now has the store name
+>   `react-v1-check` and is a build profile, in the test build and the
+>   `enforcement-fixture` build only, so that the enforcement job can show a
+>   filter kill and a limit through the worker; the bundler cannot be made
+>   to do either. A release build knows neither profile (rule 22).
+> - The test template's `index.html` gains the element of rule 7.
+> - The dispatch tests run on any host with a scripted port. Part 17 of the
+>   enforcement job runs each case through the real worker: the template is
+>   published as `app.css`, `app.js` and `index.html`; a bad import is
+>   `build_failed` with one diagnostic, `src/main.tsx`, line 1, column 16,
+>   `Could not resolve "left-pad"`, which is rule 23's assumption for R03cb;
+>   resolver configuration and a missing script element end as above; and
+>   the `react-v1` check ends as `build_failed` at a filter kill and as
+>   `limit_exceeded` at the log bound.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),

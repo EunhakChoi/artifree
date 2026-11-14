@@ -7,8 +7,9 @@
 //!
 //! The fixture is the only profile of a release build's table, which no release build uses yet.
 //! The test build and the `enforcement-fixture` build also know `react-v1` (decision 0058 rule 22,
-//! slice R03bcbb), and two entries with no store name that only the enforcement job's attempt
-//! tests launch: the bundler measurement and the `react-v1` filter check.
+//! slice R03bcbb) and the `react-v1` check, a build profile that runs the fixture's payload under
+//! `react-v1`'s filter (slice R03cb), and one entry with no store name that only the enforcement
+//! job's attempt tests launch: the bundler measurement.
 
 use super::policy::FilterSet;
 use super::{FIXTURE, InspectionProfile};
@@ -31,6 +32,8 @@ pub(super) struct ExecutionProfile {
     pub(super) filter: FilterSet,
     /// What the profile requires of its input beyond the package rules.
     pub(super) input: InputRule,
+    /// What the profile's output must be.
+    pub(super) output: OutputRule,
 }
 
 /// What a profile requires of its input before it is staged.
@@ -43,6 +46,18 @@ pub(super) enum InputRule {
     /// the test build and the `enforcement-fixture` build use it.
     #[cfg(any(test, feature = "enforcement-fixture"))]
     FixedResolution,
+}
+
+/// What a profile's collected output must be.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum OutputRule {
+    /// A whole package, with its `index.html`.
+    Package,
+    /// A bundler's output: files under the package rules except the entry document, which the
+    /// trusted worker adds from the revision (decision 0058 rule 8). Its profile is a build
+    /// profile. Only the profiles of the test build and the `enforcement-fixture` build use it.
+    #[cfg(any(test, feature = "enforcement-fixture"))]
+    Bundle,
 }
 
 /// The name of the fixture execution profile (decision 0057 rule 2).
@@ -61,6 +76,7 @@ pub(super) const FIXTURE_EXECUTION: ExecutionProfile = ExecutionProfile {
     environment: &[],
     filter: FilterSet::Fixture,
     input: InputRule::Any,
+    output: OutputRule::Package,
 };
 
 /// The name of the React profile (decision 0058 rule 1).
@@ -86,6 +102,7 @@ pub(super) const REACT_V1: ExecutionProfile = ExecutionProfile {
     environment: BUNDLER_ENVIRONMENT,
     filter: FilterSet::ReactV1,
     input: InputRule::FixedResolution,
+    output: OutputRule::Bundle,
 };
 
 /// Every profile, in no particular order. Names and identities are unique.
@@ -94,7 +111,7 @@ const PROFILES: &[ExecutionProfile] = &[FIXTURE_EXECUTION];
 
 /// Every profile, in no particular order. Names and identities are unique.
 #[cfg(any(test, feature = "enforcement-fixture"))]
-const PROFILES: &[ExecutionProfile] = &[FIXTURE_EXECUTION, REACT_V1];
+const PROFILES: &[ExecutionProfile] = &[FIXTURE_EXECUTION, REACT_V1, REACT_V1_FILTER_CHECK];
 
 /// The bundler measurement (decision 0058, note "R03bcb split"): the root's bundler with the
 /// argv and environment of rule 1, under the measuring filter. It is no profile: it has no store
@@ -112,15 +129,17 @@ pub(super) const MEASUREMENT: ExecutionProfile = ExecutionProfile {
     environment: BUNDLER_ENVIRONMENT,
     filter: FilterSet::Measure,
     input: InputRule::FixedResolution,
+    output: OutputRule::Bundle,
 };
 
-/// The `react-v1` filter check (slice R03bcbb): the fixture's payload under `react-v1`'s filter,
-/// so that a payload scenario can make a call outside that filter and show that it is killed. The
-/// bundler itself cannot be made to. Like the measurement, it has no store name, and only the
-/// test build and the `enforcement-fixture` build know it.
+/// The `react-v1` check (slices R03bcbb and R03cb): the fixture's payload under `react-v1`'s
+/// filter, so that a payload scenario can make a call outside that filter and show that it is
+/// killed, or end the attempt at a limit. The bundler itself cannot be made to do either. It is a
+/// build profile, so that a job of it ends as a build does (decision 0058 rule 18); only the test
+/// build and the `enforcement-fixture` build know it.
 #[cfg(any(test, feature = "enforcement-fixture"))]
 pub(super) const REACT_V1_FILTER_CHECK: ExecutionProfile = ExecutionProfile {
-    name: "",
+    name: "react-v1-check",
     inspection: InspectionProfile {
         identity: "artifree-react-v1-filter-check",
         manifest: b"payload=fixture\nfilter=react-v1\nenforcement=incomplete\n",
@@ -130,11 +149,12 @@ pub(super) const REACT_V1_FILTER_CHECK: ExecutionProfile = ExecutionProfile {
     environment: &[],
     filter: FilterSet::ReactV1,
     input: InputRule::Any,
+    output: OutputRule::Bundle,
 };
 
 /// The entries that are no profile: no job can name them.
 #[cfg(any(test, feature = "enforcement-fixture"))]
-const TEST_ENTRIES: [&ExecutionProfile; 2] = [&MEASUREMENT, &REACT_V1_FILTER_CHECK];
+const TEST_ENTRIES: [&ExecutionProfile; 1] = [&MEASUREMENT];
 
 /// The bundler's arguments after its path (decision 0058 rule 1): bundle the entry module into
 /// `/tmp/out` as `app.js` and, when the source imports CSS, `app.css`; ES modules for the
@@ -199,6 +219,16 @@ pub(super) fn filter_sets() -> impl Iterator<Item = FilterSet> {
 #[cfg(feature = "enforcement-fixture")]
 pub(super) fn names() -> impl Iterator<Item = &'static str> {
     PROFILES.iter().map(|profile| profile.name)
+}
+
+/// The store name of every build profile, whose output the trusted worker composes and publishes
+/// as a build (decision 0058 rule 8).
+#[cfg(feature = "enforcement-fixture")]
+pub(super) fn build_names() -> impl Iterator<Item = &'static str> {
+    PROFILES
+        .iter()
+        .filter(|profile| profile.output == OutputRule::Bundle)
+        .map(|profile| profile.name)
 }
 
 /// The profile whose store name is exactly `name`.

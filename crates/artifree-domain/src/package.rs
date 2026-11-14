@@ -386,6 +386,153 @@ impl FileChange {
     }
 }
 
+/// The file names that a bundler reads as resolver configuration wherever they
+/// lie above an imported module (decision 0058 rule 2): `tsconfig.json` and
+/// `jsconfig.json` (path mappings) and `package.json` (its `browser` and
+/// `imports` maps). Compared without regard to ASCII case.
+const RESOLVER_FILES: [&str; 3] = ["package.json", "tsconfig.json", "jsconfig.json"];
+
+/// The directory name a bundler searches for packages above an imported module.
+const PACKAGE_DIRECTORY: &str = "node_modules";
+
+impl PackagePath {
+    /// Whether this file would change how a bundler resolves an import
+    /// (decision 0058 rule 2): a file named `package.json`, `tsconfig.json` or
+    /// `jsconfig.json`, or any file under a `node_modules` directory, at any
+    /// depth and in any ASCII case.
+    #[must_use]
+    pub fn is_resolver_configuration(&self) -> bool {
+        let mut segments = self.0.split('/').peekable();
+        while let Some(segment) = segments.next() {
+            let matches = if segments.peek().is_none() {
+                RESOLVER_FILES
+                    .iter()
+                    .any(|name| segment.eq_ignore_ascii_case(name))
+            } else {
+                segment.eq_ignore_ascii_case(PACKAGE_DIRECTORY)
+            };
+            if matches {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Collects `files` into a map, refusing a path that appears twice.
+fn unique_paths(
+    files: Vec<(PackagePath, Vec<u8>)>,
+) -> Result<BTreeMap<PackagePath, Vec<u8>>, PackageError> {
+    let mut map = BTreeMap::new();
+    for (path, content) in files {
+        if map.contains_key(&path) {
+            return Err(PackageError::DuplicatePath(path));
+        }
+        map.insert(path, content);
+    }
+    Ok(map)
+}
+
+/// Checks every package rule except the entry document: the file count, each
+/// file's size and the total, case collisions and file and directory
+/// conflicts.
+fn check_files(files: &BTreeMap<PackagePath, Vec<u8>>) -> Result<(), PackageError> {
+    if files.len() > MAX_FILES {
+        return Err(PackageError::TooManyFiles);
+    }
+    let mut total = 0usize;
+    let mut folded: BTreeMap<String, &PackagePath> = BTreeMap::new();
+    for (path, content) in files {
+        if content.len() > MAX_FILE_BYTES {
+            return Err(PackageError::FileTooLarge(path.clone()));
+        }
+        total = total.saturating_add(content.len());
+        if let Some(existing) = folded.insert(path.folded(), path) {
+            return Err(PackageError::CaseCollision(existing.clone(), path.clone()));
+        }
+    }
+    if total > MAX_PACKAGE_BYTES {
+        return Err(PackageError::PackageTooLarge);
+    }
+    let directories: BTreeSet<String> = folded
+        .keys()
+        .flat_map(|path| {
+            path.match_indices('/')
+                .map(|(index, _)| path[..index].to_owned())
+        })
+        .collect();
+    if let Some((_, path)) = folded.iter().find(|(name, _)| directories.contains(*name)) {
+        return Err(PackageError::FileDirectoryConflict((*path).clone()));
+    }
+    Ok(())
+}
+
+/// A validated set of files under every package rule except the entry
+/// document: a bundler's output, which becomes a package only once the
+/// trusted worker adds the revision's `index.html` (decision 0058 rule 8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileSet {
+    files: BTreeMap<PackagePath, Vec<u8>>,
+}
+
+impl FileSet {
+    /// Validates files supplied by a caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`PackageError`] when a path repeats or collides, or a size
+    /// or count limit is exceeded. A missing `index.html` is no error here.
+    pub fn new(files: Vec<(PackagePath, Vec<u8>)>) -> Result<Self, PackageError> {
+        let files = unique_paths(files)?;
+        check_files(&files)?;
+        Ok(Self { files })
+    }
+
+    /// The set as a package.
+    ///
+    /// # Errors
+    ///
+    /// [`PackageError::MissingEntry`] when the set has no `index.html`.
+    pub fn into_package(self) -> Result<FilePackage, PackageError> {
+        if !self.files.contains_key(&PackagePath::entry()) {
+            return Err(PackageError::MissingEntry);
+        }
+        Ok(FilePackage { files: self.files })
+    }
+
+    /// The content of one file.
+    #[must_use]
+    pub fn file(&self, path: &PackagePath) -> Option<&[u8]> {
+        self.files.get(path).map(Vec::as_slice)
+    }
+
+    /// Files in path order.
+    #[must_use]
+    pub fn files(&self) -> impl ExactSizeIterator<Item = (&PackagePath, &[u8])> {
+        self.files
+            .iter()
+            .map(|(path, content)| (path, content.as_slice()))
+    }
+
+    /// Files in path order, taking their bytes.
+    #[must_use]
+    pub fn into_files(self) -> impl ExactSizeIterator<Item = (PackagePath, Vec<u8>)> {
+        self.files.into_iter()
+    }
+
+    /// Number of files.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Whether the set holds no file.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+}
+
 /// A validated set of files with an `index.html` entry document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilePackage {
@@ -400,48 +547,21 @@ impl FilePackage {
     /// Returns a [`PackageError`] when a path repeats or collides, a size or
     /// count limit is exceeded, or `index.html` is missing.
     pub fn new(files: Vec<(PackagePath, Vec<u8>)>) -> Result<Self, PackageError> {
-        let mut map = BTreeMap::new();
-        for (path, content) in files {
-            if map.contains_key(&path) {
-                return Err(PackageError::DuplicatePath(path));
-            }
-            map.insert(path, content);
-        }
-        Self::validated(map)
+        FileSet::new(files)?.into_package()
     }
 
     fn validated(files: BTreeMap<PackagePath, Vec<u8>>) -> Result<Self, PackageError> {
-        if files.len() > MAX_FILES {
-            return Err(PackageError::TooManyFiles);
-        }
-        let mut total = 0usize;
-        let mut folded: BTreeMap<String, &PackagePath> = BTreeMap::new();
-        for (path, content) in &files {
-            if content.len() > MAX_FILE_BYTES {
-                return Err(PackageError::FileTooLarge(path.clone()));
-            }
-            total = total.saturating_add(content.len());
-            if let Some(existing) = folded.insert(path.folded(), path) {
-                return Err(PackageError::CaseCollision(existing.clone(), path.clone()));
-            }
-        }
-        if total > MAX_PACKAGE_BYTES {
-            return Err(PackageError::PackageTooLarge);
-        }
-        let directories: BTreeSet<String> = folded
+        check_files(&files)?;
+        FileSet { files }.into_package()
+    }
+
+    /// The first file in path order that would change how a bundler resolves
+    /// an import ([`PackagePath::is_resolver_configuration`]), if any.
+    #[must_use]
+    pub fn first_resolver_configuration(&self) -> Option<&PackagePath> {
+        self.files
             .keys()
-            .flat_map(|path| {
-                path.match_indices('/')
-                    .map(|(index, _)| path[..index].to_owned())
-            })
-            .collect();
-        if let Some((_, path)) = folded.iter().find(|(name, _)| directories.contains(*name)) {
-            return Err(PackageError::FileDirectoryConflict((*path).clone()));
-        }
-        if !files.contains_key(&PackagePath::entry()) {
-            return Err(PackageError::MissingEntry);
-        }
-        Ok(Self { files })
+            .find(|path| path.is_resolver_configuration())
     }
 
     /// Applies a change set and validates the resulting package.
@@ -707,6 +827,45 @@ mod tests {
             ]),
             Err(PackageError::DuplicatePath(_))
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_file_set_needs_no_entry_until_it_becomes_a_package() -> Result<(), PackageError> {
+        let set = FileSet::new(vec![(path("app.js"), b"x".to_vec())])?;
+        assert_eq!(set.len(), 1);
+        assert_eq!(set.clone().into_package(), Err(PackageError::MissingEntry));
+        assert!(matches!(
+            FileSet::new(vec![
+                (path("app.js"), Vec::new()),
+                (path("APP.js"), Vec::new())
+            ]),
+            Err(PackageError::CaseCollision(..))
+        ));
+        let mut files: Vec<(PackagePath, Vec<u8>)> = set.into_files().collect();
+        files.push((PackagePath::entry(), b"page".to_vec()));
+        assert_eq!(FileSet::new(files)?.into_package()?.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn the_first_resolver_configuration_is_named_in_path_order() -> Result<(), PackageError> {
+        let configured = package(&[
+            "index.html",
+            "src/main.tsx",
+            "src/tsconfig.json",
+            "b/package.json",
+        ])?;
+        assert_eq!(
+            configured
+                .first_resolver_configuration()
+                .map(PackagePath::as_str),
+            Some("b/package.json")
+        );
+        assert_eq!(
+            package(&["index.html", "src/main.tsx"])?.first_resolver_configuration(),
+            None
+        );
         Ok(())
     }
 }

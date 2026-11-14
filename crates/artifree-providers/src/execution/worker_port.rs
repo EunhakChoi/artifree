@@ -30,13 +30,13 @@ use std::process::ExitStatus;
 use std::time::Duration;
 
 use artifree_domain::job::{AttemptIdentity, AttemptState, CheckpointAnswer, StopReason};
-use artifree_domain::package::{FilePackage, PackagePath};
+use artifree_domain::package::PackagePath;
 use artifree_ports::artifact_store::FileEntry;
 use artifree_ports::execution::{
     BoundRun, Capacity, Checkpoint, CheckpointUnavailable, Execution, ExecutionHost, HeldCapacity,
     LaunchFailure, LaunchOutcome, LimitKind, PinnedInput, ProfileOutput, ProfileRun,
 };
-use artifree_ports::job_store::{AttemptRow, ProfileCounts};
+use artifree_ports::job_store::AttemptRow;
 
 use super::admission;
 use super::attempt::{
@@ -48,7 +48,7 @@ use super::guardian::GuardianReason;
 use super::launcher::{EntryProgram, KILLED_BY_SIGSYS};
 use super::profile;
 use super::registry::{self, Identity, QuarantineReason, RecordRun};
-use super::staging::{InputListing, VerifiedInput};
+use super::staging::{InputListing, InputRefusal, VerifiedInput};
 use super::{AdmissionRefusal, read_bounded};
 
 /// The file of the execution directory that holds its identity (decision 0057 rule 6).
@@ -477,18 +477,7 @@ fn listing_of(entries: Vec<FileEntry>) -> InputListing {
     InputListing(listing)
 }
 
-/// The number of files and bytes of an admitted output, saturating at `u64::MAX`.
-fn counts_of(package: &FilePackage) -> ProfileCounts {
-    let bytes = package.files().fold(0_u64, |total, (_, content)| {
-        total.saturating_add(u64::try_from(content.len()).unwrap_or(u64::MAX))
-    });
-    ProfileCounts {
-        files: u64::try_from(package.len()).unwrap_or(u64::MAX),
-        bytes,
-    }
-}
-
-/// The outcome of a launch that was observed to its end. An admitted output carries its counts and
+/// The outcome of a launch that was observed to its end. An admitted output carries its files and
 /// its binding (decision 0057 rule 17). Any other end is a failure with its fixed word.
 fn evidence_outcome(
     evidence: &AttemptEvidence,
@@ -499,7 +488,7 @@ fn evidence_outcome(
         Ok(collected) => match collected.manifest.binding().run.clone() {
             Some(bound) => (
                 Ok(ProfileOutput {
-                    counts: counts_of(&collected.package),
+                    files: collected.files.clone(),
                     profile: run.profile.clone(),
                     tool_digest: tool_digest.to_owned(),
                     bound,
@@ -512,7 +501,7 @@ fn evidence_outcome(
             let (failure, word) = exit_failure(evidence.exit);
             (Err(failure), word)
         }
-        Err(OutputRefusal::Refused(_)) => (Err(LaunchFailure::Failed), "output-refused"),
+        Err(OutputRefusal::Refused(_)) => (Err(LaunchFailure::OutputRefused), "output-refused"),
     }
 }
 
@@ -547,11 +536,14 @@ fn outcome(launched: Launched, run: &ProfileRun<'_>, tool_digest: &str) -> Launc
 }
 
 /// The kind of a launch that produced no output (decision 0057 rules 7 and 15). A refusal before
-/// the payload is `Unavailable`, a limit of decision 0042 rule 5 that ended the attempt is its
-/// `Limit` (decision 0058 rule 18), any other failed verdict is `Failed`, and a stop is `Stopped`.
+/// the payload is `Unavailable`, except an input that holds resolver configuration, which is the
+/// revision's fault (decision 0058, note "R03c split"). A limit of decision 0042 rule 5 that ended
+/// the attempt is its `Limit` (decision 0058 rule 18), any other failed verdict is `Failed`, and a
+/// stop is `Stopped`.
 fn refusal_kind(failure: AttemptFailure) -> LaunchFailure {
     match failure {
         AttemptFailure::LeaseLost(part) => LaunchFailure::Stopped(stop_reason_of(part)),
+        AttemptFailure::Input(InputRefusal::ResolverFile) => LaunchFailure::ResolverConfiguration,
         AttemptFailure::Busy
         | AttemptFailure::LockUnusable
         | AttemptFailure::Quarantined
@@ -584,6 +576,7 @@ fn word(failure: AttemptFailure) -> &'static str {
         AttemptFailure::Refused(_) => "admission-refused",
         AttemptFailure::PolicyUnavailable => "policy-unavailable",
         AttemptFailure::NotStarted(_) => "not-started",
+        AttemptFailure::Input(InputRefusal::ResolverFile) => "resolver-configuration",
         AttemptFailure::Input(_) => "input-refused",
         AttemptFailure::Unobserved => "unobserved",
         AttemptFailure::DeadlineExceeded => "deadline-exceeded",

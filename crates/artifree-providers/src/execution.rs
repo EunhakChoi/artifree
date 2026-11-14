@@ -460,6 +460,24 @@ pub fn known_profiles() -> Vec<ProfileName> {
     }
 }
 
+/// The build profiles among `known_profiles` (decision 0058 rule 8): the worker composes a build
+/// profile's output with the revision and publishes it as a build. None in a build without the
+/// `enforcement-fixture` feature on Linux.
+#[must_use]
+pub fn build_profiles() -> Vec<ProfileName> {
+    #[cfg(all(target_os = "linux", feature = "enforcement-fixture"))]
+    {
+        // An invalid constant is left out of the list, which fails closed.
+        profile::build_names()
+            .filter_map(|name| name.parse().ok())
+            .collect()
+    }
+    #[cfg(not(all(target_os = "linux", feature = "enforcement-fixture")))]
+    {
+        Vec::new()
+    }
+}
+
 fn read_pattern(reader: io::Result<impl Read>) -> Result<Vec<u8>, AdmissionRefusal> {
     let mut reader = reader.map_err(|_| AdmissionRefusal::UnreadableCoreRouting)?;
     let mut bytes = Vec::new();

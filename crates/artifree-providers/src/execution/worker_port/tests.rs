@@ -229,6 +229,26 @@ fn each_limit_that_ends_an_attempt_keeps_its_own_kind() {
 }
 
 #[test]
+fn only_resolver_configuration_is_the_revisions_input_refusal() {
+    assert_eq!(
+        refusal_kind(AttemptFailure::Input(InputRefusal::ResolverFile)),
+        LaunchFailure::ResolverConfiguration
+    );
+    for refusal in [
+        InputRefusal::ListingMismatch,
+        InputRefusal::NotStaged,
+        InputRefusal::LeftoverNotRemoved,
+        InputRefusal::NotRemoved,
+    ] {
+        assert_eq!(
+            refusal_kind(AttemptFailure::Input(refusal)),
+            LaunchFailure::Unavailable,
+            "{refusal:?}"
+        );
+    }
+}
+
+#[test]
 fn only_the_launchers_sigsys_status_reads_as_the_filters_kill() {
     use std::os::unix::process::ExitStatusExt;
 

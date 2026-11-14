@@ -100,7 +100,7 @@ fn open_directory(path: &Path) -> TestResult<OwnedFd> {
 /// Collects the directory at `path` through `collect`, under the test binding.
 fn collect_dir(path: &Path) -> TestResult<Outcome> {
     let root = open_directory(path)?;
-    Ok(collect(&root, &binding()))
+    Ok(collect(&root, &binding(), OutputRule::Package))
 }
 
 /// Collects the directory at `root`, running `swap` once on `page.txt` between its classification
@@ -110,14 +110,19 @@ fn collect_replacing_page(root: &Path, swap: Step) -> TestResult<Outcome> {
     let handle = open_directory(root)?;
     let replaced = Cell::new(false);
     let failure: RefCell<Option<io::Error>> = RefCell::new(None);
-    let outcome = collect_with(&handle, &binding(), &mut |_: &OwnedFd, name: &str| {
-        if name == "page.txt"
-            && !replaced.replace(true)
-            && let Err(error) = swap(root)
-        {
-            *failure.borrow_mut() = Some(error);
-        }
-    });
+    let outcome = collect_with(
+        &handle,
+        &binding(),
+        OutputRule::Package,
+        &mut |_: &OwnedFd, name: &str| {
+            if name == "page.txt"
+                && !replaced.replace(true)
+                && let Err(error) = swap(root)
+            {
+                *failure.borrow_mut() = Some(error);
+            }
+        },
+    );
     if let Some(error) = failure.into_inner() {
         return Err(error.into());
     }
@@ -135,7 +140,7 @@ fn expect_collected(outcome: Outcome) -> TestResult<CollectedOutput> {
 /// Whether the package of `collected` holds a file at `path`.
 fn holds(collected: &CollectedOutput, path: &str) -> bool {
     collected
-        .package
+        .files
         .files()
         .any(|(name, _)| name.as_str() == path)
 }
@@ -143,7 +148,7 @@ fn holds(collected: &CollectedOutput, path: &str) -> bool {
 /// A short description of an outcome, for an assertion line.
 fn describe(outcome: &Outcome) -> String {
     match outcome {
-        Ok(collected) => format!("a package of {} files", collected.package.files().len()),
+        Ok(collected) => format!("a package of {} files", collected.files.files().len()),
         Err(refusal) => format!("refusal {refusal:?}"),
     }
 }
@@ -454,6 +459,28 @@ fn replace_with_same_size(root: &Path) -> io::Result<()> {
     fs::write(root.join("page.txt"), b"BBBB")
 }
 
+/// Decision 0058 rule 8 (slice R03cb): a bundle is collected without `index.html`, which the
+/// worker adds from the revision; a package still needs one.
+#[test]
+fn a_bundle_needs_no_entry_document_but_a_package_does() -> TestResult {
+    let scratch = Scratch::new("bundle")?;
+    fs::write(scratch.path().join("app.js"), b"x")?;
+    let root = open_directory(scratch.path())?;
+    let collected = expect_collected(collect(&root, &binding(), OutputRule::Bundle))?;
+    let paths: Vec<&str> = collected
+        .files
+        .files()
+        .map(|(path, _)| path.as_str())
+        .collect();
+    assert_eq!(paths, ["app.js"]);
+    let again = open_directory(scratch.path())?;
+    assert_eq!(
+        collect(&again, &binding(), OutputRule::Package).err(),
+        Some(CollectionRefusal::Package(PackageReason::MissingEntry))
+    );
+    Ok(())
+}
+
 #[test]
 fn a_valid_tree_is_collected_with_its_manifest() -> TestResult {
     let scratch = Scratch::new("valid")?;
@@ -463,7 +490,7 @@ fn a_valid_tree_is_collected_with_its_manifest() -> TestResult {
     let collected = expect_collected(collect_dir(scratch.path())?)?;
 
     let files: Vec<(String, Vec<u8>)> = collected
-        .package
+        .files
         .files()
         .map(|(path, bytes)| (path.to_string(), bytes.to_vec()))
         .collect();
@@ -641,7 +668,7 @@ fn a_same_size_replacement_is_collected_from_the_descriptor() -> TestResult {
     )?)?;
 
     let files: Vec<(String, Vec<u8>)> = collected
-        .package
+        .files
         .files()
         .map(|(path, bytes)| (path.to_string(), bytes.to_vec()))
         .collect();

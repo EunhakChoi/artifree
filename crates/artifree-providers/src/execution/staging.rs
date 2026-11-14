@@ -52,14 +52,6 @@ pub(super) enum InputRefusal {
     ResolverFile,
 }
 
-/// The file names that the bundler reads as resolver configuration wherever they lie above an
-/// imported module: `tsconfig.json` and `jsconfig.json` (path mappings) and `package.json`
-/// (its `browser` and `imports` maps). Compared without regard to ASCII case.
-const RESOLVER_FILES: [&str; 3] = ["package.json", "tsconfig.json", "jsconfig.json"];
-
-/// The directory name the bundler searches for packages above an imported module.
-const PACKAGE_DIRECTORY: &str = "node_modules";
-
 /// Each file's path, length and SHA-256, in path order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct InputListing(pub(super) Vec<(PackagePath, u64, [u8; 32])>);
@@ -122,27 +114,10 @@ impl VerifiedInput {
     }
 
     /// Whether a file of the input would change how the bundler resolves an import (decision 0058
-    /// rule 2): a file named as in `RESOLVER_FILES`, or any file under a `node_modules`
-    /// directory, at any depth and in any ASCII case.
+    /// rule 2), as `PackagePath::is_resolver_configuration` decides.
     #[must_use]
     pub(super) fn holds_resolver_file(&self) -> bool {
-        self.package.files().any(|(path, _)| {
-            let mut segments = path.as_str().split('/').peekable();
-            while let Some(segment) = segments.next() {
-                let is_file = segments.peek().is_none();
-                let matches = if is_file {
-                    RESOLVER_FILES
-                        .iter()
-                        .any(|name| segment.eq_ignore_ascii_case(name))
-                } else {
-                    segment.eq_ignore_ascii_case(PACKAGE_DIRECTORY)
-                };
-                if matches {
-                    return true;
-                }
-            }
-            false
-        })
+        self.package.first_resolver_configuration().is_some()
     }
 
     /// Stages the files as `execution_dir/input`, read only, and drops their bytes.
