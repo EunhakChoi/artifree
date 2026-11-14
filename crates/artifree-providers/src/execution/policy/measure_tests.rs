@@ -42,8 +42,8 @@ fn the_measurement_kills_the_mapped_refusals_but_not_what_the_fixture_allows()
 
 #[test]
 fn measured_calls_change_only_the_measurement_logging_program() -> Result<(), PolicyError> {
-    let [refusal, logging] = filters(FilterSet::Measure)?;
-    let [same_refusal, wider_logging] = filters_with(FilterSet::Measure, &[39, 63])?;
+    let [logging, refusal] = filters(FilterSet::Measure)?;
+    let [wider_logging, same_refusal] = filters_with(FilterSet::Measure, &[39, 63])?;
     assert_eq!(
         refusal, same_refusal,
         "the refusals do not depend on what was measured"

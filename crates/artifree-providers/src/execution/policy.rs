@@ -357,9 +357,11 @@ pub(super) fn parse_measured_calls(bytes: &[u8]) -> Option<Vec<i64>> {
     Some(numbers)
 }
 
-/// The bundler measurement's two programs: the mapping's refusals, then the logging allowlist.
-/// The refusals come first for the same reason the fixture's do: the second program's default
-/// action is `LOG`, which would let `prctl` and `seccomp` through, but the first kills them.
+/// The bundler measurement's two programs: the logging allowlist, then the mapping's refusals.
+/// The refusals come last for the reason the fixture's allowlist does: they kill `prctl` and
+/// `seccomp`, which `seccompiler` calls to install each program (measured on the Linux runner on
+/// 2026-11-14, when the opposite order killed the bootstrap with `prctl`). The logging program
+/// logs those two calls of the bootstrap itself, under the bootstrap's executable.
 ///
 /// # Errors
 /// Returns `PolicyError` when the architecture is not `x86_64` or the compiler rejects the rules.
@@ -393,8 +395,8 @@ fn measure_filters(measured: &[i64]) -> Result<[BpfProgram; 2], PolicyError> {
         )
         .map_err(|_| PolicyError)?;
         Ok([
-            BpfProgram::try_from(refusal).map_err(|_| PolicyError)?,
             BpfProgram::try_from(logging).map_err(|_| PolicyError)?,
+            BpfProgram::try_from(refusal).map_err(|_| PolicyError)?,
         ])
     }
     #[cfg(not(target_arch = "x86_64"))]
