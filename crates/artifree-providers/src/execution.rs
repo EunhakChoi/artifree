@@ -23,8 +23,9 @@
 //!    process's cgroup v2 group from the `0::` line of `/proc/self/cgroup`
 //!    (`CgroupV2Unavailable`), and `cgroup.kill` in that group (`MissingKillSupport`).
 //! 3. Core routing (the routing refusals above).
-//! 4. Tool root: the launcher, then the fixture (`MissingLauncher`, `MissingFixture`), then every
-//!    file against the root's `MANIFEST` (`MissingToolManifest`, `ToolRootMismatch`).
+//! 4. Tool root: the launcher, then the fixture (`MissingLauncher`, `MissingFixture`), then the
+//!    owner and modes of the root's ancestors (`ToolRootUnprotected`), then every entry against
+//!    the root's `MANIFEST` (`MissingToolManifest`, `ToolRootMismatch`, `ToolRootUnprotected`).
 //! 5. Delegation: the group, its `cgroup.procs` and `cgroup.subtree_control` are
 //!    owned by the provider's account (`UndelegatedCgroup`).
 //! 6. Controllers memory, pids, cpu, in that order (`MissingController`).
@@ -162,6 +163,11 @@ pub enum AdmissionRefusal {
     MissingToolManifest,
     /// A tool root file differs from its manifest, or the root holds a file the manifest does not list or lacks one it lists (0056 rule 6).
     ToolRootMismatch,
+    /// The tool root, one of its entries or one of its ancestors could be changed by someone other
+    /// than root: it is not owned by root, it has a group or other write bit (an ancestor may
+    /// when its sticky bit is set), or it has a set-user-ID or set-group-ID bit (decision 0058
+    /// rule 19, R03bca).
+    ToolRootUnprotected,
     /// The provider's cgroup is not delegated to the provider's own account.
     UndelegatedCgroup,
     /// A required controller is not available to the provider's cgroup.
@@ -202,6 +208,9 @@ impl fmt::Display for AdmissionRefusal {
             Self::MissingFixture => "the tool root's fixture is missing",
             Self::MissingToolManifest => "the tool root has no readable manifest",
             Self::ToolRootMismatch => "the tool root does not match its manifest",
+            Self::ToolRootUnprotected => {
+                "the tool root could be changed by someone other than root"
+            }
             Self::UndelegatedCgroup => "the provider's cgroup is not delegated to it",
             Self::MissingController(Controller::Memory) => "the memory controller is not delegated",
             Self::MissingController(Controller::Pids) => "the pids controller is not delegated",

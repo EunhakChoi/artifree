@@ -283,6 +283,16 @@ fn job_missing_manifest_is_refused() {
     assert_refused_with(artifree_providers::execution::AdmissionRefusal::MissingToolManifest);
 }
 
+/// Decision 0058 rule 19 (R03bca): the job gives one licence to another owner, makes the root's
+/// `etc` group-writable, sets the payload's set-user-ID bit, or makes the root's parent writable
+/// by others. Each run of this test sees one of those changes, and each is refused by name.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "runs only in the Linux enforcement job (decision 0056 rule 12)"]
+fn job_unprotected_tool_root_is_refused() {
+    assert_refused_with(artifree_providers::execution::AdmissionRefusal::ToolRootUnprotected);
+}
+
 /// Rule 9, part 3: the prepared host passes every implemented facility and then refuses.
 #[cfg(target_os = "linux")]
 #[test]

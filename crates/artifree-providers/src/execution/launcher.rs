@@ -14,8 +14,11 @@ use std::time::{Duration, Instant};
 use super::AdmissionRefusal;
 use super::profile::ExecutionProfile;
 
-/// One directory per version, operator-installed and not writable by the provider (0056 rule 6). Must equal `ROOT` in `scripts/enforcement/*.sh`.
-pub(super) const TOOL_ROOT: &str = "/opt/artifree/tools/v1";
+/// One directory per version, operator-installed and not writable by the provider (0056 rule 6).
+/// The version is the server's package version (decision 0058 rule 19 and its R03bc note), so a
+/// release names a new root. Must equal the root that `scripts/tools/package-root.sh` derives
+/// from the server binary's `--version`.
+pub(super) const TOOL_ROOT: &str = concat!("/opt/artifree/tools/", env!("CARGO_PKG_VERSION"));
 /// The launcher inside the tool root: a copy of bubblewrap at a fixed path.
 pub(super) const LAUNCHER: &str = "bin/bwrap";
 /// The exit status that the launcher reports for a child that `SIGSYS` (31) ended: it reports a

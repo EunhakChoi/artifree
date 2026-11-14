@@ -3,9 +3,10 @@
 # Privileged steps go only through prepare.sh and systemd-run.
 set -euo pipefail
 
-# The tool root's fixed path. It must equal ROOT in prepare.sh and the provider's
-# TOOL_ROOT (decision 0056 rule 6).
-readonly ROOT=/opt/artifree/tools/v1
+# VERSION and ROOT, the tool root of the workspace's package version (decision 0058 rule 19),
+# derived as prepare.sh derives them.
+# shellcheck source=version.sh
+source "$(dirname -- "$0")/version.sh"
 readonly OUT=target/enforcement
 readonly FIXTURE=target/debug/examples/artifree-execution-fixture
 readonly PAYLOAD=target/debug/examples/artifree-execution-payload
@@ -99,7 +100,7 @@ run_in_scenario() {
   sudo "$PREPARE" scenario "$scenario"
   run_unit "$binary" "$label" "execution::attempt::$module::$name" -p Delegate=yes "$@"
   # pgrep exits 1 when nothing matches; any other status is a failure of the check itself.
-  left="$(pgrep -a -f 'artifree-execution-payload|/tools/probes/|/tools/v1/probes/')" || status=$?
+  left="$(pgrep -a -f 'artifree-execution-payload|/tools/probes/|/artifree/tools/[^/]+/probes/')" || status=$?
   case "$status" in
     0)
       printf '%s\n' "$left" >&2
@@ -125,7 +126,7 @@ run_server_job() {
   sudo "$PREPARE" scenario "$scenario"
   run_unit "$server_test" "$label" "$name" -p Delegate=yes "$@"
   # pgrep exits 1 when nothing matches; any other status is a failure of the check itself.
-  left="$(pgrep -a -f 'artifree-execution-payload|/tools/probes/|/tools/v1/probes/|artifree-server execution')" || status=$?
+  left="$(pgrep -a -f 'artifree-execution-payload|/tools/probes/|/artifree/tools/[^/]+/probes/|artifree-server execution')" || status=$?
   case "$status" in
     0)
       printf '%s\n' "$left" >&2
@@ -153,7 +154,7 @@ death_at() {
   local markers="$OUT/death-$phase-$guardian"
   local log="$OUT/death-$phase-$guardian.log"
   local group="/sys/fs/cgroup/system.slice/$unit.service"
-  local pattern='artifree-execution-payload|/tools/probes/|/tools/v1/probes/|artifree-execution-fixture guardian'
+  local pattern='artifree-execution-payload|/tools/probes/|/artifree/tools/[^/]+/probes/|artifree-execution-fixture guardian'
   local unit_pid main tries status=0 populated left
   local -a groups=()
   local -a hold_option=()
@@ -282,6 +283,9 @@ restore_host() {
     sudo "$PREPARE" fixture-back 2> /dev/null || true
     sudo "$PREPARE" nomem-slice-off 2> /dev/null || true
     sudo "$PREPARE" tool-restore 2> /dev/null || true
+    for change in tool-owner tool-writable tool-setid ancestor-open; do
+      sudo "$PREPARE" "$change-off" 2> /dev/null || true
+    done
     sudo "$PREPARE" tool-extra-off 2> /dev/null || true
     sudo "$PREPARE" tool-missing-off 2> /dev/null || true
     sudo "$PREPARE" manifest-back 2> /dev/null || true
@@ -355,6 +359,16 @@ server_bin=$server_bin_binaries
 
 say "part 1: install the pinned launcher and assemble the tool root"
 sudo "$PREPARE" install "$FIXTURE" "$PAYLOAD" "$server_bin"
+# The script never writes over a root (0058 rule 19): a second install fails and leaves the root
+# as it was.
+manifest_before="$(sha256sum -- "$ROOT/MANIFEST")"
+if sudo "$PREPARE" install "$FIXTURE" "$PAYLOAD" "$server_bin" 2> "$OUT/install-again.stderr"; then
+  fail "a second install wrote over the existing root"
+fi
+grep -Fq "refusing to write over the existing root $ROOT" "$OUT/install-again.stderr" \
+  || fail "the second install failed for another reason; see $OUT/install-again.stderr"
+[[ "$(sha256sum -- "$ROOT/MANIFEST")" == "$manifest_before" ]] \
+  || fail "the refused install changed the root's manifest"
 {
   printf 'bubblewrap package: %s\n' "$(dpkg-query -W -f "\${Version}" bubblewrap)"
   printf 'launcher version: %s\n' "$("$ROOT/bin/bwrap" --version)"
@@ -438,6 +452,13 @@ sudo "$PREPARE" tool-missing-off
 sudo "$PREPARE" manifest-away
 run_unit "$test_binary" missing-manifest job_missing_manifest_is_refused -p Delegate=yes
 sudo "$PREPARE" manifest-back
+
+# The root, its entries and its ancestors must be root's alone (0058 rule 19, R03bca).
+for change in tool-owner tool-writable tool-setid ancestor-open; do
+  sudo "$PREPARE" "$change-on"
+  run_unit "$test_binary" "unprotected-$change" job_unprotected_tool_root_is_refused -p Delegate=yes
+  sudo "$PREPARE" "$change-off"
+done
 
 say "part 6: resources and cleanup under the launch"
 run_scenario "$lib_binary" threads resource-threads job_thread_bomb_stops_at_the_task_limit

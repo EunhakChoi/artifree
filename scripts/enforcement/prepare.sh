@@ -8,15 +8,16 @@
 # Usage: prepare.sh VERB [ARGUMENT]. Only run.sh calls it.
 set -euo pipefail
 
-# The tool root's fixed path (decision 0056 rule 6). It must equal ROOT in run.sh and
-# the provider's TOOL_ROOT.
-readonly ROOT=/opt/artifree/tools/v1
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+# VERSION, ROOT and the operator's packaging functions (decision 0058 rule 19): the job builds
+# its root with the same functions, then adds its test programs. run.sh sources the same file.
+# shellcheck source=version.sh
+source "$SCRIPT_DIR/version.sh"
 readonly SAVED_DIR=/run/artifree-enforcement
 readonly SAVED_ROUTING="$SAVED_DIR/core_pattern"
 readonly CORE_PATTERN=/proc/sys/kernel/core_pattern
-readonly PROFILE=/etc/apparmor.d/artifree-enforcement-launcher
 readonly SLICE=/run/systemd/system/artifree-enforcement-nomem.slice
-readonly BUBBLEWRAP_VERSION=0.9.0-1ubuntu0.3
 # The counters are root-owned and outside /tmp, which only root can write (decision 0056,
 # amendment of 2026-11-13, crashes).
 readonly COUNTERS_DIR=/var/lib/artifree-enforcement
@@ -34,7 +35,7 @@ readonly DECOY_PID="$SAVED_DIR/decoy.pid"
 usage() {
   cat >&2 <<'EOF'
 usage: prepare.sh VERB [ARGUMENT]
-  install FIXTURE PAYLOAD SERVER  install the pinned bubblewrap and assemble the tool root
+  install FIXTURE PAYLOAD SERVER  assemble the tool root with the packaging script, refusing an existing one
   save-routing        save kernel.core_pattern once, before the job changes it
   routing-file        set kernel.core_pattern to the plain file name core
   routing-pipe        restore the saved kernel.core_pattern
@@ -57,6 +58,14 @@ usage: prepare.sh VERB [ARGUMENT]
   tool-restore        restore the original payload
   tool-extra-on       add a file that the manifest does not list
   tool-extra-off      remove that file
+  tool-owner-on       give the bubblewrap licence to nobody
+  tool-owner-off      give it back to root
+  tool-writable-on    make the tool root's etc directory group-writable
+  tool-writable-off   make it writable by root only again
+  tool-setid-on       set the set-user-ID bit of the payload
+  tool-setid-off      clear it
+  ancestor-open-on    make the tools directory, the root's parent, writable by others
+  ancestor-open-off   make it writable by root only again
   tool-missing-on     move the bubblewrap licence out of the tool root
   tool-missing-off    move that licence back
   manifest-away       move MANIFEST out of the tool root
@@ -105,13 +114,12 @@ write_host_address() {
   write_root_text 0644 "$ROOT/etc/host-address" "$address"
 }
 
-# Assembles the tool root: the bubblewrap launcher, the fixture, the payload and the server
-# binary, the shared libraries each of them needs, the licence of each Debian package that owns a
-# copied file, the scenario file that starts as `exit`, the runner's IPv4 address in
-# etc/host-address, and the manifest last (decision 0056 rule 6). The sandbox binds the tool
-# root's lib and lib64 as /lib and /lib64 and nothing else, so a library that ldd reports under
-# /usr/lib (usrmerged hosts such as ubuntu-24.04) is copied to the path it has inside the
-# sandbox. The fixture's write-probes mode writes the probe programs under probes/ before the manifest, which covers
+# Assembles the tool root with the packaging script's functions (decision 0058 rule 19): the
+# bubblewrap launcher and the server binary as the script installs them, then the job's fixture
+# and payload, the shared libraries each of them needs, the licence of each Debian package that
+# owns a copied file, the scenario file that starts as `exit`, the runner's IPv4 address in
+# etc/host-address, and the manifest last (decision 0056 rule 6). Like the script, it refuses a
+# root that exists. The fixture's write-probes mode writes the probe programs under probes/ before the manifest, which covers
 # them like every other file: "The fixture's tool root also holds its generated probe programs,
 # under the same manifest" (decision 0056 rule 6, as amended 2026-11-13).
 # The server binary serves the worker's stub, bootstrap and guardian entry points (decision 0057
@@ -119,24 +127,22 @@ write_host_address() {
 # The fixture stays for admission's namespace check and probe child, the probe programs and the
 # counters.
 install_tool_root() {
-  local fixture=$1 payload=$2 server=$3
+  local fixture=$1 payload=$2 server=$3 named
   [[ -f "$fixture" && -x "$fixture" ]] || fail "the fixture is not an executable file: $fixture"
   [[ -f "$payload" && -x "$payload" ]] || fail "the payload is not an executable file: $payload"
-  [[ -f "$server" && -x "$server" ]] || fail "the server binary is not an executable file: $server"
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update
-  apt-get install -y --no-install-recommends "bubblewrap=$BUBBLEWRAP_VERSION"
-  rm -rf -- "$ROOT"
-  install -d -o root -g root -m 0755 "$ROOT/bin" "$ROOT/lib" "$ROOT/lib64" "$ROOT/licenses" "$ROOT/etc"
-  # A copy, not a link: the AppArmor profile names the launcher by this path.
-  install -o root -g root -m 0755 /usr/bin/bwrap "$ROOT/bin/bwrap"
-  install_licence /usr/bin/bwrap
+  named="$(server_version "$server")"
+  [[ "$named" == "$VERSION" ]] || fail "the server names version $named, the workspace $VERSION"
+  # The hosted runner's /opt is mode 0777, which the provider refuses as an ancestor of the root
+  # (decision 0058 rule 19). The runner is discarded after the job, so the job tightens it as an
+  # operator of a supported host would; the packaging script itself only refuses such a host.
+  chmod 0755 /opt
+  begin_root
+  install_launcher
   install -o root -g root -m 0755 "$fixture" "$ROOT/bin/artifree-execution-fixture"
   copy_libraries "$fixture"
   install -o root -g root -m 0755 "$payload" "$ROOT/bin/artifree-execution-payload"
   copy_libraries "$payload"
-  install -s -o root -g root -m 0755 "$server" "$ROOT/bin/artifree-server"
-  copy_libraries "$server"
+  install_server "$server"
   write_root_text 0644 "$ROOT/etc/scenario" exit
   write_host_address
   "$ROOT/bin/artifree-execution-fixture" write-probes "$ROOT/probes"
@@ -145,92 +151,9 @@ install_tool_root() {
   write_manifest
 }
 
-# Copies the shared libraries BINARY needs to the paths the sandbox gives them, and installs
-# the licence of the Debian package that owns each copied library.
-copy_libraries() {
-  local binary=$1 ldd_output lib dest
-  ldd_output="$(ldd "$binary")"
-  case "$ldd_output" in
-    *"not found"*) fail "$binary has a library that does not resolve" ;;
-  esac
-  while IFS= read -r lib; do
-    case "$lib" in
-      /lib/* | /lib64/*) dest="$ROOT$lib" ;;
-      /usr/lib/*) dest="$ROOT/lib/${lib#/usr/lib/}" ;;
-      /usr/lib64/*) dest="$ROOT/lib64/${lib#/usr/lib64/}" ;;
-      *) fail "$binary needs a library outside /lib, /lib64, /usr/lib and /usr/lib64: $lib" ;;
-    esac
-    install -D -o root -g root -m 0755 "$(readlink -f -- "$lib")" "$dest"
-    install_licence "$lib"
-  done < <(printf '%s\n' "$ldd_output" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^\//) { print $i; break } }')
-}
-
-# The /lib <-> /usr/lib alias of PATH, or nothing for other paths. A usrmerged host lists a
-# package's files under /usr/lib while ldd reports the same file under /lib.
-usr_lib_alias() {
-  case "$1" in
-    /usr/lib/*) printf '/lib/%s\n' "${1#/usr/lib/}" ;;
-    /lib/*) printf '/usr/lib/%s\n' "${1#/lib/}" ;;
-  esac
-}
-
-# Installs the copyright file of the Debian package that owns LIB as
-# $ROOT/licenses/<package>.copyright. dpkg-query is asked, in order, for the path ldd
-# reports, its resolved target, and each of those with the /lib and /usr/lib alias swapped;
-# the first answer names the package. Fails when no candidate is known to dpkg.
-install_licence() {
-  local lib=$1 real candidate owners line package copyright
-  real="$(readlink -f -- "$lib")"
-  owners=""
-  for candidate in "$lib" "$real" "$(usr_lib_alias "$lib")" "$(usr_lib_alias "$real")"; do
-    [[ -n "$candidate" ]] || continue
-    # A diverted path answers with diversion lines only, and those name no owner.
-    if owners="$(dpkg-query -S -- "$candidate" 2>/dev/null | grep -v '^diversion by ')"; then
-      break
-    fi
-  done
-  [[ -n "$owners" ]] || fail "no Debian package owns $lib"
-  line="${owners%%$'\n'*}"
-  package="${line%%:*}"
-  [[ "$package" =~ ^[a-z0-9][a-z0-9.+-]+$ ]] || fail "dpkg-query named no package for $lib: $line"
-  copyright="/usr/share/doc/$package/copyright"
-  [[ -f "$copyright" ]] || fail "the copyright file of $package is missing: $copyright"
-  install -o root -g root -m 0644 "$copyright" "$ROOT/licenses/$package.copyright"
-}
-
 # The directory of saved copies and of the saved routing value. Only root may read it.
 ensure_saved_dir() {
   install -d -o root -g root -m 0700 "$SAVED_DIR"
-}
-
-# Replaces PATH with a root-owned text file of MODE that holds TEXT and a newline.
-write_root_text() {
-  local mode=$1 path=$2 text=$3
-  install -o root -g root -m "$mode" /dev/null "$path"
-  printf '%s\n' "$text" > "$path"
-}
-
-# Writes MANIFEST in the format of decision 0056 rule 6: one line per regular file under the
-# tool root, `<sha256> <length> <relative path>`, sorted by bytes, and no line for the
-# manifest itself. An entry that is neither a directory nor a regular file would make the
-# provider refuse the root, so it fails here instead of writing a manifest for it.
-write_manifest() {
-  local manifest path digest length
-  ensure_saved_dir
-  manifest="$(mktemp -- "$SAVED_DIR/manifest.XXXXXX")"
-  (
-    cd -- "$ROOT" || fail "cannot enter $ROOT"
-    [[ -z "$(find . ! -type d ! -type f -print -quit)" ]] \
-      || fail "the tool root has an entry that is neither a directory nor a regular file"
-    find . -type f ! -path ./MANIFEST -printf '%P\n' | LC_ALL=C sort |
-      while IFS= read -r path; do
-        digest="$(sha256sum -- "$path")"
-        length="$(stat -c %s -- "$path")"
-        printf '%s %s %s\n' "${digest%% *}" "$length" "$path"
-      done > "$manifest"
-  )
-  install -o root -g root -m 0644 "$manifest" "$ROOT/MANIFEST"
-  rm -- "$manifest"
 }
 
 save_routing() {
@@ -330,19 +253,11 @@ counters_show() {
 }
 
 profile_on() {
-  cat > "$PROFILE" <<EOF
-abi <abi/4.0>,
-include <tunables/global>
-profile artifree-enforcement-launcher $ROOT/bin/bwrap flags=(unconfined) {
-  userns,
-}
-EOF
-  apparmor_parser -r "$PROFILE"
+  load_launcher_profile "$VERSION"
 }
 
 profile_off() {
-  apparmor_parser -R "$PROFILE"
-  rm -- "$PROFILE"
+  unload_launcher_profile "$VERSION"
 }
 
 # Moves a tool root file aside for one rule 10 removal, and back. Never overwrites.
@@ -618,6 +533,8 @@ main() {
       launcher-away | launcher-back | fixture-away | fixture-back | \
       nomem-slice-on | nomem-slice-off | tool-modify | tool-restore | \
       tool-extra-on | tool-extra-off | tool-missing-on | tool-missing-off | \
+      tool-owner-on | tool-owner-off | tool-writable-on | tool-writable-off | \
+      tool-setid-on | tool-setid-off | ancestor-open-on | ancestor-open-off | \
       manifest-away | manifest-back | payload-break | payload-restore | \
       kernel-log | kernel-log-access) (( $# == 1 )) || usage ;;
     counters-install | listener-start | listener-stop | routing-counter-pipe | \
@@ -652,6 +569,14 @@ main() {
     tool-restore) tool_restore ;;
     tool-extra-on) tool_extra_on ;;
     tool-extra-off) tool_extra_off ;;
+    tool-owner-on) chown nobody -- "$ROOT/licenses/bubblewrap.copyright" ;;
+    tool-owner-off) chown root -- "$ROOT/licenses/bubblewrap.copyright" ;;
+    tool-writable-on) chmod g+w -- "$ROOT/etc" ;;
+    tool-writable-off) chmod g-w -- "$ROOT/etc" ;;
+    tool-setid-on) chmod u+s -- "$ROOT/bin/artifree-execution-payload" ;;
+    tool-setid-off) chmod u-s -- "$ROOT/bin/artifree-execution-payload" ;;
+    ancestor-open-on) chmod o+w -- "$TOOLS_DIR" ;;
+    ancestor-open-off) chmod o-w -- "$TOOLS_DIR" ;;
     tool-missing-on) tool_missing_on ;;
     tool-missing-off) tool_missing_off ;;
     manifest-away) move_to_saved "$ROOT/MANIFEST" "$SAVED_DIR/MANIFEST" ;;

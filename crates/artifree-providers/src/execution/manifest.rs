@@ -5,8 +5,14 @@
 //! strictly sorted by path bytes. Verification compares the root's regular files with the
 //! listed paths in both directions, then checks each file's length and digest. A link, a
 //! special file or an unlisted file is a mismatch; the manifest itself is never listed.
+//!
+//! Before that, the root, each of its entries and each of its ancestors must be protected from
+//! change by anyone but root (decision 0058 rule 19, R03bca): owned by the tool owner, with no
+//! group or other write bit and no set-ID bit. An ancestor may also be owned by root, and may be
+//! world-writable when its sticky bit is set, as `/tmp` is.
 
-use std::fs;
+use std::fs::{self, Metadata};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use super::AdmissionRefusal;
@@ -40,18 +46,86 @@ impl ManifestIdentity {
     }
 }
 
+/// The group and other write bits.
+const SHARED_WRITE: u32 = 0o022;
+/// The set-user-ID and set-group-ID bits.
+const SET_ID: u32 = 0o6000;
+/// The sticky bit, which keeps others from renaming or removing what they do not own.
+const STICKY: u32 = 0o1000;
+
+/// Whether an entry of the root with this owner and mode is protected: owned by `owner`, with
+/// no group or other write bit and no set-ID bit.
+fn entry_protected(uid: u32, mode: u32, owner: u32) -> bool {
+    uid == owner && mode & (SHARED_WRITE | SET_ID) == 0
+}
+
+/// Whether an ancestor directory with this owner and mode is protected: owned by root or by
+/// `owner`, with no set-ID bit, and with no group or other write bit unless its sticky bit is set.
+fn ancestor_protected(uid: u32, mode: u32, owner: u32) -> bool {
+    (uid == 0 || uid == owner)
+        && mode & SET_ID == 0
+        && (mode & SHARED_WRITE == 0 || mode & STICKY != 0)
+}
+
+/// Checks that an entry's metadata is protected.
+fn check_entry(metadata: &Metadata, owner: u32) -> Result<(), AdmissionRefusal> {
+    if entry_protected(metadata.uid(), metadata.mode(), owner) {
+        Ok(())
+    } else {
+        Err(AdmissionRefusal::ToolRootUnprotected)
+    }
+}
+
+/// The ancestors of `root` from its parent up to and including `top`, or `None` when `top` is no
+/// ancestor of `root`. A mistaken `top` is refused before anything is read, so it never skips the
+/// check and never lets the check depend on the host's directories.
+fn ancestors_to<'a>(root: &'a Path, top: &Path) -> Option<Vec<&'a Path>> {
+    let mut chain = Vec::new();
+    for ancestor in root.ancestors().skip(1) {
+        chain.push(ancestor);
+        if ancestor == top {
+            return Some(chain);
+        }
+    }
+    None
+}
+
+/// Checks every ancestor of `root` up to and including `top`: each must be a directory, not a
+/// link, and protected. `top` is `/` in production; one that is no ancestor of `root` is refused.
+fn check_ancestors(root: &Path, owner: u32, top: &Path) -> Result<(), AdmissionRefusal> {
+    let chain = ancestors_to(root, top).ok_or(AdmissionRefusal::ToolRootUnprotected)?;
+    for ancestor in chain {
+        let metadata =
+            fs::symlink_metadata(ancestor).map_err(|_| AdmissionRefusal::ToolRootUnprotected)?;
+        if !metadata.file_type().is_dir()
+            || !ancestor_protected(metadata.uid(), metadata.mode(), owner)
+        {
+            return Err(AdmissionRefusal::ToolRootUnprotected);
+        }
+    }
+    Ok(())
+}
+
 /// Verifies the tool root at `root` against its manifest and returns the manifest's identity.
+/// `owner` is the account that must own the root and its entries: root (0) in production. The
+/// ancestors are checked up to and including `top`, which is `/` in production.
 ///
 /// # Errors
 ///
-/// Returns `MissingToolManifest` when the manifest is not a readable regular file, is too
-/// large, is not UTF-8 or is malformed. Returns `ToolRootMismatch` when the root's files differ
-/// from the manifest in any way.
-pub(super) fn verify(root: &Path) -> Result<ManifestIdentity, AdmissionRefusal> {
+/// Returns `ToolRootUnprotected` when an ancestor, the root or an entry could be changed by
+/// someone other than `owner` or root. Returns `MissingToolManifest` when the manifest is not a
+/// readable regular file, is too large, is not UTF-8 or is malformed. Returns
+/// `ToolRootMismatch` when the root's files differ from the manifest in any way.
+pub(super) fn verify(
+    root: &Path,
+    owner: u32,
+    top: &Path,
+) -> Result<ManifestIdentity, AdmissionRefusal> {
+    check_ancestors(root, owner, top)?;
     let bytes = read_manifest(&root.join(MANIFEST_FILE))?;
     let text = std::str::from_utf8(&bytes).map_err(|_| AdmissionRefusal::MissingToolManifest)?;
     let entries = parse(text)?;
-    let files = walk(root)?;
+    let files = walk(root, owner)?;
     if !files
         .iter()
         .map(String::as_str)
@@ -193,13 +267,15 @@ struct Directory {
 /// # Errors
 ///
 /// Returns `ToolRootMismatch` when the root is not a directory, an entry is neither a directory
-/// nor a regular file, a name is not UTF-8, or the entry or depth bound is exceeded.
-fn walk(root: &Path) -> Result<Vec<String>, AdmissionRefusal> {
+/// nor a regular file, a name is not UTF-8, or the entry or depth bound is exceeded. Returns
+/// `ToolRootUnprotected` when the root or an entry, the manifest included, is not protected.
+fn walk(root: &Path, owner: u32) -> Result<Vec<String>, AdmissionRefusal> {
     let root_metadata =
         fs::symlink_metadata(root).map_err(|_| AdmissionRefusal::ToolRootMismatch)?;
     if !root_metadata.file_type().is_dir() {
         return Err(AdmissionRefusal::ToolRootMismatch);
     }
+    check_entry(&root_metadata, owner)?;
     let mut pending = vec![Directory {
         path: root.to_path_buf(),
         relative: String::new(),
@@ -227,9 +303,13 @@ fn walk(root: &Path) -> Result<Vec<String>, AdmissionRefusal> {
                 format!("{}/{name}", directory.relative)
             };
             let path = entry.path();
-            let file_type = fs::symlink_metadata(&path)
-                .map_err(|_| AdmissionRefusal::ToolRootMismatch)?
-                .file_type();
+            let metadata =
+                fs::symlink_metadata(&path).map_err(|_| AdmissionRefusal::ToolRootMismatch)?;
+            let file_type = metadata.file_type();
+            // A link or a special file is refused below; its own mode means nothing.
+            if file_type.is_dir() || file_type.is_file() {
+                check_entry(&metadata, owner)?;
+            }
             if file_type.is_dir() {
                 pending.push(Directory {
                     path,

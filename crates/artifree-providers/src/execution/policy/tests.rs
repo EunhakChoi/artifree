@@ -71,9 +71,9 @@ const MEASURED_LIMITS: &[&str] = &[
 /// by the amendment of 2026-11-13, input and output), which the mount check requires too.
 const MEASURED_MOUNTINFO: &[&str] = &[
     "1290 1201 0:110 / / ro,nosuid,nodev,relatime - tmpfs tmpfs rw,uid=1001,gid=1001,inode64",
-    "1291 1290 8:1 /opt/artifree/tools/v1 /tools ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
-    "1292 1290 8:1 /opt/artifree/tools/v1/lib /lib ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
-    "1293 1290 8:1 /opt/artifree/tools/v1/lib64 /lib64 ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
+    "1291 1290 8:1 /opt/artifree/tools/0.1.0 /tools ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
+    "1292 1290 8:1 /opt/artifree/tools/0.1.0/lib /lib ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
+    "1293 1290 8:1 /opt/artifree/tools/0.1.0/lib64 /lib64 ro,nosuid,nodev,relatime - ext4 /dev/root rw,discard",
     "1294 1290 0:111 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw",
     "1295 1290 0:112 / /dev ro,nosuid,nodev,relatime - tmpfs tmpfs rw,mode=755,uid=1001,gid=1001,inode64",
     "1296 1295 0:113 / /dev/pts rw,nosuid,noexec,relatime - devpts devpts rw,mode=620,ptmxmode=666",
