@@ -312,10 +312,17 @@ are implemented, R03cc to R03f are not**. Roadmap: R03.
 >
 > - The composition of rules 7 and 8 is a pure function of the core. The
 >   bundle must be `app.js` and at most `app.css`. The revision's
->   `index.html` must be UTF-8 and hold the element of rule 7 exactly once.
->   "Refers to a path under `src/`" is read as any `src/` in any ASCII case,
->   which also refuses text that only names the directory; the template has
->   none. Only `index.html` is checked, as rule 7 says. A path the bundle and
+>   `index.html` must be UTF-8 and hold the element of rule 7 exactly once, as
+>   markup a browser runs: not inside another tag, a comment, or a raw text,
+>   inert or foreign element that is still open there (such as `<template>`,
+>   `<noscript>`, `<textarea>` or `<svg>`); a document that leaves this open
+>   is refused.
+>   "Refers to a path under `src/`" is read as a `src/`, in any ASCII case,
+>   that starts a path: at the start of the text or after a quote, `=`,
+>   space or parenthesis, past any `./`, `../` or `/`. `assets/src/` and a
+>   URL's `/src/` are other directories. "Outside `src/`" folds case too, so
+>   no case of the directory is published. Only `index.html` is checked, as
+>   rule 7 says. A path the bundle and
 >   the revision both hold, or two that differ only by case, ends the job as
 >   `output_rejected`, as does a result that breaks another package rule.
 > - A build profile's output is collected under the package rules without
@@ -326,10 +333,13 @@ are implemented, R03cc to R03f are not**. Roadmap: R03.
 > - The split of rule 13 reads each error header, `✘ [ERROR] <text>` (or
 >   `X [ERROR]`), and takes the first non-empty line after it as the
 >   location when it reads `<path>:<line>:<column>:` and the path lies under
->   the input mount, printed absolute or relative to a directory at or
->   beside the root. Any other location is dropped and the message kept, as
->   are warnings, notes, the quoted excerpt and the closing count. Paths
->   under the mount in a message are rewritten as rule 13 says; a control
+>   the input mount: `/input/`, or `input/` after one or more `../`, since
+>   the bundler prints paths relative to its working directory, `/tmp`. A
+>   bare `input/` lies under `/tmp` and is no location. Any other location
+>   is dropped and the message kept, as are warnings, notes, the quoted
+>   excerpt and the closing count. A mount that starts a path in a message
+>   is rewritten as rule 13 says, and a specifier such as
+>   `./components/input/field` is kept as written; a control
 >   character becomes a space and the text is cut at a character boundary
 >   within 512 bytes. A non-zero exit with no message that can be read keeps
 >   one fixed diagnostic instead, so a failed build always says something.

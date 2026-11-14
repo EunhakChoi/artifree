@@ -47,12 +47,45 @@ fn a_build_is_the_bundle_with_the_files_outside_src() -> TestResult {
     assert_eq!(built.file(&PackagePath::entry()), Some(PAGE.as_bytes()));
     let script_only = compose(bundle(&[("app.js", "js")])?, &source(PAGE, &[])?)?;
     assert_eq!(paths(&script_only), ["app.js", "index.html"]);
+    // Source under `src/` in any case is never published.
+    let any_case = compose(
+        bundle(&[("app.js", "js")])?,
+        &source(
+            PAGE,
+            &[("Src/secret.tsx", "x"), ("assets/src/logo.png", "png")],
+        )?,
+    )?;
+    assert_eq!(
+        paths(&any_case),
+        ["app.js", "assets/src/logo.png", "index.html"]
+    );
+    // Another directory named `src` is no reference into the source.
+    let others = format!(
+        "{PAGE}<img src=\"./assets/src/logo.png\"><link href=\"https://cdn.example/x@1/src/a.css\">"
+    );
+    assert_eq!(
+        paths(&compose(
+            bundle(&[("app.js", "js")])?,
+            &source(&others, &[])?
+        )?),
+        ["app.js", "index.html"]
+    );
     Ok(())
 }
 
 #[test]
 fn each_broken_rule_rejects_the_composition() -> TestResult {
-    let cases: [(FileSet, FilePackage, Rejection); 8] = [
+    let cases: [(FileSet, FilePackage, Rejection); 10] = [
+        (
+            bundle(&[("app.js", "js")])?,
+            source(&format!("{PAGE}<img src=src/logo.svg>"), &[])?,
+            Rejection::EntryRefersToSource,
+        ),
+        (
+            bundle(&[("app.js", "js")])?,
+            source(&format!("{PAGE}<a href='../src/main.tsx'>"), &[])?,
+            Rejection::EntryRefersToSource,
+        ),
         (
             bundle(&[("app.js", "js"), ("chunk.js", "js")])?,
             source(PAGE, &[])?,
@@ -99,6 +132,28 @@ fn each_broken_rule_rejects_the_composition() -> TestResult {
     for (built, revision, rejection) in cases {
         assert_eq!(compose(built, &revision), Err(rejection));
     }
+    // The element must be markup the browser runs.
+    let element = "<script type=\"module\" src=\"./app.js\"></script>";
+    for inert in [
+        format!("<!doctype html><!-- {element} -->"),
+        // A `>` inside the comment ends no comment.
+        format!("<!doctype html><!-- a > b {element} -->"),
+        format!("<!doctype html><template>{element}</template>"),
+        format!("<!doctype html><noscript>{element}</noscript>"),
+        format!("<!doctype html><textarea>{element}</textarea>"),
+        format!("<!doctype html><div title='{element}'></div>"),
+        format!("<!doctype html><script>let a = '{element}"),
+        format!("<!doctype html><svg>{element}</svg>"),
+    ] {
+        assert_eq!(
+            compose(bundle(&[("app.js", "js")])?, &source(&inert, &[])?),
+            Err(Rejection::EntryLoadsNoBundle),
+            "{inert}"
+        );
+    }
+    let closed =
+        format!("<!doctype html><title>T</title><!-- a note --><script>run()</script>{element}");
+    assert!(compose(bundle(&[("app.js", "js")])?, &source(&closed, &[])?).is_ok());
     let not_text = FilePackage::new(vec![
         (PackagePath::entry(), vec![0xff, 0xfe]),
         ("src/main.tsx".parse()?, b"x".to_vec()),
@@ -113,7 +168,7 @@ fn each_broken_rule_rejects_the_composition() -> TestResult {
 /// Messages in the bundler's form: a header, a location, the quoted excerpt,
 /// a note and the closing count.
 const TWO_ERRORS: &str = "\u{2718} [ERROR] Could not resolve \"left-pad\"\n\
-\n    input/src/main.tsx:1:16:\n      1 \u{2502} import pad from \"left-pad\";\n        \u{2575}                 ~~~~~~~~~~\n\
+\n    ../input/src/main.tsx:1:16:\n      1 \u{2502} import pad from \"left-pad\";\n        \u{2575}                 ~~~~~~~~~~\n\
 \n  You can mark the path \"left-pad\" as external to exclude it from the bundle.\n\
 \n\u{2718} [ERROR] No matching export in \"/input/src/parts.ts\" for import \"Part\"\n\
 \n    ../input/src/app.tsx:3:9:\n      3 \u{2502} import { Part } from \"./parts\";\n        \u{2575}          ~~~~\n\
@@ -165,6 +220,23 @@ fn the_bundlers_errors_become_diagnostics_with_package_paths() -> TestResult {
 }
 
 #[test]
+fn only_a_mount_that_starts_a_path_is_rewritten() {
+    let found = diagnostics(
+        b"X [ERROR] Could not resolve \"./components/input/field\" from /input/src/a.ts\n\n    input/src/a.ts:1:1:\n",
+    );
+    assert_eq!(
+        found
+            .first()
+            .map(|diagnostic| (diagnostic.message.as_str(), diagnostic.location.is_none())),
+        Some((
+            "Could not resolve \"./components/input/field\" from src/a.ts",
+            true
+        )),
+        "a bare input/ lies under the working directory, not the mount"
+    );
+}
+
+#[test]
 fn a_message_without_a_location_in_the_revision_points_at_no_file() {
     let found = diagnostics(
         b"\xe2\x9c\x98 [ERROR] Cannot read the module\n\n    /tools/modules/react/index.js:1:1:\n",
@@ -188,7 +260,7 @@ fn diagnostics_are_bounded_and_cleaned() {
     let many = (0..30).fold(String::new(), |mut text, index| {
         let _ = write!(
             text,
-            "\u{2718} [ERROR] error {index}\n\n    input/src/main.tsx:{index}:1:\n\n"
+            "\u{2718} [ERROR] error {index}\n\n    ../input/src/main.tsx:{index}:1:\n\n"
         );
         text
     });

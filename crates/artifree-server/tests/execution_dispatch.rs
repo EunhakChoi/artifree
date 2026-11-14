@@ -358,7 +358,7 @@ enum Answer {
 /// The stderr that a failed launch of the fake port hands over: one error in
 /// the bundler's form, with its location, its quoted excerpt and its count.
 const FAILED_STDERR: &[u8] = b"\xe2\x9c\x98 [ERROR] Could not resolve \"left-pad\"\n\n    \
-input/src/main.tsx:1:16:\n      1 \xe2\x94\x82 import pad from \"left-pad\";\n\n1 error\n";
+../input/src/main.tsx:1:16:\n      1 \xe2\x94\x82 import pad from \"left-pad\";\n\n1 error\n";
 
 /// How a held launch ends.
 #[derive(Debug, Clone, Copy)]

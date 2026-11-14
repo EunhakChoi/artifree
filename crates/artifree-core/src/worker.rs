@@ -516,7 +516,7 @@ fn run_profile<S: ArtifactStore + JobStore>(
     };
     // A build is composed with the revision it was launched with, which the
     // launch takes (decision 0058 rule 8).
-    let source = claim.builds.map(|_| input.package.clone());
+    let build = claim.builds.map(|builds| (builds, input.package.clone()));
     // The record of the attempt names the database the claim was made in
     // (decision 0042 rule 6). Without it no record can be written, so the attempt
     // is settled and the job failed, as a failed input read is.
@@ -582,11 +582,9 @@ fn run_profile<S: ArtifactStore + JobStore>(
         Ok(_) => Err(LaunchFailure::Failed),
         Err(failure) => Err(failure),
     };
-    match (claim.builds, source) {
-        (Some(builds), Some(source)) => {
-            end_build(claim, builds, &attempt, result, &source, &stderr)
-        }
-        _ => end_profile(claim, &attempt, result),
+    match build {
+        Some((builds, source)) => end_build(claim, builds, &attempt, result, &source, &stderr),
+        None => end_profile(claim, &attempt, result),
     }
 }
 

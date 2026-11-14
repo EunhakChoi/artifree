@@ -89,7 +89,7 @@ pub fn compose(bundle: FileSet, source: &FilePackage) -> Result<FilePackage, Rej
     }
     let added: Vec<(&PackagePath, &[u8])> = source
         .files()
-        .filter(|(path, _)| !path.as_str().starts_with(SOURCE_DIRECTORY))
+        .filter(|(path, _)| !is_source(path))
         .collect();
     if added.iter().any(|(path, _)| bundle.file(path).is_some()) {
         return Err(Rejection::Collision);
@@ -104,20 +104,93 @@ pub fn compose(bundle: FileSet, source: &FilePackage) -> Result<FilePackage, Rej
     FilePackage::new(files).map_err(|_| Rejection::Package)
 }
 
-/// Checks the entry document against rule 7. A reference to `src/` is any
-/// occurrence of `src/` in any ASCII case: the template's document has none,
-/// and refusing prose that names the directory is the safe side.
+/// Whether `path` lies under the top-level `src/` directory, in any ASCII
+/// case, so that no case of the directory is ever published as source.
+fn is_source(path: &PackagePath) -> bool {
+    path.as_str()
+        .get(..SOURCE_DIRECTORY.len())
+        .is_some_and(|start| start.eq_ignore_ascii_case(SOURCE_DIRECTORY))
+}
+
+/// Checks the entry document against rule 7.
 fn check_entry(entry: Option<&[u8]>) -> Result<(), Rejection> {
     let text = entry
         .and_then(|bytes| std::str::from_utf8(bytes).ok())
         .ok_or(Rejection::EntryLoadsNoBundle)?;
-    if text.matches(SCRIPT_ELEMENT).count() != 1 {
+    if text.matches(SCRIPT_ELEMENT).count() != 1 || !loads_bundle(text) {
         return Err(Rejection::EntryLoadsNoBundle);
     }
-    if text.to_ascii_lowercase().contains(SOURCE_DIRECTORY) {
+    if refers_to_source(text) {
         return Err(Rejection::EntryRefersToSource);
     }
     Ok(())
+}
+
+/// The elements whose content a browser never runs as markup: raw text,
+/// escapable raw text, inert containers and foreign content.
+const INERT_ELEMENTS: [&str; 14] = [
+    "script",
+    "style",
+    "title",
+    "textarea",
+    "template",
+    "noscript",
+    "xmp",
+    "iframe",
+    "noembed",
+    "noframes",
+    "plaintext",
+    "object",
+    "svg",
+    "math",
+];
+
+/// Whether the one element of rule 7 in `text` is markup a browser runs: not
+/// inside another tag (such as an attribute value), a comment, or an element
+/// of [`INERT_ELEMENTS`] that is still open where it stands. A document that
+/// leaves the question open is refused, which is the safe side.
+fn loads_bundle(text: &str) -> bool {
+    let lowered = text.to_ascii_lowercase();
+    let Some(before) = text.find(SCRIPT_ELEMENT).and_then(|at| lowered.get(..at)) else {
+        return false;
+    };
+    let inside_tag = before.rfind('<') > before.rfind('>');
+    let open_after = |start: Option<usize>, close: &str| {
+        start.is_some_and(|start| {
+            before
+                .get(start..)
+                .is_some_and(|rest| !rest.contains(close))
+        })
+    };
+    let in_comment = open_after(before.rfind("<!--"), "-->");
+    let in_inert = INERT_ELEMENTS
+        .iter()
+        .any(|name| open_after(before.rfind(&format!("<{name}")), &format!("</{name}")));
+    !(inside_tag || in_comment || in_inert)
+}
+
+/// Whether `text` holds a reference into the top-level `src/` directory: a
+/// `src/`, in any ASCII case, that starts a path, after any `./`, `../` or `/`
+/// that follows a character that cannot be part of a path (a quote, `=`,
+/// space, a parenthesis) or the start of the text. `assets/src/` or a URL's
+/// `/src/` is another directory, and refers to none.
+fn refers_to_source(text: &str) -> bool {
+    let lowered = text.to_ascii_lowercase();
+    lowered.match_indices(SOURCE_DIRECTORY).any(|(index, _)| {
+        lowered.get(..index).is_some_and(|before| {
+            before
+                .trim_end_matches(['.', '/'])
+                .chars()
+                .next_back()
+                .is_none_or(|last| !is_path_character(last))
+        })
+    })
+}
+
+/// Whether `character` can be part of a path or a URL's host and path.
+fn is_path_character(character: char) -> bool {
+    character.is_alphanumeric()
+        || matches!(character, '.' | '_' | '-' | '/' | '@' | '~' | '%' | ':')
 }
 
 /// The fixed diagnostic of a build that the system call filter ended (decision
@@ -219,24 +292,45 @@ fn location_of(line: &str) -> Option<SourceLocation> {
     })
 }
 
-/// The package path of a path the bundler printed: absolute under the input
-/// mount, or relative to its working directory, which may lie beside or above
-/// the mount.
+/// The package path of a path the bundler printed under the input mount.
 fn package_path(printed: &str) -> Option<PackagePath> {
-    let mut rest = printed;
+    strip_mount(printed)?.parse().ok()
+}
+
+/// The rest of `text` after the input mount that starts it: `/input/`, or
+/// `input/` after one or more `../`, which is how the bundler prints the mount
+/// relative to its working directory, `/tmp`. A bare `input/` lies under that
+/// directory, not under the mount, and is no mount.
+fn strip_mount(text: &str) -> Option<&str> {
+    if let Some(rest) = text.strip_prefix(INPUT_MOUNT) {
+        return Some(rest);
+    }
+    let mut rest = text.strip_prefix("../")?;
     while let Some(stripped) = rest.strip_prefix("../") {
         rest = stripped;
     }
-    let rest = rest
-        .strip_prefix(INPUT_MOUNT)
-        .or_else(|| rest.strip_prefix(INPUT_RELATIVE))?;
-    rest.parse().ok()
+    rest.strip_prefix(INPUT_RELATIVE)
 }
 
-/// Rewrites every path under the input mount in a message to its package path
-/// (decision 0058 rule 13).
+/// Rewrites each path under the input mount in a message to its package path
+/// (decision 0058 rule 13): only a mount that starts a path, at the start of
+/// the text or after a character that cannot be part of a path, so that a
+/// specifier such as `./components/input/field` is kept as written.
 fn rewrite_mount(text: &str) -> String {
-    text.replace("../input/", "").replace(INPUT_MOUNT, "")
+    let mut rewritten = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut starts_path = true;
+    while let Some(character) = rest.chars().next() {
+        if starts_path && let Some(after) = strip_mount(rest) {
+            rest = after;
+            starts_path = false;
+            continue;
+        }
+        rewritten.push(character);
+        rest = rest.get(character.len_utf8()..).unwrap_or_default();
+        starts_path = !is_path_character(character);
+    }
+    rewritten
 }
 
 /// A message under rule 13: control characters become spaces, the text is

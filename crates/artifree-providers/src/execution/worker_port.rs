@@ -480,15 +480,16 @@ fn listing_of(entries: Vec<FileEntry>) -> InputListing {
 /// The outcome of a launch that was observed to its end. An admitted output carries its files and
 /// its binding (decision 0057 rule 17). Any other end is a failure with its fixed word.
 fn evidence_outcome(
-    evidence: &AttemptEvidence,
+    evidence: AttemptEvidence,
     run: &ProfileRun<'_>,
     tool_digest: &str,
 ) -> (Result<ProfileOutput, LaunchFailure>, &'static str) {
-    match &evidence.output {
+    let AttemptEvidence { output, exit, .. } = evidence;
+    match output {
         Ok(collected) => match collected.manifest.binding().run.clone() {
             Some(bound) => (
                 Ok(ProfileOutput {
-                    files: collected.files.clone(),
+                    files: collected.files,
                     profile: run.profile.clone(),
                     tool_digest: tool_digest.to_owned(),
                     bound,
@@ -498,7 +499,7 @@ fn evidence_outcome(
             None => (Err(LaunchFailure::Failed), "unbound"),
         },
         Err(OutputRefusal::NotCollected) => {
-            let (failure, word) = exit_failure(evidence.exit);
+            let (failure, word) = exit_failure(exit);
             (Err(failure), word)
         }
         Err(OutputRefusal::Refused(_)) => (Err(LaunchFailure::OutputRefused), "output-refused"),
@@ -523,15 +524,20 @@ fn exit_failure(exit: ExitStatus) -> (LaunchFailure, &'static str) {
 /// The typed outcome of one launch: the cleanup that `record_removed` reports, the output or the
 /// failure, and the fixed word for stderr.
 fn outcome(launched: Launched, run: &ProfileRun<'_>, tool_digest: &str) -> LaunchOutcome {
-    let (result, detail) = match &launched.result {
+    let Launched {
+        result,
+        record_removed,
+        stderr,
+    } = launched;
+    let (result, detail) = match result {
         Ok(evidence) => evidence_outcome(evidence, run, tool_digest),
         Err(refusal) => (Err(refusal_kind(refusal.failure)), word(refusal.failure)),
     };
     LaunchOutcome {
-        cleanup_observed: launched.record_removed,
+        cleanup_observed: record_removed,
         result,
         detail,
-        stderr: launched.stderr,
+        stderr,
     }
 }
 
