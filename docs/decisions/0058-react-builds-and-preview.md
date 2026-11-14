@@ -74,6 +74,33 @@ R03f are not**. Roadmap: R03.
 > and checks every entry during the manifest walk; a failure of either
 > refuses as `ToolRootUnprotected`.
 
+> **Note, 2026-11-14 (launcher libraries).** Rule 19 said the script
+> packages "the libraries they load", meaning the launcher's and the
+> bootstrap's. The R03bca note above repeats this ("their libraries"), but
+> the script copies only the bootstrap's. It fits only the bootstrap. The
+> launcher runs on the host, outside the sandbox, through the host's loader,
+> and that loader needs the C library of its own glibc build. Pointing the
+> launcher at copies in the root (a library path or an `$ORIGIN` run path)
+> would still use the host's loader with a pinned C library, so a host glibc
+> update could break the pair. Starting the launcher through a loader copied
+> into the root would also break it. The AppArmor profile would then have to
+> attach to that loader's path, and every program it loads would get user
+> namespaces. So the root holds the libraries of the programs that run
+> inside the sandbox. Today that is the bootstrap, and in the enforcement
+> job the fixture and the payload. The bundler's libraries come with R03bcb.
+> The fixture also runs on the host for the readiness probe, with the host's
+> libraries; its copies serve its runs inside the sandbox. The launcher's
+> loader and libraries are the host's, like the kernel. The supported host
+> (Ubuntu 24.04 with its security updates) keeps them current. The launcher
+> binary stays pinned in the root, and the script refuses a newer
+> Bubblewrap. Nothing at admission notices when one of those host libraries
+> changes; that drift is an accepted limit of the supported host, not a
+> checked property. 0042 rule 3 lists the loader and libraries "required by
+> that profile", which means the profile's runtime, so the rule is
+> unchanged; 0042 gets a note. A statically linked launcher, which would
+> bring its libraries into the root, would be a new decision. Rule 19 is
+> reworded to match.
+
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),
 > [0057](0057-connecting-execution-to-jobs.md) (the `run_profile` kind and
@@ -296,7 +323,8 @@ stands.
     version, download URL, SHA-256 and licence. The script assembles the
     whole root the provider admits, as `scripts/enforcement/prepare.sh` does
     for the fixture: the pinned launcher and its licence, the server binary
-    as the bootstrap, the libraries they load, the bundler, the packages,
+    as the bootstrap, the libraries that run inside the sandbox (the
+    launcher runs on the host and loads the host's), the bundler, the packages,
     the licences and the manifest, with the owner and modes the provider
     checks, and the AppArmor launcher profile the supported host needs for
     unprivileged user namespaces. The root's path carries a version that the

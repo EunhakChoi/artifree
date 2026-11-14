@@ -69,6 +69,14 @@ implemented; no untrusted execution outside the enforcement job's tests**. Roadm
 > recovery matrix. It changes no rule of this record; R02ba adds the notes
 > that rule 6 asks for to the storage rules it changes.
 
+> **Note, 2026-11-14 (launcher libraries).** Rule 3's "loader/libraries ...
+> required by that profile" are the ones the profile's runtime loads inside
+> the sandbox. The launcher is pinned by its package version and its binary
+> in the root, but it runs on the host and loads the host's loader and
+> libraries, like the kernel. [0058](0058-react-builds-and-preview.md)
+> explains why under its note "launcher libraries" and rewords its rule 19.
+> No rule of this record changes.
+
 ## Context and evidence
 
 The existing worker runs only trusted `verify_revision` code and opens SQLite
