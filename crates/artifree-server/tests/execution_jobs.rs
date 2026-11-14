@@ -972,7 +972,9 @@ fn job_an_unavailable_store_ends_the_attempt_by_the_guardian() -> TestResult {
     store.create_artifact()?;
     let job = store.enqueue_fixture("store-unavailable")?;
     let mut worker = Worker::spawn(&scratch, &LEASE_3)?;
-    let (_, group) = worker.started_attempt(&store)?;
+    // Blocked only after the release: the release asks the store for a checkpoint, so a block
+    // before it would end the attempt at readiness instead of at the guardian's window.
+    let group = worker.released_attempt(&store)?;
     let blocker = Connection::open(&store.path)?;
     blocker.execute_batch("BEGIN EXCLUSIVE")?;
     thread::sleep(STORE_HOLD);
