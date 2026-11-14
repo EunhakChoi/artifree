@@ -162,7 +162,8 @@ not**. Roadmap: R03.
 > public mapping refuse, except the `default` class and calls that the
 > fixture allows in some form. The second program allows the fixture's
 > allowlist, plus the calls listed in the root's `etc/measured-calls`, and
-> logs every other call. The job measures in rounds. Each round writes the
+> logs every other call. The provider reads the same file for the filter's
+> digest, so the evidence names the program the bootstrap installs. The job measures in rounds. Each round writes the
 > calls found so far to that file and runs the template, a bad import and
 > 200 generated modules three times each. A round that records nothing new
 > and loses no kernel record ends the measurement. Its list is the artifact

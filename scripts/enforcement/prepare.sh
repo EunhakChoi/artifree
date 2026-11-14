@@ -140,6 +140,7 @@ install_tool_root() {
   [[ "$named" == "$VERSION" ]] || fail "the server names version $named, the workspace $VERSION"
   # The archives of the lock list are downloaded and checked first, as the packaging script does,
   # so a wrong one leaves no root behind.
+  [[ ! -e "$ROOT" && ! -L "$ROOT" ]] || fail "refusing to write over the existing root $ROOT"
   ARCHIVES="$(mktemp -d)"
   # shellcheck disable=SC2064 # The directory is fixed now, so it is expanded now.
   trap "rm -rf -- '$ARCHIVES'" EXIT
@@ -342,7 +343,8 @@ measured_calls() {
   local file=$1
   [[ -f "$file" ]] || fail "the measured calls are not a file: $file"
   if [[ -s "$file" ]]; then
-    grep -qvE '^(0|[1-9][0-9]{0,3})$' -- "$file" && fail "the measured calls must be numbers, one per line"
+    grep -qvE '^(0|[1-9][0-9]{0,2}|10[01][0-9]|102[0-3])$' -- "$file" \
+      && fail "the measured calls must be numbers below 1024, one per line"
     LC_ALL=C sort -n -c -u -- "$file" || fail "the measured calls must be increasing"
   fi
   install -o root -g root -m 0644 -- "$file" "$ROOT/etc/measured-calls"

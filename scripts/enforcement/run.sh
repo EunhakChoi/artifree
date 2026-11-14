@@ -32,7 +32,7 @@ say() {
 # artifact bundler-calls.txt. A record of a filter kill, of another architecture, or of a call
 # that the fixture allows only in some forms fails the job.
 measure_bundler() {
-  local measured="$OUT/measured-calls.txt" round case run label records lost new
+  local measured="$OUT/measured-calls.txt" round case run label records lost new numbers number
   local test_name=execution::attempt::bundler_tests::job_the_bundler_runs_under_the_measuring_filter
   : > "$measured"
   for round in 1 2 3 4 5 6 7 8; do
@@ -56,16 +56,24 @@ measure_bundler() {
         if grep -vq ' arch=c000003e ' <<< "$records"; then
           fail "the bundler made a call of another architecture; see $OUT/$label.kernel.txt"
         fi
-        new+="$(sed -E 's/.* syscall=([0-9]+) .*/\1/' <<< "$records")"$'\n'
+        numbers="$(grep -oE ' syscall=[0-9]+' <<< "$records" | cut -d= -f2 | LC_ALL=C sort -n -u)"
+        # A call that the fixture allows only in some forms keeps its argument rules under the
+        # measuring filter, so a record of it is a refused form.
+        for number in 41 54 56 302; do
+          if grep -qx "$number" <<< "$numbers"; then
+            fail "the bundler made call $number in a form the fixture refuses; see $OUT/$label.kernel.txt"
+          fi
+        done
+        while IFS= read -r number; do
+          [[ -n "$number" ]] || continue
+          ((number < 1024)) || fail "the bundler made call $number, beyond the reviewed numbers; see $OUT/$label.kernel.txt"
+        done <<< "$numbers"
+        new+="$numbers"$'\n'
       done
     done
-    new="$(printf '%s' "$new" | grep -E '^[0-9]+$' | LC_ALL=C sort -n -u || true)"
+    # Only calls not measured before are new.
+    new="$(printf '%s' "$new" | grep -E '^[0-9]+$' | LC_ALL=C sort -n -u | LC_ALL=C comm -13 <(LC_ALL=C sort -u -- "$measured") - || true)"
     if [[ -z "$new" && "$lost" == 0 ]]; then
-      for number in 41 54 56 302; do
-        if grep -qx "$number" -- "$measured"; then
-          fail "the bundler made call $number in a form the fixture refuses"
-        fi
-      done
       while IFS= read -r number; do
         [[ -n "$number" ]] || continue
         printf '%s %s\n' "$number" "$(awk -v n="$number" '$1 == "#define" && $3 == n { sub(/^__NR_/, "", $2); print $2; exit }' /usr/include/x86_64-linux-gnu/asm/unistd_64.h)"
@@ -73,7 +81,7 @@ measure_bundler() {
       say "the bundler needs $(wc -l < "$measured") calls beyond the fixture's allowlist (round $round)"
       return 0
     fi
-    printf '%s\n' "$new" | cat -- "$measured" - | grep -E '^[0-9]+$' | LC_ALL=C sort -n -u > "$measured.next"
+    printf '%s\n' "$new" | cat -- "$measured" - | grep -E '^[0-9]+$' | LC_ALL=C sort -n -u > "$measured.next" || true
     mv -- "$measured.next" "$measured"
   done
   fail "the bundler measurement found new calls in every round; see $OUT/measured-calls.txt"
@@ -337,6 +345,8 @@ restore_host() {
     sudo "$PREPARE" fixture-back 2> /dev/null || true
     sudo "$PREPARE" nomem-slice-off 2> /dev/null || true
     sudo "$PREPARE" tool-restore 2> /dev/null || true
+    sudo "$PREPARE" package-restore 2> /dev/null || true
+    sudo "$PREPARE" measured-calls-off 2> /dev/null || true
     for change in tool-owner tool-writable tool-setid ancestor-open; do
       sudo "$PREPARE" "$change-off" 2> /dev/null || true
     done
@@ -412,6 +422,17 @@ server_bin=$server_bin_binaries
 [[ -x "$server_bin" ]] || fail "the artifree-server binary is not executable: $server_bin"
 
 say "part 1: install the pinned launcher and assemble the tool root"
+# An archive whose SHA-256 differs from the lock list is refused before anything is written
+# (R03bcba): before the first install, the packaging script fails on the digest and leaves no
+# root behind.
+awk 'done == 0 && $1 !~ /^#/ && NF == 6 { $4 = "0000000000000000000000000000000000000000000000000000000000000000"; done = 1 } { print }' \
+  scripts/tools/react-v1.lock > "$OUT/wrong-sha.lock"
+if sudo "$PREPARE" package-with "$server_bin" "$PWD/$OUT/wrong-sha.lock" 2> "$OUT/wrong-sha.stderr"; then
+  fail "the packaging script accepted an archive with a wrong SHA-256"
+fi
+grep -Fq "the lock list names 0000000000000000000000000000000000000000000000000000000000000000" \
+  "$OUT/wrong-sha.stderr" || fail "the wrong SHA-256 was refused for another reason; see $OUT/wrong-sha.stderr"
+[[ ! -e "$ROOT" ]] || fail "the refused package left a root behind: $ROOT"
 sudo "$PREPARE" install "$FIXTURE" "$PAYLOAD" "$server_bin"
 # The script never writes over a root (0058 rule 19): a second install fails and leaves the root
 # as it was.
@@ -423,17 +444,6 @@ grep -Fq "refusing to write over the existing root $ROOT" "$OUT/install-again.st
   || fail "the second install failed for another reason; see $OUT/install-again.stderr"
 [[ "$(sha256sum -- "$ROOT/MANIFEST")" == "$manifest_before" ]] \
   || fail "the refused install changed the root's manifest"
-# An archive whose SHA-256 differs from the lock list is refused before anything is written
-# (R03bcba): the packaging script fails on the digest, not on the existing root.
-awk 'done == 0 && $1 !~ /^#/ && NF == 6 { $4 = "0000000000000000000000000000000000000000000000000000000000000000"; done = 1 } { print }' \
-  scripts/tools/react-v1.lock > "$OUT/wrong-sha.lock"
-if sudo "$PREPARE" package-with "$server_bin" "$PWD/$OUT/wrong-sha.lock" 2> "$OUT/wrong-sha.stderr"; then
-  fail "the packaging script accepted an archive with a wrong SHA-256"
-fi
-grep -Fq "the lock list names 0000000000000000000000000000000000000000000000000000000000000000" \
-  "$OUT/wrong-sha.stderr" || fail "the wrong SHA-256 was refused for another reason; see $OUT/wrong-sha.stderr"
-[[ "$(sha256sum -- "$ROOT/MANIFEST")" == "$manifest_before" ]] \
-  || fail "the refused package changed the root's manifest"
 {
   printf 'bubblewrap package: %s\n' "$(dpkg-query -W -f "\${Version}" bubblewrap)"
   printf 'launcher version: %s\n' "$("$ROOT/bin/bwrap" --version)"

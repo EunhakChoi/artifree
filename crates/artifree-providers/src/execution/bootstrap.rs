@@ -216,7 +216,6 @@ pub fn run_bootstrap(identity: &str) -> Result<Infallible, BootstrapFailure> {
     Err(BootstrapFailure::PayloadNotExecuted)
 }
 
-/// The profile whose identity is exactly `identity`; any other identity is refused.
 /// The calls a bundler measurement has already seen (decision 0058, note "R03bcb split"),
 /// read from the tool root's `etc/measured-calls`: one decimal system-call number per line, in
 /// increasing order. A missing file is an empty list. Only the measuring filter reads it; any
@@ -229,52 +228,18 @@ fn measured_calls(profile: &ExecutionProfile) -> Result<Vec<i64>, BootstrapFailu
     if profile.filter != policy::FilterSet::Measure {
         return Ok(Vec::new());
     }
-    match std::fs::read(MEASURED_CALLS) {
-        Ok(bytes) => parse_measured_calls(&bytes).ok_or(BootstrapFailure::Filter),
+    match std::fs::read(Path::new(SANDBOX_TOOLS).join(policy::MEASURED_CALLS_FILE)) {
+        Ok(bytes) => policy::parse_measured_calls(&bytes).ok_or(BootstrapFailure::Filter),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(_) => Err(BootstrapFailure::Filter),
     }
 }
 
-/// The measured-calls file inside the sandbox, where the tool root is bound as `/tools`.
+/// The tool root inside the sandbox.
 #[cfg(any(test, feature = "enforcement-fixture"))]
-const MEASURED_CALLS: &str = "/tools/etc/measured-calls";
+const SANDBOX_TOOLS: &str = "/tools";
 
-/// The bound on the system-call numbers the measured-calls file may name; `x86_64` numbers stay
-/// below it.
-#[cfg(any(test, feature = "enforcement-fixture"))]
-const MAX_MEASURED_CALL: i64 = 1024;
-
-/// Parses the measured-calls file: lines of decimal numbers below `MAX_MEASURED_CALL`, without
-/// leading zeros, each followed by a newline and strictly increasing. Anything else is `None`.
-#[cfg(any(test, feature = "enforcement-fixture"))]
-fn parse_measured_calls(bytes: &[u8]) -> Option<Vec<i64>> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    let body = text.strip_suffix('\n').unwrap_or(text);
-    if body.is_empty() {
-        return text.is_empty().then(Vec::new);
-    }
-    if !text.ends_with('\n') {
-        return None;
-    }
-    let mut numbers: Vec<i64> = Vec::new();
-    for line in body.split('\n') {
-        let canonical = !line.is_empty()
-            && line.bytes().all(|byte| byte.is_ascii_digit())
-            && (line == "0" || !line.starts_with('0'));
-        if !canonical {
-            return None;
-        }
-        let number: i64 = line.parse().ok()?;
-        let increasing = numbers.last().is_none_or(|last| *last < number);
-        if number >= MAX_MEASURED_CALL || !increasing {
-            return None;
-        }
-        numbers.push(number);
-    }
-    Some(numbers)
-}
-
+/// The profile whose identity is exactly `identity`; any other identity is refused.
 fn check_identity(identity: &str) -> Result<&'static ExecutionProfile, BootstrapFailure> {
     profile::by_identity(identity).ok_or(BootstrapFailure::UnknownProfile)
 }
@@ -564,7 +529,5 @@ fn write_record(descriptor: BorrowedFd<'_>, record: &[u8]) -> Result<(), Bootstr
     Ok(())
 }
 
-#[cfg(test)]
-mod measured_calls_tests;
 #[cfg(test)]
 mod working_directory_tests;

@@ -12,11 +12,10 @@ use std::env;
 use std::error::Error;
 use std::fmt::Write as _;
 use std::fs;
-use std::os::unix::process::ExitStatusExt;
 
 use artifree_domain::package::{FilePackage, PackagePath};
 
-use super::super::launcher::EntryProgram;
+use super::super::launcher::{EntryProgram, KILLED_BY_SIGSYS};
 use super::super::profile::MEASUREMENT;
 use super::super::staging::{InputListing, VerifiedInput};
 use super::resource_tests::evidence_of;
@@ -33,8 +32,6 @@ const STYLE: &[u8] = include_bytes!("bundler_template/app.css");
 const BAD_IMPORT: &[u8] = b"import pad from \"left-pad\";\nconsole.log(pad(\"x\", 3));\n";
 /// How many generated modules the larger input imports, below the package's 256 files.
 const LARGE_MODULES: usize = 200;
-/// `SIGSYS`, the signal of a filter kill.
-const SIGSYS: i32 = 31;
 
 /// The input of one measured case.
 fn input_of(case: &str) -> Result<VerifiedInput, Box<dyn Error>> {
@@ -95,9 +92,10 @@ fn job_the_bundler_runs_under_the_measuring_filter() -> Result<(), Box<dyn Error
         fs::write(report, evidence.to_string())?;
     }
     let stderr = String::from_utf8_lossy(&evidence.stderr);
+    // The launcher reports the payload's death by `SIGSYS` as this exit status.
     assert_ne!(
-        evidence.exit.signal(),
-        Some(SIGSYS),
+        evidence.exit.code(),
+        Some(KILLED_BY_SIGSYS),
         "the {case} build was killed by the filter; stderr: {stderr}"
     );
     if case == "bad-import" {

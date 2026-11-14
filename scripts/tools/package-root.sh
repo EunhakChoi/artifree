@@ -220,7 +220,10 @@ lock_entries() {
 # Downloads every archive of LOCK into DIR as NAME.tgz and checks its SHA-256. A mismatch fails
 # before any archive is unpacked, and before the root exists.
 fetch_locked() {
-  local lock=$1 dir=$2 kind name version digest url licence actual
+  local lock=$1 dir=$2 kind name version digest url licence actual entries
+  # Read whole first: a failure of lock_entries ends the script here, not as an early end of list.
+  entries="$(lock_entries "$lock")"
+  [[ -n "$entries" ]] || package_fail "the lock list names no archive: $lock"
   while read -r kind name version digest url licence; do
     curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
       --output "$dir/$name.tgz" -- "$url" || package_fail "the download of $name $version failed"
@@ -228,7 +231,7 @@ fetch_locked() {
     actual="${actual%% *}"
     [[ "$actual" == "$digest" ]] \
       || package_fail "the SHA-256 of $name $version is $actual, the lock list names $digest"
-  done < <(lock_entries "$lock")
+  done <<< "$entries"
 }
 
 # Unpacks ARCHIVE into the new directory DEST after checking that it holds only directories and
@@ -267,7 +270,8 @@ install_tree() {
 
 # Installs the archives that fetch_locked put in DIR into ROOT, as the lock list's kinds say.
 install_locked() {
-  local lock=$1 dir=$2 kind name version digest url licence unpacked
+  local lock=$1 dir=$2 kind name version digest url licence unpacked entries
+  entries="$(lock_entries "$lock")"
   while read -r kind name version digest url licence; do
     unpacked="$dir/$name"
     unpack_archive "$dir/$name.tgz" "$unpacked"
@@ -288,7 +292,8 @@ install_locked() {
         install -o root -g root -m 0644 -- "$unpacked/package/LICENSE" "$ROOT/licenses/$name.LICENSE"
         ;;
     esac
-  done < <(lock_entries "$lock")
+  done <<< "$entries"
+  [[ -f "$ROOT/bin/esbuild" ]] || package_fail "the lock list installed no bundler"
 }
 
 # The profile file of VERSION's launcher.
@@ -337,6 +342,9 @@ package_main() {
   version="$(server_version "$server")"
   ROOT="$(root_of_version "$version")"
   readonly ROOT
+  # A cheap early refusal, so that a second run downloads nothing; begin_root's mkdir is the
+  # check that holds.
+  [[ ! -e "$ROOT" && ! -L "$ROOT" ]] || package_fail "refusing to write over the existing root $ROOT"
   ARCHIVES="$(mktemp -d)"
   readonly ARCHIVES
   # shellcheck disable=SC2064 # The directory is fixed now, so it is expanded now.

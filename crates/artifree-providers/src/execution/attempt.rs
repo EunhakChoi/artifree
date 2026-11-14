@@ -1168,11 +1168,30 @@ fn admit_checked(
 /// capacity is taken before the claim (0042 rule 5), so no profile is known yet: the digests of
 /// the filters that build are kept, and the launch reads its own profile's. When no filter builds,
 /// or the namespace cannot be read, the attempt is refused before the registry is touched.
+/// The calls the bootstrap adds to the filter of `set`, read from the tool root as the bootstrap
+/// reads them inside the sandbox, so that the digest names the installed program. Only the bundler
+/// measurement has any; a malformed file builds no digest, and the launch is then refused.
+fn measured_calls_of(set: FilterSet, tool_root: &Path) -> Option<Vec<i64>> {
+    if set != FilterSet::Measure {
+        return Some(Vec::new());
+    }
+    match fs::read(tool_root.join(policy::MEASURED_CALLS_FILE)) {
+        Ok(bytes) => policy::parse_measured_calls(&bytes),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(Vec::new()),
+        Err(_) => None,
+    }
+}
+
 fn policy_and_namespace(
     roots: &AdmissionRoots<'_>,
 ) -> Result<(Vec<(FilterSet, String)>, PathBuf), AttemptRefusal> {
     let filters: Vec<(FilterSet, String)> = profile::filter_sets()
-        .filter_map(|set| policy::policy_sha256(set).ok().map(|digest| (set, digest)))
+        .filter_map(|set| {
+            let measured = measured_calls_of(set, roots.tool_root)?;
+            policy::policy_sha256_with(set, &measured)
+                .ok()
+                .map(|digest| (set, digest))
+        })
         .collect();
     if filters.is_empty() {
         return Err(without_usage(AttemptFailure::PolicyUnavailable));
