@@ -204,3 +204,56 @@ fn the_directory_identity_is_made_whole_once_and_leaves_no_temporary_file() -> T
     );
     Ok(())
 }
+
+#[test]
+fn each_limit_that_ends_an_attempt_keeps_its_own_kind() {
+    assert_eq!(
+        refusal_kind(AttemptFailure::DeadlineExceeded),
+        LaunchFailure::Limit(LimitKind::WallTime)
+    );
+    assert_eq!(
+        refusal_kind(AttemptFailure::OutOfMemory),
+        LaunchFailure::Limit(LimitKind::Memory)
+    );
+    assert_eq!(
+        refusal_kind(AttemptFailure::OutputLimitExceeded),
+        LaunchFailure::Limit(LimitKind::Log)
+    );
+    for failure in [
+        AttemptFailure::Unobserved,
+        AttemptFailure::Survivors,
+        AttemptFailure::CleanupNotObserved,
+    ] {
+        assert_eq!(refusal_kind(failure), LaunchFailure::Failed, "{failure:?}");
+    }
+}
+
+#[test]
+fn only_the_launchers_sigsys_status_reads_as_the_filters_kill() {
+    use std::os::unix::process::ExitStatusExt;
+
+    // A wait status holds an exit code in its second byte and a terminating signal in its first.
+    assert_eq!(
+        exit_failure(ExitStatus::from_raw(159 << 8)),
+        (LaunchFailure::FilterKilled, "filter-killed")
+    );
+    for raw in [1 << 8, 3 << 8, 158 << 8, 160 << 8] {
+        assert_eq!(
+            exit_failure(ExitStatus::from_raw(raw)),
+            (LaunchFailure::Exited, "exit-nonzero"),
+            "wait status {raw:#x}"
+        );
+    }
+    // A stub that a signal ended itself reported no exit of the payload, and 0 is no failed exit.
+    for (raw, word) in [
+        (31, "exit-signal"),
+        (9, "exit-signal"),
+        (0, "not-collected"),
+    ] {
+        assert_eq!(
+            exit_failure(ExitStatus::from_raw(raw)),
+            (LaunchFailure::Failed, word),
+            "wait status {raw:#x}"
+        );
+    }
+}

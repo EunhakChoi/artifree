@@ -699,3 +699,40 @@ fn job_second_attempt_is_refused_while_the_lock_is_held() -> Result<(), Box<dyn 
     );
     Ok(())
 }
+
+/// The stderr of a payload that did not start never reaches the worker, so the bootstrap's own
+/// diagnostics cannot pass for the payload's; a started run hands its capture over, refused or not
+/// (decision 0058 rule 18).
+#[cfg(feature = "enforcement-fixture")]
+#[test]
+fn only_a_started_payloads_stderr_is_handed_over() {
+    let capture: io::Result<Vec<u8>> = Ok(b"bootstrap: exec failed\n".to_vec());
+    for reason in [
+        NotStartedReason::ExecFailed,
+        NotStartedReason::ExecUnconfirmed,
+        NotStartedReason::ReleaseNotSent,
+    ] {
+        let phase: Result<(), AttemptFailure> = Err(AttemptFailure::NotStarted(reason));
+        assert_eq!(
+            handed_stderr(&phase, Some(&capture)),
+            Vec::<u8>::new(),
+            "{reason:?}"
+        );
+    }
+    for phase in [Ok(()), Err(AttemptFailure::DeadlineExceeded)] {
+        assert_eq!(
+            handed_stderr(&phase, Some(&capture)),
+            b"bootstrap: exec failed\n".to_vec(),
+            "{phase:?}"
+        );
+    }
+    let unread: io::Result<Vec<u8>> = Err(io::Error::other("read failed"));
+    assert_eq!(
+        handed_stderr(&Ok::<(), AttemptFailure>(()), Some(&unread)),
+        Vec::<u8>::new()
+    );
+    assert_eq!(
+        handed_stderr(&Ok::<(), AttemptFailure>(()), None),
+        Vec::<u8>::new()
+    );
+}

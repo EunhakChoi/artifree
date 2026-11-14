@@ -218,9 +218,28 @@ pub enum LaunchFailure {
     /// The payload did not start: the host, the quarantine, the registry, the
     /// input staging, the group or the guardian refused.
     Unavailable,
-    /// The payload ran and its verdict failed or its output was refused
-    /// (decision 0042 rule 7).
+    /// The payload exited with a status other than 0 (decision 0058 rule 18).
+    Exited,
+    /// The system call filter killed the payload (decision 0058 rule 18).
+    FilterKilled,
+    /// A limit of decision 0042 rule 5 ended the attempt (decision 0058 rule
+    /// 18). A limit that the payload sees as a failed call ends it as
+    /// [`LaunchFailure::Exited`] instead.
+    Limit(LimitKind),
+    /// The payload ran and another part of its verdict failed, or its output
+    /// was refused (decision 0042 rule 7).
     Failed,
+}
+
+/// The limit that ended an attempt (decision 0042 rule 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitKind {
+    /// The wall time.
+    WallTime,
+    /// The memory of the attempt's group.
+    Memory,
+    /// The bound on the captured standard output and standard error.
+    Log,
 }
 
 /// The end of one launch.
@@ -236,4 +255,11 @@ pub struct LaunchOutcome {
     /// A short fixed word for the operator's stderr, such as `succeeded` or
     /// `guardian-renewal-expired`; never a path or content.
     pub detail: &'static str,
+    /// The stub's standard error, which is untrusted, within the 1 MiB
+    /// bound that it shares with standard output (decision 0058 rule 18).
+    /// After the release it is the payload's, together with anything the
+    /// trusted entry point wrote before it. Empty when the payload did not
+    /// start, so that the entry point's own failure is never handed over, and
+    /// when the stream was not read to its end.
+    pub stderr: Vec<u8>,
 }

@@ -26,6 +26,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
 use std::time::Duration;
 
 use artifree_domain::job::{AttemptIdentity, AttemptState, CheckpointAnswer, StopReason};
@@ -33,7 +34,7 @@ use artifree_domain::package::{FilePackage, PackagePath};
 use artifree_ports::artifact_store::FileEntry;
 use artifree_ports::execution::{
     BoundRun, Capacity, Checkpoint, CheckpointUnavailable, Execution, ExecutionHost, HeldCapacity,
-    LaunchFailure, LaunchOutcome, PinnedInput, ProfileOutput, ProfileRun,
+    LaunchFailure, LaunchOutcome, LimitKind, PinnedInput, ProfileOutput, ProfileRun,
 };
 use artifree_ports::job_store::{AttemptRow, ProfileCounts};
 
@@ -44,7 +45,7 @@ use super::attempt::{
 };
 use super::cgroup;
 use super::guardian::GuardianReason;
-use super::launcher::EntryProgram;
+use super::launcher::{EntryProgram, KILLED_BY_SIGSYS};
 use super::profile;
 use super::registry::{self, Identity, QuarantineReason, RecordRun};
 use super::staging::{InputListing, VerifiedInput};
@@ -273,7 +274,7 @@ impl HeldCapacity for HeldFixture {
         if launched.record_removed {
             self.settled_pause = pause.settled;
         }
-        outcome(&launched, run, &self.tool_digest)
+        outcome(launched, run, &self.tool_digest)
     }
 }
 
@@ -295,6 +296,7 @@ fn not_launched(detail: &'static str) -> LaunchOutcome {
         cleanup_observed: true,
         result: Err(LaunchFailure::Unavailable),
         detail,
+        stderr: Vec::new(),
     }
 }
 
@@ -506,14 +508,32 @@ fn evidence_outcome(
             ),
             None => (Err(LaunchFailure::Failed), "unbound"),
         },
-        Err(OutputRefusal::NotCollected) => (Err(LaunchFailure::Failed), "exit-nonzero"),
+        Err(OutputRefusal::NotCollected) => {
+            let (failure, word) = exit_failure(evidence.exit);
+            (Err(failure), word)
+        }
         Err(OutputRefusal::Refused(_)) => (Err(LaunchFailure::Failed), "output-refused"),
+    }
+}
+
+/// The failure of a run whose output was not collected, from the stub's exit status, with its
+/// fixed word (decision 0058 rule 18). The launcher reports a payload that a signal ended as 128
+/// plus the signal, so `KILLED_BY_SIGSYS` is the filter's kill. A payload that exits with that
+/// status by itself reads the same way: both are a failed build, and only the fixed diagnostic
+/// differs. A stub that a signal ended itself did not report the payload's exit, and a status of 0
+/// is no failed exit, so both are `Failed`.
+fn exit_failure(exit: ExitStatus) -> (LaunchFailure, &'static str) {
+    match exit.code() {
+        Some(KILLED_BY_SIGSYS) => (LaunchFailure::FilterKilled, "filter-killed"),
+        Some(0) => (LaunchFailure::Failed, "not-collected"),
+        Some(_) => (LaunchFailure::Exited, "exit-nonzero"),
+        None => (LaunchFailure::Failed, "exit-signal"),
     }
 }
 
 /// The typed outcome of one launch: the cleanup that `record_removed` reports, the output or the
 /// failure, and the fixed word for stderr.
-fn outcome(launched: &Launched, run: &ProfileRun<'_>, tool_digest: &str) -> LaunchOutcome {
+fn outcome(launched: Launched, run: &ProfileRun<'_>, tool_digest: &str) -> LaunchOutcome {
     let (result, detail) = match &launched.result {
         Ok(evidence) => evidence_outcome(evidence, run, tool_digest),
         Err(refusal) => (Err(refusal_kind(refusal.failure)), word(refusal.failure)),
@@ -522,12 +542,13 @@ fn outcome(launched: &Launched, run: &ProfileRun<'_>, tool_digest: &str) -> Laun
         cleanup_observed: launched.record_removed,
         result,
         detail,
+        stderr: launched.stderr,
     }
 }
 
 /// The kind of a launch that produced no output (decision 0057 rules 7 and 15). A refusal before
-/// the payload is `Unavailable`, a payload whose verdict failed is `Failed`, and a stop is
-/// `Stopped`.
+/// the payload is `Unavailable`, a limit of decision 0042 rule 5 that ended the attempt is its
+/// `Limit` (decision 0058 rule 18), any other failed verdict is `Failed`, and a stop is `Stopped`.
 fn refusal_kind(failure: AttemptFailure) -> LaunchFailure {
     match failure {
         AttemptFailure::LeaseLost(part) => LaunchFailure::Stopped(stop_reason_of(part)),
@@ -539,11 +560,11 @@ fn refusal_kind(failure: AttemptFailure) -> LaunchFailure {
         | AttemptFailure::PolicyUnavailable
         | AttemptFailure::NotStarted(_)
         | AttemptFailure::Input(_) => LaunchFailure::Unavailable,
+        AttemptFailure::DeadlineExceeded => LaunchFailure::Limit(LimitKind::WallTime),
+        AttemptFailure::OutOfMemory => LaunchFailure::Limit(LimitKind::Memory),
+        AttemptFailure::OutputLimitExceeded => LaunchFailure::Limit(LimitKind::Log),
         AttemptFailure::Unobserved
-        | AttemptFailure::DeadlineExceeded
-        | AttemptFailure::OutOfMemory
         | AttemptFailure::Survivors
-        | AttemptFailure::OutputLimitExceeded
         | AttemptFailure::CleanupNotObserved
         | AttemptFailure::Routing(_)
         | AttemptFailure::Guardian(_) => LaunchFailure::Failed,

@@ -807,6 +807,10 @@ pub(super) struct Launched {
     /// Whether the attempt's record is gone, or no record was written. Only the worker reads it.
     #[cfg(feature = "enforcement-fixture")]
     pub(super) record_removed: bool,
+    /// The payload's standard error, which is untrusted, within the output budget; empty when the
+    /// stub did not run or the stream was not read to its end. Only the worker reads it.
+    #[cfg(feature = "enforcement-fixture")]
+    pub(super) stderr: Vec<u8>,
 }
 
 /// Runs one attempt with the fixture input (see `launch_with`). Test-only.
@@ -869,6 +873,8 @@ pub(super) fn launch_held(
                 result: Err(without_usage(failure)),
                 #[cfg(feature = "enforcement-fixture")]
                 record_removed,
+                #[cfg(feature = "enforcement-fixture")]
+                stderr: Vec::new(),
             };
         }
     };
@@ -877,6 +883,8 @@ pub(super) fn launch_held(
         registry,
         identity,
         removed: false,
+        #[cfg(feature = "enforcement-fixture")]
+        stderr: Vec::new(),
     };
     let result = run_registered(
         plan,
@@ -891,6 +899,8 @@ pub(super) fn launch_held(
         result,
         #[cfg(feature = "enforcement-fixture")]
         record_removed: registered.removed,
+        #[cfg(feature = "enforcement-fixture")]
+        stderr: registered.stderr,
     }
 }
 
@@ -922,6 +932,25 @@ struct Registered {
     identity: Identity,
     /// Whether the record was removed, so that the caller may settle the attempt.
     removed: bool,
+    /// The payload's standard error once it was read to its end, for the worker, on every path
+    /// that ran the stub (decision 0058 rule 18). It shares the output budget with standard
+    /// output, so it holds at most `OUTPUT_BUDGET` bytes.
+    #[cfg(feature = "enforcement-fixture")]
+    stderr: Vec<u8>,
+}
+
+/// The stderr that the launch hands to the worker (decision 0058 rule 18): the stub's capture once
+/// it was read to its end, and none when the payload did not start, so that the trusted entry
+/// point's own diagnostics, such as a failed `exec` of the payload, never pass for the payload's.
+#[cfg(feature = "enforcement-fixture")]
+fn handed_stderr<T>(
+    phase: &Result<T, AttemptFailure>,
+    stderr: Option<&io::Result<Vec<u8>>>,
+) -> Vec<u8> {
+    match (phase, stderr) {
+        (Err(AttemptFailure::NotStarted(_)), _) | (_, None | Some(Err(_))) => Vec::new(),
+        (_, Some(Ok(bytes))) => bytes.clone(),
+    }
 }
 
 /// The stub's arguments before the staged input's path: `stub` and the plan's profile identity,
@@ -1015,6 +1044,10 @@ fn run_registered(
         &mut session,
     );
     let (settled, guardian_reason) = conclude(group, &group_path, &mut session);
+    #[cfg(feature = "enforcement-fixture")]
+    {
+        registered.stderr = handed_stderr(&phase, settled.stderr.as_ref());
+    }
     // Removed after the group is gone, on every path that staged it.
     let removed = staged.remove();
     // The last routing check runs once the group is empty and before the record is removed, so an

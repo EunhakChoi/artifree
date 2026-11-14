@@ -11,7 +11,7 @@
 //! selects one payload scenario with `prepare.sh scenario <name>` and runs one test by its exact
 //! name. The exit statuses are not the evidence: the kernel records are.
 
-use super::super::launcher::TOOL_ROOT;
+use super::super::launcher::{KILLED_BY_SIGSYS, TOOL_ROOT};
 use super::super::probes::{AUDIT_ARCH_X86_64, Expect, PROBES};
 use super::super::profile::FIXTURE_EXECUTION;
 use super::super::readiness::{LimitFacts, StatusFacts, parse_limits, parse_status};
@@ -35,8 +35,6 @@ use std::time::Duration;
 const PROBE_DIR: &str = "/tools/probes";
 /// The signal of a seccomp refusal, `SIGSYS`, as the kernel records it.
 const SIGSYS: u32 = 31;
-/// The exit status that the launcher reports for a child killed by `SIGSYS` (128 plus 31).
-const KILLED_BY_SIGSYS: i32 = 159;
 /// The exit status of a probe whose `clone3` the filter answers with `ENOSYS` (38).
 const ENOSYS_EXIT: i32 = 38;
 /// The exit status of a probe whose `clone3` the kernel rejects with `EINVAL` (22).

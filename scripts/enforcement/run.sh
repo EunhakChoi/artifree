@@ -634,6 +634,11 @@ done
 run_server_job hang server-store-unavailable job_an_unavailable_store_ends_the_attempt_by_the_guardian
 run_server_job hang server-stalled-worker job_a_stalled_worker_ends_the_attempt_by_the_guardian
 run_server_job exit server-busy-lock job_a_busy_lock_spends_no_attempt
+# The verdicts of R03bb (decision 0058 rule 18): each failed run has its own word on the worker's
+# stderr, with the length of the payload's stderr that the provider handed over.
+for case in fail thread-refusal hang memory flood; do
+  run_server_job "$case" "server-verdict-$case" job_a_failed_run_reports_its_own_verdict --setenv="ARTIFREE_VERDICT_CASE=$case"
+done
 sudo "$PREPARE" scenario exit
 
 # Part 14 is the recovery matrix of R02bc (decision 0057 rule 20, the R02bc row; 0042 rule 8). Each

@@ -18,6 +18,10 @@ use super::profile::ExecutionProfile;
 pub(super) const TOOL_ROOT: &str = "/opt/artifree/tools/v1";
 /// The launcher inside the tool root: a copy of bubblewrap at a fixed path.
 pub(super) const LAUNCHER: &str = "bin/bwrap";
+/// The exit status that the launcher reports for a child that `SIGSYS` (31) ended: it reports a
+/// child that a signal ended as 128 plus the signal.
+#[cfg(any(test, feature = "enforcement-fixture"))]
+pub(super) const KILLED_BY_SIGSYS: i32 = 128 + 31;
 /// The fixture inside the tool root, run inside the launcher for the namespace check and as the probe child.
 pub(super) const FIXTURE_FILE: &str = "bin/artifree-execution-fixture";
 /// The fixture's path inside the sandbox, where the tool root is bound as `/tools`.

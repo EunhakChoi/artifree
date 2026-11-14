@@ -185,6 +185,9 @@ pub enum ClaimEvent<'a> {
         job: &'a JobId,
         /// The provider's word for the end, such as `succeeded`.
         detail: &'static str,
+        /// The length of the payload's standard error that the provider
+        /// handed over (decision 0058 rule 18).
+        stderr_bytes: usize,
     },
     /// The execution port refused capacity, so no known-profile job was
     /// claimed and no attempt was spent (decision 0057 rule 19). The text is
@@ -499,6 +502,7 @@ fn run_profile<S: ArtifactStore + JobStore>(
     on_claim(ClaimEvent::Launched {
         job: &claim.job.id,
         detail: outcome.detail,
+        stderr_bytes: outcome.stderr.len(),
     });
     if !outcome.cleanup_observed {
         // The record stays and the provider is quarantined; the row becomes
@@ -539,7 +543,15 @@ fn run_profile<S: ArtifactStore + JobStore>(
                 &claim.job.id,
             )
         }
-        Ok(_) | Err(LaunchFailure::Failed) => fail_settled(claim, JobFailure::Internal),
+        // Until the failures of decision 0058 rule 18 are stored (slice R03c),
+        // every failed run ends as `internal`.
+        Ok(_)
+        | Err(
+            LaunchFailure::Exited
+            | LaunchFailure::FilterKilled
+            | LaunchFailure::Limit(_)
+            | LaunchFailure::Failed,
+        ) => fail_settled(claim, JobFailure::Internal),
         Err(LaunchFailure::Stopped(_)) => Ok(Step::LeaseLost(claim.lease.job.clone())),
         Err(LaunchFailure::Unavailable) => fail_settled(claim, JobFailure::ExecutionUnavailable),
     }
