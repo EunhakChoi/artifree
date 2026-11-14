@@ -263,6 +263,8 @@ enum Seen {
         job: String,
         /// The port's word for the end.
         detail: &'static str,
+        /// The length of the stderr that the port handed over.
+        stderr_bytes: usize,
     },
     /// The worker reported that the port refused capacity, with its text.
     Refused(&'static str),
@@ -295,6 +297,9 @@ enum Answer {
     /// Capacity is held.
     Held,
 }
+
+/// The stderr that a failed launch of the fake port hands over.
+const FAILED_STDERR: &[u8] = b"payload error\n";
 
 /// How a held launch ends.
 #[derive(Debug, Clone, Copy)]
@@ -520,7 +525,7 @@ impl HeldCapacity for HeldFixture {
                 cleanup_observed: true,
                 result: Err(failure),
                 detail: "failed",
-                stderr: b"payload error\n".to_vec(),
+                stderr: FAILED_STDERR.to_vec(),
             },
             Launch::NoCleanup => LaunchOutcome {
                 cleanup_observed: false,
@@ -538,9 +543,14 @@ fn seen_of(event: ClaimEvent<'_>) -> Seen {
     match event {
         ClaimEvent::Settled(record) => Seen::Settled(text(&record.id)),
         ClaimEvent::Claimed(job) => Seen::Claimed(text(job)),
-        ClaimEvent::Launched { job, detail, .. } => Seen::Launched {
+        ClaimEvent::Launched {
+            job,
+            detail,
+            stderr_bytes,
+        } => Seen::Launched {
             job: text(job),
             detail,
+            stderr_bytes,
         },
         ClaimEvent::Refused(detail) => Seen::Refused(detail),
     }
@@ -833,6 +843,7 @@ fn reconciliation_settles_every_reported_attempt_before_the_claim() -> TestResul
             Seen::Launched {
                 job: text(&remaining),
                 detail: "succeeded",
+                stderr_bytes: 0,
             },
         ],
         "the reconciled job is settled before the claim, and the claim precedes the launch"
@@ -900,6 +911,7 @@ fn a_success_settles_then_publishes_the_counts() -> TestResult {
             Seen::Launched {
                 job: text(&job),
                 detail: "succeeded",
+                stderr_bytes: 0,
             },
         ],
         "the claim and the end of the launch are reported in order"
@@ -913,6 +925,7 @@ fn a_failed_launch_settles_then_fails_the_job(
     launch: Launch,
     failure: JobFailure,
     detail: &'static str,
+    stderr_bytes: usize,
 ) -> TestResult {
     let world = World::new()?;
     let log = Arc::new(Log::default());
@@ -943,6 +956,7 @@ fn a_failed_launch_settles_then_fails_the_job(
             Seen::Launched {
                 job: text(&job),
                 detail,
+                stderr_bytes,
             },
         ],
         "the claim and the end of the launch are reported in order"
@@ -956,6 +970,7 @@ fn a_launch_that_never_started_fails_the_job_as_execution_unavailable() -> TestR
         Launch::Unavailable,
         JobFailure::ExecutionUnavailable,
         "unavailable",
+        0,
     )
 }
 
@@ -974,6 +989,7 @@ fn a_launch_that_failed_fails_the_job_as_internal() -> TestResult {
             Launch::Fails(failure),
             JobFailure::Internal,
             "failed",
+            FAILED_STDERR.len(),
         )?;
     }
     Ok(())
@@ -1027,6 +1043,7 @@ fn an_unobserved_cleanup_marks_the_attempt_cleanup_pending_and_nothing_else() ->
             Seen::Launched {
                 job: text(&job),
                 detail: "unobserved",
+                stderr_bytes: 0,
             },
         ],
         "no settlement is reported for the job"
@@ -1069,6 +1086,7 @@ fn a_binding_that_names_another_run_is_not_published() -> TestResult {
             Seen::Launched {
                 job: text(&job),
                 detail: "succeeded",
+                stderr_bytes: 0,
             },
         ],
         "the launch reported its own word, and the worker refused its binding"
@@ -1128,6 +1146,7 @@ fn a_checkpoint_stop_settles_and_the_store_moves_the_job() -> TestResult {
             Seen::Launched {
                 job: text(&job),
                 detail: "cancelled",
+                stderr_bytes: 0,
             },
         ],
         "the claim and the stopped launch are reported in order"

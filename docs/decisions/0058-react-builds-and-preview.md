@@ -29,8 +29,14 @@ R03bc to R03f are not**. Roadmap: R03.
 > that a signal ended as 128 plus the signal, so an exit status of 159 reads
 > as the filter's `SIGSYS`; a payload that exits with 159 by itself reads the
 > same way, and since both are `build_failed`, only the fixed diagnostic
-> differs. The launch hands the payload's stderr to the worker on every path
-> that ran the stub, within the 1 MiB bound it shares with stdout. The worker
+> differs. A stub that a signal ended itself, or a status of 0 with no
+> output, is `Failed`. The stub's status is that of the whole trusted chain:
+> a failure of the bootstrap after the release reads like the payload's own
+> exit, as it did before this slice, and R03c must keep that in mind when it
+> names these failures. The launch hands the stub's stderr to the worker on
+> every path on which the payload started, within the 1 MiB bound it shares
+> with stdout, and none when the payload did not start, so the bootstrap's
+> own diagnostics never pass for the payload's. The worker
 > prints only its length beside the provider's word, and still fails each such
 > job as `internal` until R03c.
 

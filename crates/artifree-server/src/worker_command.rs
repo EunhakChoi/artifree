@@ -278,7 +278,7 @@ fn run_worker(arguments: &[OsString]) -> Result<(), WorkerFailure> {
                     stderr_bytes,
                 } => {
                     stderr_line(&format!(
-                        "attempt of job {}: {detail} stderr_bytes={stderr_bytes}",
+                        "attempt of job {}: {detail} (stderr_bytes={stderr_bytes})",
                         job.as_str()
                     ));
                 }

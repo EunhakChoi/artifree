@@ -255,9 +255,11 @@ pub struct LaunchOutcome {
     /// A short fixed word for the operator's stderr, such as `succeeded` or
     /// `guardian-renewal-expired`; never a path or content.
     pub detail: &'static str,
-    /// The payload's standard error, which is untrusted, within the 1 MiB
+    /// The stub's standard error, which is untrusted, within the 1 MiB
     /// bound that it shares with standard output (decision 0058 rule 18).
-    /// Empty when the payload was not started or the stream was not read
-    /// to its end.
+    /// After the release it is the payload's, together with anything the
+    /// trusted entry point wrote before it. Empty when the payload did not
+    /// start, so that the entry point's own failure is never handed over, and
+    /// when the stream was not read to its end.
     pub stderr: Vec<u8>,
 }

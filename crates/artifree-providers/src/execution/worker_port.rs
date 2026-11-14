@@ -45,7 +45,7 @@ use super::attempt::{
 };
 use super::cgroup;
 use super::guardian::GuardianReason;
-use super::launcher::EntryProgram;
+use super::launcher::{EntryProgram, KILLED_BY_SIGSYS};
 use super::profile;
 use super::registry::{self, Identity, QuarantineReason, RecordRun};
 use super::staging::{InputListing, VerifiedInput};
@@ -274,7 +274,7 @@ impl HeldCapacity for HeldFixture {
         if launched.record_removed {
             self.settled_pause = pause.settled;
         }
-        outcome(&launched, run, &self.tool_digest)
+        outcome(launched, run, &self.tool_digest)
     }
 }
 
@@ -516,25 +516,24 @@ fn evidence_outcome(
     }
 }
 
-/// The exit status that the launcher reports for a payload that the filter's `SIGSYS` (31) ended:
-/// 128 plus the signal.
-const KILLED_BY_SIGSYS: i32 = 128 + 31;
-
-/// The failure of a run whose exit status was not 0, with its fixed word (decision 0058 rule 18).
-/// The launcher reports a payload that a signal ended as 128 plus the signal, so 159 is the
-/// filter's kill. A payload that exits with 159 by itself reads the same way: both are a failed
-/// build, and only the fixed diagnostic differs.
+/// The failure of a run whose output was not collected, from the stub's exit status, with its
+/// fixed word (decision 0058 rule 18). The launcher reports a payload that a signal ended as 128
+/// plus the signal, so `KILLED_BY_SIGSYS` is the filter's kill. A payload that exits with that
+/// status by itself reads the same way: both are a failed build, and only the fixed diagnostic
+/// differs. A stub that a signal ended itself did not report the payload's exit, and a status of 0
+/// is no failed exit, so both are `Failed`.
 fn exit_failure(exit: ExitStatus) -> (LaunchFailure, &'static str) {
-    if exit.code() == Some(KILLED_BY_SIGSYS) {
-        (LaunchFailure::FilterKilled, "filter-killed")
-    } else {
-        (LaunchFailure::Exited, "exit-nonzero")
+    match exit.code() {
+        Some(KILLED_BY_SIGSYS) => (LaunchFailure::FilterKilled, "filter-killed"),
+        Some(0) => (LaunchFailure::Failed, "not-collected"),
+        Some(_) => (LaunchFailure::Exited, "exit-nonzero"),
+        None => (LaunchFailure::Failed, "exit-signal"),
     }
 }
 
 /// The typed outcome of one launch: the cleanup that `record_removed` reports, the output or the
 /// failure, and the fixed word for stderr.
-fn outcome(launched: &Launched, run: &ProfileRun<'_>, tool_digest: &str) -> LaunchOutcome {
+fn outcome(launched: Launched, run: &ProfileRun<'_>, tool_digest: &str) -> LaunchOutcome {
     let (result, detail) = match &launched.result {
         Ok(evidence) => evidence_outcome(evidence, run, tool_digest),
         Err(refusal) => (Err(refusal_kind(refusal.failure)), word(refusal.failure)),
@@ -543,7 +542,7 @@ fn outcome(launched: &Launched, run: &ProfileRun<'_>, tool_digest: &str) -> Laun
         cleanup_observed: launched.record_removed,
         result,
         detail,
-        stderr: launched.stderr.clone(),
+        stderr: launched.stderr,
     }
 }
 

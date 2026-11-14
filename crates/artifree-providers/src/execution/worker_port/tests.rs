@@ -237,10 +237,22 @@ fn only_the_launchers_sigsys_status_reads_as_the_filters_kill() {
         exit_failure(ExitStatus::from_raw(159 << 8)),
         (LaunchFailure::FilterKilled, "filter-killed")
     );
-    for raw in [1 << 8, 3 << 8, 158 << 8, 160 << 8, 31, 9] {
+    for raw in [1 << 8, 3 << 8, 158 << 8, 160 << 8] {
         assert_eq!(
             exit_failure(ExitStatus::from_raw(raw)),
             (LaunchFailure::Exited, "exit-nonzero"),
+            "wait status {raw:#x}"
+        );
+    }
+    // A stub that a signal ended itself reported no exit of the payload, and 0 is no failed exit.
+    for (raw, word) in [
+        (31, "exit-signal"),
+        (9, "exit-signal"),
+        (0, "not-collected"),
+    ] {
+        assert_eq!(
+            exit_failure(ExitStatus::from_raw(raw)),
+            (LaunchFailure::Failed, word),
             "wait status {raw:#x}"
         );
     }

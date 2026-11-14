@@ -1059,13 +1059,14 @@ const VERDICT_DEADLINE: Duration = Duration::from_secs(180);
 
 /// The provider's word for the end of the scenario `case` names, and the bounds of the stderr
 /// that it hands to the worker (decision 0058 rule 18, slice R03bb). The `fail` scenario writes
-/// one known line and `flood` writes past the log bound; the others write no stderr of their own.
+/// one known line, and `flood` writes past the log bound, so its stderr reaches the worker on a
+/// refused path; the others write no stderr, and neither does the launcher.
 fn verdict_case(case: &str) -> Result<(&'static str, usize, usize), Box<dyn Error>> {
     match case {
         "fail" => Ok(("exit-nonzero", FAIL_STDERR.len(), FAIL_STDERR.len())),
-        "thread-refusal" => Ok(("filter-killed", 0, LOG_BOUND)),
-        "hang" => Ok(("deadline-exceeded", 0, LOG_BOUND)),
-        "memory" => Ok(("out-of-memory", 0, LOG_BOUND)),
+        "thread-refusal" => Ok(("filter-killed", 0, 0)),
+        "hang" => Ok(("deadline-exceeded", 0, 0)),
+        "memory" => Ok(("out-of-memory", 0, 0)),
         "flood" => Ok(("output-limit-exceeded", 1, LOG_BOUND)),
         other => Err(format!("unknown verdict case {other:?}").into()),
     }
@@ -1085,13 +1086,13 @@ fn job_a_failed_run_reports_its_own_verdict() -> TestResult {
     store.create_artifact()?;
     let job = store.enqueue_fixture(&format!("verdict-{case}"))?;
     let mut worker = Worker::spawn(&scratch, &[])?;
-    let prefix = format!("attempt of job {}: {word} stderr_bytes=", job.as_str());
+    let prefix = format!("attempt of job {}: {word} (stderr_bytes=", job.as_str());
     worker.wait_stderr(&prefix, within(VERDICT_DEADLINE))?;
     let bytes: usize = worker
         .stderr
         .lines()
         .find_map(|line| line.split_once(&prefix))
-        .map(|(_, count)| count.parse())
+        .map(|(_, count)| count.trim_end_matches(')').parse())
         .ok_or("the attempt line went missing")??;
     assert!(
         (least..=most).contains(&bytes),

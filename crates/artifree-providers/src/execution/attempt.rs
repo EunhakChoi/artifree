@@ -939,6 +939,20 @@ struct Registered {
     stderr: Vec<u8>,
 }
 
+/// The stderr that the launch hands to the worker (decision 0058 rule 18): the stub's capture once
+/// it was read to its end, and none when the payload did not start, so that the trusted entry
+/// point's own diagnostics, such as a failed `exec` of the payload, never pass for the payload's.
+#[cfg(feature = "enforcement-fixture")]
+fn handed_stderr<T>(
+    phase: &Result<T, AttemptFailure>,
+    stderr: Option<&io::Result<Vec<u8>>>,
+) -> Vec<u8> {
+    match (phase, stderr) {
+        (Err(AttemptFailure::NotStarted(_)), _) | (_, None | Some(Err(_))) => Vec::new(),
+        (_, Some(Ok(bytes))) => bytes.clone(),
+    }
+}
+
 /// The stub's arguments before the staged input's path: `stub` and the plan's profile identity,
 /// unless a test replaces them.
 fn stub_arguments(plan: &AttemptPlan) -> Vec<&'static str> {
@@ -1031,8 +1045,8 @@ fn run_registered(
     );
     let (settled, guardian_reason) = conclude(group, &group_path, &mut session);
     #[cfg(feature = "enforcement-fixture")]
-    if let Some(Ok(stderr)) = &settled.stderr {
-        registered.stderr.clone_from(stderr);
+    {
+        registered.stderr = handed_stderr(&phase, settled.stderr.as_ref());
     }
     // Removed after the group is gone, on every path that staged it.
     let removed = staged.remove();

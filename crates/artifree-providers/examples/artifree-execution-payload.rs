@@ -20,8 +20,9 @@
 //! scenario word exits with status 2. Status 4 means that a call the filter
 //! must refuse returned. The `clone3` scenario replaces the payload with the
 //! probe `ns_clone3`, so its status is the probe's. The `fail` scenario only
-//! writes one fixed line to stderr and exits with status 3, so that a job test
-//! sees a non-zero exit with a known standard error (decision 0058 rule 18).
+//! writes one fixed line to stderr and exits with status 5, a status no other
+//! scenario uses, so that a job test sees a deliberate non-zero exit with a
+//! known standard error (decision 0058 rule 18).
 //!
 //! The input and output scenarios (R02af, decision 0056 amendment of
 //! 2026-11-13) read the staged input at `/input` and write the output root
@@ -303,7 +304,7 @@ mod linux {
             "crash" => finish_status(crash()),
             "crash-setter" => finish_status(crash_setter()),
             "linger" => finish(linger()),
-            "fail" => report(&"fail scenario", 3),
+            "fail" => report(&"fail scenario", 5),
             other => report(&format!("unknown scenario {other}"), 2),
         }
     }
