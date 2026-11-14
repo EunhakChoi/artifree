@@ -68,6 +68,7 @@ use super::cgroup;
 use super::collection::{CollectedOutput, CollectionRefusal, ManifestBinding};
 use super::guardian::{self, GuardianReason};
 use super::lock::{AdmissionLock, LockRefusal};
+use super::policy::FilterSet;
 use super::probe_group::{self, ProbeGroup};
 use super::profile::{self, ExecutionProfile, FIXTURE_EXECUTION};
 use super::readiness::{self, GroupObservation};
@@ -105,8 +106,6 @@ const LISTING_BYTES: u64 = 4096;
 /// were still listed when the stub's exit was observed (main, 2026-11-12). A process that is
 /// still listed after this wait is a survivor. The wait never runs past the wall deadline.
 const TEARDOWN_GRACE: Duration = Duration::from_secs(2);
-/// The stub's arguments before the staged input's path: the fixture's `stub` mode with the fixture
-/// identity. `start_stub` appends the path as the last argument.
 /// The bytes of the fixture input's one page, `index.html`.
 #[cfg(test)]
 const FIXTURE_PAGE: &[u8] = b"<!doctype html><title>fixture</title>";
@@ -140,9 +139,11 @@ pub(super) struct AttemptPlan {
     /// The execution profile: its identity, payload, filter and manifest (decision 0058 rule 1).
     /// `FIXTURE_EXECUTION` in `fixture()`.
     pub(super) profile: &'static ExecutionProfile,
-    /// The arguments after the program's prefix, before the staged input's path. The profile's
-    /// `stub_arguments` in `fixture()`; only a test passes others.
-    pub(super) stub_arguments: &'static [&'static str],
+    /// A test-only replacement of the stub's arguments after the program's prefix, before the
+    /// staged input's path. `None` in `fixture()`, so the stub is given `stub` and the profile's
+    /// own identity, and the profile it runs is the one the plan names.
+    #[cfg(test)]
+    pub(super) stub_override: Option<&'static [&'static str]>,
     /// The wall deadline, counted from the LAUNCH record on a monotonic clock.
     pub(super) wall_deadline: Duration,
     /// The readiness deadline, counted from the LAUNCH record on a monotonic clock.
@@ -201,7 +202,8 @@ impl AttemptPlan {
         Self {
             program: launcher::EntryProgram::Fixture,
             profile: &FIXTURE_EXECUTION,
-            stub_arguments: FIXTURE_EXECUTION.stub_arguments,
+            #[cfg(test)]
+            stub_override: None,
             wall_deadline: WALL_DEADLINE,
             readiness_deadline: READINESS_DEADLINE,
             release_record: &RELEASE,
@@ -750,6 +752,10 @@ pub(super) struct Held {
     delegated: PathBuf,
     /// The supervisor's own pid namespace, read at admission.
     own_pid_namespace: PathBuf,
+    /// The digest of every profile's filter that could be built when the capacity was taken. A
+    /// launch reads its own profile's digest here and is refused when it is missing, so a filter
+    /// that cannot be built refuses only its own profiles.
+    filters: Vec<(FilterSet, String)>,
     /// The host identity that each attempt's record carries.
     pub(super) host: HostIdentity,
     /// The records that reconciliation settled and removed in this execution directory. Only the
@@ -773,7 +779,7 @@ pub(super) fn hold(execution_dir: &Path) -> Result<Held, AttemptRefusal> {
     let lock = AdmissionLock::acquire(execution_dir)
         .map_err(|refusal| without_usage(lock_failure(refusal)))?;
     let (report, delegated) = admit_checked(roots, execution_dir).map_err(without_usage)?;
-    let own_pid_namespace = policy_and_namespace(roots)?;
+    let (filters, own_pid_namespace) = policy_and_namespace(roots)?;
     let (host, reconciled) = reconcile_registry(roots, execution_dir).map_err(without_usage)?;
     // Only the worker reads what reconciliation removed.
     #[cfg(not(feature = "enforcement-fixture"))]
@@ -783,6 +789,7 @@ pub(super) fn hold(execution_dir: &Path) -> Result<Held, AttemptRefusal> {
         report,
         delegated,
         own_pid_namespace,
+        filters,
         host,
         #[cfg(feature = "enforcement-fixture")]
         reconciled,
@@ -917,15 +924,31 @@ struct Registered {
     removed: bool,
 }
 
-/// The digest of the plan's filter, which `hold` showed can be built (decision 0058 rule 3). A
-/// failure releases the registered attempt, which has no group yet, and refuses it.
+/// The stub's arguments before the staged input's path: `stub` and the plan's profile identity,
+/// unless a test replaces them.
+fn stub_arguments(plan: &AttemptPlan) -> Vec<&'static str> {
+    #[cfg(test)]
+    if let Some(arguments) = plan.stub_override {
+        return arguments.to_vec();
+    }
+    vec!["stub", plan.profile.inspection.identity()]
+}
+
+/// The digest of the plan's filter, read from what `hold` built (decision 0058 rule 3). A filter
+/// that `hold` could not build releases the registered attempt, which has no group yet, and
+/// refuses it.
 fn filter_digest(
     plan: &AttemptPlan,
     held: &Held,
     execution_dir: &Path,
     registered: &mut Registered,
 ) -> Result<String, AttemptRefusal> {
-    policy::policy_sha256(plan.profile.filter).map_err(|_| {
+    let built = held
+        .filters
+        .iter()
+        .find(|(set, _)| *set == plan.profile.filter)
+        .map(|(_, digest)| digest.clone());
+    built.ok_or_else(|| {
         release_ungrouped(registered, &held.delegated, execution_dir);
         without_usage(AttemptFailure::PolicyUnavailable)
     })
@@ -1108,13 +1131,18 @@ fn admit_checked(
         .map_err(AttemptFailure::Refused)
 }
 
-/// Checks that every profile's filter can be built and reads the supervisor's pid namespace after
-/// admission. A failure of either refuses the attempt before the registry is touched. The capacity
-/// is taken before the claim (0042 rule 5), so no profile is known yet; the launch reads its own
-/// profile's digest.
-fn policy_and_namespace(roots: &AdmissionRoots<'_>) -> Result<PathBuf, AttemptRefusal> {
-    for set in profile::filter_sets() {
-        policy::policy_sha256(set).map_err(|_| without_usage(AttemptFailure::PolicyUnavailable))?;
+/// Builds every profile's filter and reads the supervisor's pid namespace after admission. The
+/// capacity is taken before the claim (0042 rule 5), so no profile is known yet: the digests of
+/// the filters that build are kept, and the launch reads its own profile's. When no filter builds,
+/// or the namespace cannot be read, the attempt is refused before the registry is touched.
+fn policy_and_namespace(
+    roots: &AdmissionRoots<'_>,
+) -> Result<(Vec<(FilterSet, String)>, PathBuf), AttemptRefusal> {
+    let filters: Vec<(FilterSet, String)> = profile::filter_sets()
+        .filter_map(|set| policy::policy_sha256(set).ok().map(|digest| (set, digest)))
+        .collect();
+    if filters.is_empty() {
+        return Err(without_usage(AttemptFailure::PolicyUnavailable));
     }
     let own_pid_namespace =
         fs::read_link(roots.proc_self.join("ns").join("pid")).map_err(|_| {
@@ -1122,7 +1150,7 @@ fn policy_and_namespace(roots: &AdmissionRoots<'_>) -> Result<PathBuf, AttemptRe
                 AdmissionRefusal::NamespacesUnavailable,
             ))
         })?;
-    Ok(own_pid_namespace)
+    Ok((filters, own_pid_namespace))
 }
 
 /// Reconciles the registry of `execution_dir` after admission (0056, amendment of 2026-11-14) and
@@ -1385,7 +1413,7 @@ fn start_stub(
         let mut command = Command::new(roots.tool_root.join(plan.program.file()));
         command
             .args(plan.program.prefix())
-            .args(plan.stub_arguments)
+            .args(stub_arguments(plan))
             .arg(input)
             .env_clear()
             .stdin(Stdio::from(OwnedFd::from(child_end)))

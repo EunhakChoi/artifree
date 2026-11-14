@@ -1,15 +1,14 @@
 //! The execution profiles this provider knows (decision 0058 rules 1 and 3, slice R03ba).
 //!
 //! A profile fixes everything an attempt runs: its name in the store, its inspection identity and
-//! manifest, the payload inside the tool root, the payload's arguments and environment, the stub's
-//! arguments and the system call filter. Nothing a request carries selects or changes any of them
+//! manifest, the payload inside the tool root, the payload's arguments and environment, and the
+//! system call filter; the stub is given `stub` and the identity. Nothing a request carries selects or changes any of them
 //! (decision 0042 rule 2): a job names a profile, and the provider looks the name up here.
 //!
 //! The fixture is the only profile, so this table changes no behavior yet.
 
-use super::bootstrap::PAYLOAD;
 use super::policy::FilterSet;
-use super::{FIXTURE, FIXTURE_PROFILE, InspectionProfile};
+use super::{FIXTURE, InspectionProfile};
 
 /// One reviewed, fixed execution profile.
 #[derive(Debug, Eq, PartialEq)]
@@ -25,11 +24,15 @@ pub(super) struct ExecutionProfile {
     pub(super) arguments: &'static [&'static str],
     /// The payload's whole environment; nothing else is passed.
     pub(super) environment: &'static [(&'static str, &'static str)],
-    /// The stub's arguments before the input path: the mode word and the identity.
-    pub(super) stub_arguments: &'static [&'static str],
     /// The system call filter the bootstrap installs.
     pub(super) filter: FilterSet,
 }
+
+/// The name of the fixture execution profile (decision 0057 rule 2).
+const FIXTURE_PROFILE: &str = "fixture";
+
+/// The fixture's payload executable inside the tool root, as the bootstrap sees it.
+const PAYLOAD: &str = "/tools/bin/artifree-execution-payload";
 
 /// The repository's fixture: the test-support payload with no arguments and an empty
 /// environment, under the fixture's filter.
@@ -39,7 +42,6 @@ pub(super) const FIXTURE_EXECUTION: ExecutionProfile = ExecutionProfile {
     payload: PAYLOAD,
     arguments: &[],
     environment: &[],
-    stub_arguments: &["stub", FIXTURE.identity],
     filter: FilterSet::Fixture,
 };
 
@@ -59,6 +61,12 @@ pub(super) fn by_identity(identity: &str) -> Option<&'static ExecutionProfile> {
 #[cfg(any(test, feature = "enforcement-fixture"))]
 pub(super) fn filter_sets() -> impl Iterator<Item = FilterSet> {
     PROFILES.iter().map(|profile| profile.filter)
+}
+
+/// The store name of every profile, for the list a worker passes with each claim.
+#[cfg(feature = "enforcement-fixture")]
+pub(super) fn names() -> impl Iterator<Item = &'static str> {
+    PROFILES.iter().map(|profile| profile.name)
 }
 
 /// The profile whose store name is exactly `name`.

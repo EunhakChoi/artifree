@@ -44,8 +44,6 @@ pub(super) const READY: [u8; 16] = *b"ARTIFREE-READY-1";
 pub(super) const RELEASE: [u8; 1] = *b"R";
 /// The record that the bootstrap writes when the payload's `exec` returned.
 pub(super) const EXEC_FAILED: [u8; 1] = *b"X";
-/// The payload executable inside the tool root, as the bootstrap sees it.
-pub(super) const PAYLOAD: &str = "/tools/bin/artifree-execution-payload";
 
 /// The lowest descriptor number for the control channel's close-on-exec copy.
 const CONTROL_MIN_DESCRIPTOR: RawFd = 3;
@@ -142,7 +140,7 @@ impl std::error::Error for BootstrapFailure {}
 ///
 /// # Errors
 ///
-/// Returns `UnknownProfile` for an identity other than the fixture profile's, `InputPath` for an input path that is not absolute (checked before the launch record is read), `ControlChannel` when the next byte is not the launch record, and `LauncherNotExecuted` when `exec` returns.
+/// Returns `UnknownProfile` for an identity that no profile in the table has, `InputPath` for an input path that is not absolute (checked before the launch record is read), `ControlChannel` when the next byte is not the launch record, and `LauncherNotExecuted` when `exec` returns.
 pub fn run_stub(identity: &str, input: &Path) -> Result<Infallible, BootstrapFailure> {
     run_stub_for(EntryProgram::Fixture, identity, input)
 }
@@ -155,7 +153,7 @@ pub fn run_stub(identity: &str, input: &Path) -> Result<Infallible, BootstrapFai
 ///
 /// # Errors
 ///
-/// Returns `UnknownProfile` for an identity other than the fixture profile's, `InputPath` for an input path that is not absolute (checked before the launch record is read), `ControlChannel` when the next byte is not the launch record, and `LauncherNotExecuted` when `exec` returns.
+/// Returns `UnknownProfile` for an identity that no profile in the table has, `InputPath` for an input path that is not absolute (checked before the launch record is read), `ControlChannel` when the next byte is not the launch record, and `LauncherNotExecuted` when `exec` returns.
 pub fn run_stub_for(
     program: EntryProgram,
     identity: &str,

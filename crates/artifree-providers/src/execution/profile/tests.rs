@@ -27,17 +27,23 @@ fn a_near_miss_finds_no_profile() {
 }
 
 #[test]
-fn names_and_identities_are_unique_and_the_stub_names_its_own_identity() {
+fn names_and_identities_are_unique() {
     for (index, profile) in PROFILES.iter().enumerate() {
         for other in PROFILES.iter().skip(index + 1) {
             assert_ne!(profile.name, other.name);
             assert_ne!(profile.inspection.identity(), other.inspection.identity());
         }
-        assert_eq!(
-            profile.stub_arguments,
-            &["stub", profile.inspection.identity()],
-            "{}",
-            profile.name
-        );
     }
+}
+
+#[cfg(feature = "enforcement-fixture")]
+#[test]
+fn a_feature_build_offers_every_profile_in_the_table_with_its_claims() {
+    let known = super::super::known_profiles();
+    let offered: Vec<&str> = known
+        .iter()
+        .map(artifree_domain::job::ProfileName::as_str)
+        .collect();
+    let table: Vec<&str> = PROFILES.iter().map(|profile| profile.name).collect();
+    assert_eq!(offered, table);
 }

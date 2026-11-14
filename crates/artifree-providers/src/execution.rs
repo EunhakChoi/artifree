@@ -127,8 +127,6 @@ pub use worker_port::{ExecutionStartRefusal, FixtureExecution};
 const CORE_PATTERN: &str = "/proc/sys/kernel/core_pattern";
 const MAX_PATTERN_BYTES: u64 = 4096;
 const OBSERVATION_LIFETIME: Duration = Duration::from_secs(1);
-/// The name of the fixture execution profile (decision 0057 rule 2).
-const FIXTURE_PROFILE: &str = "fixture";
 
 /// Why this partial inspector refuses untrusted execution.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -276,10 +274,14 @@ impl InspectionProfile {
     /// # Errors
     /// Returns `UnknownProfile` for every mismatch, including extra bytes.
     pub fn verify_identity(identity: &str, manifest: &[u8]) -> Result<Self, AdmissionRefusal> {
-        if identity != FIXTURE.identity || manifest != FIXTURE.manifest {
-            return Err(AdmissionRefusal::UnknownProfile);
-        }
-        Ok(FIXTURE)
+        #[cfg(target_os = "linux")]
+        let known = profile::by_identity(identity)
+            .map(|profile| profile.inspection)
+            .filter(|inspection| inspection.manifest == manifest);
+        #[cfg(not(target_os = "linux"))]
+        let known =
+            (identity == FIXTURE.identity && manifest == FIXTURE.manifest).then_some(FIXTURE);
+        known.ok_or(AdmissionRefusal::UnknownProfile)
     }
 
     /// The exact non-executable inspection manifest.
@@ -429,16 +431,21 @@ pub fn inspect_host(profile: InspectionProfile) -> AdmissionOutcome {
     }
 }
 
-/// The execution profiles this build knows (decision 0057 rules 1 and 2): `fixture` in a Linux
-/// build with the `enforcement-fixture` feature, none otherwise. A worker passes them with every
-/// claim, so a `run_profile` job of any other profile ends as `execution_unavailable`.
+/// The execution profiles this build knows (decision 0057 rules 1 and 2): every profile in the
+/// table in a Linux build with the `enforcement-fixture` feature, none otherwise. A worker passes
+/// them with every claim, so a `run_profile` job of any other profile ends as
+/// `execution_unavailable`.
 #[must_use]
 pub fn known_profiles() -> Vec<ProfileName> {
-    if cfg!(all(target_os = "linux", feature = "enforcement-fixture")) {
-        // An invalid constant would leave the list empty, which fails closed.
-        let fixture: Option<ProfileName> = FIXTURE_PROFILE.parse().ok();
-        fixture.into_iter().collect()
-    } else {
+    #[cfg(all(target_os = "linux", feature = "enforcement-fixture"))]
+    {
+        // An invalid constant is left out of the list, which fails closed.
+        profile::names()
+            .filter_map(|name| name.parse().ok())
+            .collect()
+    }
+    #[cfg(not(all(target_os = "linux", feature = "enforcement-fixture")))]
+    {
         Vec::new()
     }
 }

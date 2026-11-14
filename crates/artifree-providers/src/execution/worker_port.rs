@@ -247,7 +247,6 @@ impl HeldCapacity for HeldFixture {
             lease: Duration::from_millis(run.lease_ms),
             program: EntryProgram::Server,
             profile,
-            stub_arguments: profile.stub_arguments,
             checkpoint_at_release: true,
             pause: pause.phase,
             ..AttemptPlan::fixture()
