@@ -1,8 +1,9 @@
 # 0058: React builds and their preview
 
 Date: 2026-11-14. Status: **accepted; R03a (the package rules), R03ba
-(the profile table) and R03bb (the provider's verdicts) are implemented,
-R03bca to R03f are not**. Roadmap: R03.
+(the profile table), R03bb (the provider's verdicts) and R03bca (the
+versioned, packaged and protected tool root) are implemented, R03bcb to
+R03f are not**. Roadmap: R03.
 
 > **Note, 2026-11-14 (slices).** R03b is split into R03ba, R03bb and R03bc,
 > and rule 5 moves to R03f. A release build compiles no attempt, worker port,
@@ -59,6 +60,19 @@ R03bca to R03f are not**. Roadmap: R03.
 > ancestor may be world-writable when its sticky bit is set, as `/tmp` is.
 > Rules 4, 22 and 23 are reworded to match, and 0056 gets a note on its
 > fixed path.
+
+> **Note, 2026-11-14 (R03bca).** `scripts/tools/package-root.sh SERVER`
+> assembles `/opt/artifree/tools/<version>` from the version that
+> `SERVER --version` names. It installs the pinned launcher and its licence,
+> the stripped server as the bootstrap, their libraries and licences, and
+> the manifest, and then loads the profile `artifree-launcher-<version>`.
+> It refuses a root that exists. `prepare.sh` sources it, checks that the
+> job's server names the workspace version, and adds the fixture, the
+> payload, the probes and the job's files before the manifest. The
+> provider's `TOOL_ROOT` is the same path, built from its package version.
+> Admission checks the root's ancestors after the launcher and the fixture,
+> and checks every entry during the manifest walk; a failure of either
+> refuses as `ToolRootUnprotected`.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),
