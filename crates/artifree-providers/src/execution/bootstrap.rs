@@ -216,6 +216,29 @@ pub fn run_bootstrap(identity: &str) -> Result<Infallible, BootstrapFailure> {
     Err(BootstrapFailure::PayloadNotExecuted)
 }
 
+/// The calls a bundler measurement has already seen (decision 0058, note "R03bcb split"),
+/// read from the tool root's `etc/measured-calls`: one decimal system-call number per line, in
+/// increasing order. A missing file is an empty list. Only the measuring filter reads it; any
+/// other profile gets an empty list.
+///
+/// # Errors
+/// Returns `BootstrapFailure::Filter` when the file cannot be read or is malformed.
+#[cfg(any(test, feature = "enforcement-fixture"))]
+fn measured_calls(profile: &ExecutionProfile) -> Result<Vec<i64>, BootstrapFailure> {
+    if profile.filter != policy::FilterSet::Measure {
+        return Ok(Vec::new());
+    }
+    match std::fs::read(Path::new(SANDBOX_TOOLS).join(policy::MEASURED_CALLS_FILE)) {
+        Ok(bytes) => policy::parse_measured_calls(&bytes).ok_or(BootstrapFailure::Filter),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(_) => Err(BootstrapFailure::Filter),
+    }
+}
+
+/// The tool root inside the sandbox.
+#[cfg(any(test, feature = "enforcement-fixture"))]
+const SANDBOX_TOOLS: &str = "/tools";
+
 /// The profile whose identity is exactly `identity`; any other identity is refused.
 fn check_identity(identity: &str) -> Result<&'static ExecutionProfile, BootstrapFailure> {
     profile::by_identity(identity).ok_or(BootstrapFailure::UnknownProfile)
@@ -415,7 +438,12 @@ fn confirm_privileges() -> Result<(), BootstrapFailure> {
 ///
 /// The clone3 refusal is installed first and the allowlist LAST. Each `apply_filter` call needs `prctl` and `seccomp`, which the allowlist does not admit, so an allowlist installed earlier would kill the process (MEASURED (f)). `confirm_setup` then requires two filters.
 fn install_filter(profile: &ExecutionProfile) -> Result<(), BootstrapFailure> {
-    let programs = policy::filters(profile.filter).map_err(|_| BootstrapFailure::Filter)?;
+    #[cfg(any(test, feature = "enforcement-fixture"))]
+    let measured = measured_calls(profile)?;
+    #[cfg(not(any(test, feature = "enforcement-fixture")))]
+    let measured: Vec<i64> = Vec::new();
+    let programs =
+        policy::filters_with(profile.filter, &measured).map_err(|_| BootstrapFailure::Filter)?;
     for program in &programs {
         seccompiler::apply_filter(program).map_err(|_| BootstrapFailure::Filter)?;
     }

@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 # The operator's packaging script for an execution tool root (decision 0058 rule 19).
 #
-# Usage: package-root.sh SERVER
+# Usage: package-root.sh SERVER [LOCK]
 #
 # Run as root, once for each server release, on the supported host. It assembles
 # /opt/artifree/tools/<version>, where <version> is the package version that `SERVER --version`
 # names, and loads the AppArmor launcher profile of that root. The root holds the pinned
-# launcher and its licence, SERVER as the bootstrap with its libraries and their licences, and
-# the manifest of every file, all owned by root without group or other write
+# launcher and its licence, SERVER as the bootstrap with its libraries and their licences, the
+# bundler and the packages of the lock list LOCK (by default react-v1.lock beside this script)
+# with their licences, and the manifest of every file, all owned by root without group or other write
 # bits, as the provider requires. The script refuses a root that exists: a root is never
 # replaced in place (decision 0042 rule 3). A failed run removes the root it made, so it can be
-# run again. Nothing is downloaded but the pinned launcher package, and it refuses to downgrade
-# a newer Bubblewrap that the host already has.
+# run again. Nothing is downloaded but the pinned launcher package and the archives of the lock
+# list. Every archive is downloaded and checked against its SHA-256 before the root is made, so a
+# wrong archive leaves no root behind. The script refuses to downgrade a newer Bubblewrap that
+# the host already has.
 #
 # scripts/enforcement/prepare.sh sources this file, so the enforcement job builds its root with
 # the same functions. The job adds its test programs before the manifest, and its verbs that
@@ -23,6 +26,8 @@ readonly TOOLS_DIR=/opt/artifree/tools
 # The one Bubblewrap revision the launcher is copied from.
 readonly BUBBLEWRAP_VERSION=0.9.0-1ubuntu0.3
 readonly APPARMOR_DIR=/etc/apparmor.d
+# The lock list beside this script.
+readonly DEFAULT_LOCK="$(dirname -- "${BASH_SOURCE[0]}")/react-v1.lock"
 
 package_fail() {
   printf 'error: %s\n' "$*" >&2
@@ -193,6 +198,104 @@ write_manifest() {
   rm -- "$manifest"
 }
 
+# Prints the archive lines of LOCK, without comments and blank lines, after checking each:
+# KIND NAME VERSION SHA-256 URL LICENCE, with a known kind, a lowercase package name, a package
+# version, a lowercase SHA-256 and an https URL of the npm registry.
+lock_entries() {
+  local lock=$1 kind name version digest url licence extra
+  [[ -f "$lock" ]] || package_fail "the lock list is not a file: $lock"
+  while read -r kind name version digest url licence extra; do
+    [[ -n "$kind" && "$kind" != \#* ]] || continue
+    [[ "$kind" =~ ^(bundler|licence|package)$ ]] || package_fail "unknown kind in the lock list: $kind"
+    [[ "$name" =~ ^[a-z0-9][a-z0-9.-]*$ ]] || package_fail "bad name in the lock list: $name"
+    is_version "$version" || package_fail "bad version of $name in the lock list: $version"
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || package_fail "bad SHA-256 of $name in the lock list"
+    [[ "$url" =~ ^https://registry\.npmjs\.org/[^[:space:]]+\.tgz$ ]] \
+      || package_fail "bad URL of $name in the lock list: $url"
+    [[ -n "$licence" && -z "$extra" ]] || package_fail "bad licence field of $name in the lock list"
+    printf '%s %s %s %s %s %s\n' "$kind" "$name" "$version" "$digest" "$url" "$licence"
+  done < "$lock"
+}
+
+# Downloads every archive of LOCK into DIR as NAME.tgz and checks its SHA-256. A mismatch fails
+# before any archive is unpacked, and before the root exists.
+fetch_locked() {
+  local lock=$1 dir=$2 kind name version digest url licence actual entries
+  # Read whole first: a failure of lock_entries ends the script here, not as an early end of list.
+  entries="$(lock_entries "$lock")"
+  [[ -n "$entries" ]] || package_fail "the lock list names no archive: $lock"
+  while read -r kind name version digest url licence; do
+    curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+      --output "$dir/$name.tgz" -- "$url" || package_fail "the download of $name $version failed"
+    actual="$(sha256sum -- "$dir/$name.tgz")"
+    actual="${actual%% *}"
+    [[ "$actual" == "$digest" ]] \
+      || package_fail "the SHA-256 of $name $version is $actual, the lock list names $digest"
+  done <<< "$entries"
+}
+
+# Unpacks ARCHIVE into the new directory DEST after checking that it holds only directories and
+# regular files under package/, with no absolute or parent path. Owners and modes in the archive
+# are ignored.
+unpack_archive() {
+  local archive=$1 dest=$2 listing
+  listing="$(tar --list --verbose --gzip --file "$archive")" || package_fail "cannot read $archive"
+  while IFS= read -r line; do
+    case "$line" in
+      d* | -*) ;;
+      *) package_fail "$archive holds an entry that is neither a directory nor a regular file" ;;
+    esac
+  done <<< "$listing"
+  while IFS= read -r path; do
+    case "$path" in
+      package/* | package) ;;
+      *) package_fail "$archive holds a path outside package/: $path" ;;
+    esac
+    case "/$path/" in
+      */../* | */./*) package_fail "$archive holds a path with a dot segment: $path" ;;
+    esac
+  done < <(tar --list --gzip --file "$archive")
+  mkdir -m 0700 -- "$dest"
+  tar --extract --gzip --no-same-owner --no-same-permissions --file "$archive" --directory "$dest"
+}
+
+# Installs every regular file under SOURCE into TARGET with MODE, root-owned, keeping its path.
+install_tree() {
+  local source=$1 target=$2 mode=$3 path
+  while IFS= read -r -d '' path; do
+    install -D -o root -g root -m "$mode" -- "$source/$path" "$target/$path"
+  done < <(cd -- "$source" && find . -type f -printf '%P\0')
+  find "$target" -type d -exec chmod 0755 {} +
+}
+
+# Installs the archives that fetch_locked put in DIR into ROOT, as the lock list's kinds say.
+install_locked() {
+  local lock=$1 dir=$2 kind name version digest url licence unpacked entries
+  entries="$(lock_entries "$lock")"
+  while read -r kind name version digest url licence; do
+    unpacked="$dir/$name"
+    unpack_archive "$dir/$name.tgz" "$unpacked"
+    case "$kind" in
+      bundler)
+        [[ -f "$unpacked/package/bin/esbuild" ]] || package_fail "$name has no package/bin/esbuild"
+        install -o root -g root -m 0755 -- "$unpacked/package/bin/esbuild" "$ROOT/bin/esbuild"
+        ;;
+      licence)
+        [[ -f "$unpacked/package/LICENSE.md" ]] || package_fail "$name has no package/LICENSE.md"
+        install -o root -g root -m 0644 -- "$unpacked/package/LICENSE.md" \
+          "$ROOT/licenses/$name.LICENSE.md"
+        ;;
+      package)
+        [[ -f "$unpacked/package/LICENSE" ]] || package_fail "$name has no package/LICENSE"
+        install -d -o root -g root -m 0755 "$ROOT/modules"
+        install_tree "$unpacked/package" "$ROOT/modules/$name" 0644
+        install -o root -g root -m 0644 -- "$unpacked/package/LICENSE" "$ROOT/licenses/$name.LICENSE"
+        ;;
+    esac
+  done <<< "$entries"
+  [[ -f "$ROOT/bin/esbuild" ]] || package_fail "the lock list installed no bundler"
+}
+
 # The profile file of VERSION's launcher.
 launcher_profile_file() {
   printf '%s/%s\n' "$APPARMOR_DIR" "$(launcher_profile_name "$1")"
@@ -230,23 +333,33 @@ abandon_root() {
 }
 
 package_main() {
-  (($# == 1)) || {
-    printf 'usage: package-root.sh SERVER\n' >&2
+  (($# == 1 || $# == 2)) || {
+    printf 'usage: package-root.sh SERVER [LOCK]\n' >&2
     exit 2
   }
   ((EUID == 0)) || package_fail "run as root"
-  local server=$1 version
+  local server=$1 lock=${2:-$DEFAULT_LOCK} version
   version="$(server_version "$server")"
   ROOT="$(root_of_version "$version")"
   readonly ROOT
+  # A cheap early refusal, so that a second run downloads nothing; begin_root's mkdir is the
+  # check that holds.
+  [[ ! -e "$ROOT" && ! -L "$ROOT" ]] || package_fail "refusing to write over the existing root $ROOT"
+  ARCHIVES="$(mktemp -d)"
+  readonly ARCHIVES
+  # shellcheck disable=SC2064 # The directory is fixed now, so it is expanded now.
+  trap "rm -rf -- '$ARCHIVES'" EXIT
+  fetch_locked "$lock" "$ARCHIVES"
   begin_root
   # shellcheck disable=SC2064 # The version is fixed now, so it is expanded now.
-  trap "abandon_root '$version'" EXIT
+  trap "abandon_root '$version'; rm -rf -- '$ARCHIVES'" EXIT
   install_launcher
   install_server "$server"
+  install_locked "$lock" "$ARCHIVES"
   write_manifest
   load_launcher_profile "$version"
   trap - EXIT
+  rm -rf -- "$ARCHIVES"
   printf '%s\n' "$ROOT"
 }
 

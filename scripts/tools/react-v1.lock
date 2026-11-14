@@ -1,0 +1,15 @@
+# The lock list of the react-v1 tool root (decision 0058 rule 19). One archive per line:
+# KIND NAME VERSION SHA-256 URL LICENCE
+#   bundler  the archive's package/bin/esbuild becomes bin/esbuild
+#   licence  the archive's package/LICENSE.md becomes licenses/NAME.LICENSE.md; the bundler's
+#            platform archive carries no licence file, so the licence comes from the bundler's
+#            main archive of the same version
+#   package  the archive's package/ becomes modules/NAME, and its package/LICENSE becomes
+#            licenses/NAME.LICENSE
+# Each archive is downloaded once per root and checked against its SHA-256 before anything is
+# written to the root.
+bundler esbuild-linux-x64 0.28.2 9573bb2233aab0f9ea7647d5cca9726113cc1768de61d66b17267f4db84488f6 https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.28.2.tgz MIT
+licence esbuild 0.28.2 e045f94c235c7adc50e77ba2a579c7bec41b496b6b47c3a7845f7c1e19959a88 https://registry.npmjs.org/esbuild/-/esbuild-0.28.2.tgz MIT
+package react 19.3.1 56936913918dcf1f7a6fe58784e79df54b18200a88655ce809cf5e9c4ef871aa https://registry.npmjs.org/react/-/react-19.3.1.tgz MIT
+package react-dom 19.3.1 8b49975821eec6311e00d2b3f4b8337923253c876517388a33f9839c61ab262e https://registry.npmjs.org/react-dom/-/react-dom-19.3.1.tgz MIT
+package scheduler 0.28.0 302995d590e3c0a11eeb40d1d0f299c1df1800135d599d85cdd5faeb614f32d6 https://registry.npmjs.org/scheduler/-/scheduler-0.28.0.tgz MIT

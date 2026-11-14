@@ -48,19 +48,70 @@ pub(super) const FIXTURE_EXECUTION: ExecutionProfile = ExecutionProfile {
 /// Every profile, in no particular order. Names and identities are unique.
 const PROFILES: &[ExecutionProfile] = &[FIXTURE_EXECUTION];
 
-/// The profile whose inspection identity is exactly `identity`.
+/// The bundler measurement (decision 0058, note "R03bcb split"): the root's bundler with the
+/// argv and environment of rule 1, under the measuring filter. It is no profile: it has no store
+/// name, so no job can name it, and only the enforcement job's attempt tests launch it. Only the
+/// test build and the `enforcement-fixture` build know it.
+#[cfg(any(test, feature = "enforcement-fixture"))]
+pub(super) const MEASUREMENT: ExecutionProfile = ExecutionProfile {
+    name: "",
+    inspection: InspectionProfile {
+        identity: "artifree-bundler-measurement-v1",
+        manifest: b"payload=esbuild\nfilter=measure\nenforcement=incomplete\n",
+    },
+    payload: "/tools/bin/esbuild",
+    arguments: BUNDLER_ARGUMENTS,
+    environment: BUNDLER_ENVIRONMENT,
+    filter: FilterSet::Measure,
+};
+
+/// The bundler's arguments after its path (decision 0058 rule 1): bundle the entry module into
+/// `/tmp/out` as `app.js` and, when the source imports CSS, `app.css`; ES modules for the
+/// browser, the automatic JSX runtime, minified, without colour and with at most 20 messages.
+/// No source map or metafile is asked for, and esbuild writes neither unless asked (its
+/// `--sourcemap` takes no `false` value).
+#[cfg(any(test, feature = "enforcement-fixture"))]
+const BUNDLER_ARGUMENTS: &[&str] = &[
+    "/input/src/main.tsx",
+    "--bundle",
+    "--outdir=/tmp/out",
+    "--entry-names=app",
+    "--format=esm",
+    "--platform=browser",
+    "--jsx=automatic",
+    "--minify",
+    "--color=false",
+    "--log-limit=20",
+];
+
+/// The bundler's whole environment (decision 0058 rule 1): the module directory of the root's
+/// preinstalled packages, and one processor for the Go runtime, so that it stays within one CPU
+/// and 64 tasks.
+#[cfg(any(test, feature = "enforcement-fixture"))]
+const BUNDLER_ENVIRONMENT: &[(&str, &str)] =
+    &[("NODE_PATH", "/tools/modules"), ("GOMAXPROCS", "1")];
+
+/// The profile whose inspection identity is exactly `identity`, or the bundler measurement in
+/// the builds that know it.
 #[must_use]
 pub(super) fn by_identity(identity: &str) -> Option<&'static ExecutionProfile> {
-    PROFILES
+    let found = PROFILES
         .iter()
-        .find(|profile| profile.inspection.identity() == identity)
+        .find(|profile| profile.inspection.identity() == identity);
+    #[cfg(any(test, feature = "enforcement-fixture"))]
+    let found =
+        found.or_else(|| (MEASUREMENT.inspection.identity() == identity).then_some(&MEASUREMENT));
+    found
 }
 
-/// The filter of every profile, so that a capacity taken before any claim can show that each
-/// one builds (decision 0042 rule 5).
+/// The filter of every profile and of the bundler measurement, so that a capacity taken before
+/// any claim can show that each one builds (decision 0042 rule 5).
 #[cfg(any(test, feature = "enforcement-fixture"))]
 pub(super) fn filter_sets() -> impl Iterator<Item = FilterSet> {
-    PROFILES.iter().map(|profile| profile.filter)
+    PROFILES
+        .iter()
+        .map(|profile| profile.filter)
+        .chain([MEASUREMENT.filter])
 }
 
 /// The store name of every profile, for the list a worker passes with each claim.
