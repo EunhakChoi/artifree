@@ -6,6 +6,11 @@ async runtime, and local storage choices of [0001](0001-foundation.md).
 Update: [0019](0019-runtime-metadata-bridge.md) adds an opt-in metadata
 bridge. The original preview and its isolation limits remain as described.
 
+Update, 2026-11-14: [0058](0058-react-builds-and-preview.md) rule 6 (R03a)
+adds a media type for TypeScript and JSX source (`.ts`, `.tsx`, `.jsx`),
+served as plain text and never as script. The other package rules are
+unchanged.
+
 ## Context
 
 The first vertical slice connects an agent-facing API, durable storage, a web

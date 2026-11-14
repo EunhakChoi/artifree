@@ -1,7 +1,7 @@
 # 0058: React builds and their preview
 
-Date: 2026-11-14. Status: **proposed; nothing of it is implemented**.
-Roadmap: R03.
+Date: 2026-11-14. Status: **accepted; R03a (the package rules) is
+implemented, R03b to R03f are not**. Roadmap: R03.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),
@@ -9,6 +9,19 @@ Roadmap: R03.
 > its worker), [0030](0030-persistent-jobs-and-worker.md) (jobs),
 > [0003](0003-local-html-artifact-slice.md) (packages and the preview origin) and
 > [0029](0029-retention-and-cleanup.md) (content references and purge).
+
+> **Note, 2026-11-14 (R03a).** Rule 6 is implemented as a 21st media type,
+> `Source`, for `.ts`, `.tsx` and `.jsx` in any case. Its `Content-Type` is
+> `text/plain; charset=utf-8`, sent with `nosniff`, so the preview origin
+> never serves source as script; the type keeps source apart from `.txt`
+> for the later slices. `.cjs` stays refused. The runtime SDK's list, the
+> shared path fixtures and the published `package_rules` follow, and the
+> contract is 0.28.0. Two consequences of sharing the path rules: the
+> provider's output collection now also accepts these extensions, which R03c's
+> composition (rule 8) narrows to `app.js` and `app.css`; and, as with the path
+> expansion of 0046, the schema stays at 14, so a previous release started on
+> a directory that holds such a file reports that artifact as corrupt. Going
+> back needs a backup taken before the upgrade (0027).
 
 ## Context
 
@@ -48,7 +61,7 @@ The earlier records leave these parts to R03:
 - **0042 section 8:** R03's presentation changes need Chromium and Firefox
   smoke checks.
 
-Packages today follow 0003: at most 256 files of 5 MiB and 25 MiB in
+Before R03a, packages followed 0003: at most 256 files of 5 MiB and 25 MiB in
 total, an `index.html`, and a closed list of 20 media types that has no
 `.ts`, `.tsx`, `.jsx` or `.cjs`. The same rules are mirrored in the runtime
 SDK and the shared path fixtures, and published as `package_rules`. A

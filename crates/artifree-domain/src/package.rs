@@ -113,11 +113,14 @@ pub enum MediaType {
     Wasm,
     /// XML documents.
     Xml,
+    /// TypeScript and JSX source, served as plain text and never as script
+    /// (decision 0058 rule 6).
+    Source,
 }
 
 impl MediaType {
     /// Every media type a package accepts, so clients can list them.
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::Html,
         Self::Css,
         Self::JavaScript,
@@ -138,6 +141,7 @@ impl MediaType {
         Self::Otf,
         Self::Wasm,
         Self::Xml,
+        Self::Source,
     ];
 
     /// The lowercase file extensions that give a path this type. Case is
@@ -165,6 +169,7 @@ impl MediaType {
             Self::Otf => &["otf"],
             Self::Wasm => &["wasm"],
             Self::Xml => &["xml"],
+            Self::Source => &["ts", "tsx", "jsx"],
         }
     }
 
@@ -192,7 +197,7 @@ impl MediaType {
             Self::Webp => "image/webp",
             Self::Avif => "image/avif",
             Self::Icon => "image/x-icon",
-            Self::Text => "text/plain; charset=utf-8",
+            Self::Text | Self::Source => "text/plain; charset=utf-8",
             Self::Markdown => "text/markdown; charset=utf-8",
             Self::Csv => "text/csv; charset=utf-8",
             Self::Woff => "font/woff",
@@ -589,6 +594,22 @@ mod tests {
         assert_eq!(
             path("app.mjs").media_type().essence(),
             "text/javascript; charset=utf-8"
+        );
+    }
+
+    #[test]
+    fn source_files_are_plain_text_never_script() {
+        for value in ["src/main.tsx", "src/util.ts", "src/App.JSX"] {
+            assert_eq!(path(value).media_type(), MediaType::Source, "{value}");
+            assert_eq!(
+                path(value).media_type().essence(),
+                "text/plain; charset=utf-8",
+                "{value}"
+            );
+        }
+        assert_eq!(
+            "src/legacy.cjs".parse::<PackagePath>(),
+            Err(PathError::Extension)
         );
     }
 

@@ -34,6 +34,22 @@
       "error": null
     },
     {
+      "path": "src/main.tsx",
+      "error": null
+    },
+    {
+      "path": "src/util.TS",
+      "error": null
+    },
+    {
+      "path": "src/App.jsx",
+      "error": null
+    },
+    {
+      "path": "src/legacy.cjs",
+      "error": "Extension"
+    },
+    {
       "path": "",
       "error": "Length"
     },
@@ -131,7 +147,7 @@
     },
     {
       "path": "script.ts",
-      "error": "Extension"
+      "error": null
     },
     {
       "path": "archive.tar.gz",
