@@ -1,7 +1,8 @@
 # 0058: React builds and their preview
 
-Date: 2026-11-14. Status: **accepted; R03a (the package rules) and R03ba
-(the profile table) are implemented, R03bb to R03f are not**. Roadmap: R03.
+Date: 2026-11-14. Status: **accepted; R03a (the package rules), R03ba
+(the profile table) and R03bb (the provider's verdicts) are implemented,
+R03bc to R03f are not**. Roadmap: R03.
 
 > **Note, 2026-11-14 (slices).** R03b is split into R03ba, R03bb and R03bc,
 > and rule 5 moves to R03f. A release build compiles no attempt, worker port,
@@ -12,14 +13,26 @@ Date: 2026-11-14. Status: **accepted; R03a (the package rules) and R03ba
 
 > **Note, 2026-11-14 (R03ba).** The provider holds one table of execution
 > profiles. Each entry fixes its store name, its inspection identity and
-> manifest, its payload, the payload's arguments and whole environment, the
-> stub's arguments and its filter. The bootstrap, the launcher's argument
+> manifest, its payload, the payload's arguments and whole environment, and
+> its filter; the stub is given `stub` and the identity. The bootstrap, the launcher's argument
 > list, the attempt plan, the output binding and the worker's adapter look a
 > profile up by its exact identity or name instead of naming the fixture.
 > Capacity is taken before the claim (0042 rule 5), so no profile is known
-> when it is taken: `hold` shows that every profile's filter builds, and the
-> launch reads its own profile's filter digest. The fixture is the only
-> entry, and the host inspection keeps the fixture's inspection profile.
+> when it is taken: `hold` keeps the digest of each filter that builds, and
+> a launch whose filter did not build is refused alone. The fixture is the
+> only entry, and the host inspection keeps the fixture's inspection profile.
+
+> **Note, 2026-11-14 (R03bb).** The execution port tells a failed run apart:
+> `Exited` for a non-zero exit, `FilterKilled` for the filter's kill,
+> `Limit` with the wall time, the memory or the log bound, and `Failed` for
+> any other failed verdict or refused output. The launcher reports a payload
+> that a signal ended as 128 plus the signal, so an exit status of 159 reads
+> as the filter's `SIGSYS`; a payload that exits with 159 by itself reads the
+> same way, and since both are `build_failed`, only the fixed diagnostic
+> differs. The launch hands the payload's stderr to the worker on every path
+> that ran the stub, within the 1 MiB bound it shares with stdout. The worker
+> prints only its length beside the provider's word, and still fails each such
+> job as `internal` until R03c.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),

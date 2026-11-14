@@ -26,6 +26,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
 use std::time::Duration;
 
 use artifree_domain::job::{AttemptIdentity, AttemptState, CheckpointAnswer, StopReason};
@@ -33,7 +34,7 @@ use artifree_domain::package::{FilePackage, PackagePath};
 use artifree_ports::artifact_store::FileEntry;
 use artifree_ports::execution::{
     BoundRun, Capacity, Checkpoint, CheckpointUnavailable, Execution, ExecutionHost, HeldCapacity,
-    LaunchFailure, LaunchOutcome, PinnedInput, ProfileOutput, ProfileRun,
+    LaunchFailure, LaunchOutcome, LimitKind, PinnedInput, ProfileOutput, ProfileRun,
 };
 use artifree_ports::job_store::{AttemptRow, ProfileCounts};
 
@@ -295,6 +296,7 @@ fn not_launched(detail: &'static str) -> LaunchOutcome {
         cleanup_observed: true,
         result: Err(LaunchFailure::Unavailable),
         detail,
+        stderr: Vec::new(),
     }
 }
 
@@ -506,8 +508,27 @@ fn evidence_outcome(
             ),
             None => (Err(LaunchFailure::Failed), "unbound"),
         },
-        Err(OutputRefusal::NotCollected) => (Err(LaunchFailure::Failed), "exit-nonzero"),
+        Err(OutputRefusal::NotCollected) => {
+            let (failure, word) = exit_failure(evidence.exit);
+            (Err(failure), word)
+        }
         Err(OutputRefusal::Refused(_)) => (Err(LaunchFailure::Failed), "output-refused"),
+    }
+}
+
+/// The exit status that the launcher reports for a payload that the filter's `SIGSYS` (31) ended:
+/// 128 plus the signal.
+const KILLED_BY_SIGSYS: i32 = 128 + 31;
+
+/// The failure of a run whose exit status was not 0, with its fixed word (decision 0058 rule 18).
+/// The launcher reports a payload that a signal ended as 128 plus the signal, so 159 is the
+/// filter's kill. A payload that exits with 159 by itself reads the same way: both are a failed
+/// build, and only the fixed diagnostic differs.
+fn exit_failure(exit: ExitStatus) -> (LaunchFailure, &'static str) {
+    if exit.code() == Some(KILLED_BY_SIGSYS) {
+        (LaunchFailure::FilterKilled, "filter-killed")
+    } else {
+        (LaunchFailure::Exited, "exit-nonzero")
     }
 }
 
@@ -522,12 +543,13 @@ fn outcome(launched: &Launched, run: &ProfileRun<'_>, tool_digest: &str) -> Laun
         cleanup_observed: launched.record_removed,
         result,
         detail,
+        stderr: launched.stderr.clone(),
     }
 }
 
 /// The kind of a launch that produced no output (decision 0057 rules 7 and 15). A refusal before
-/// the payload is `Unavailable`, a payload whose verdict failed is `Failed`, and a stop is
-/// `Stopped`.
+/// the payload is `Unavailable`, a limit of decision 0042 rule 5 that ended the attempt is its
+/// `Limit` (decision 0058 rule 18), any other failed verdict is `Failed`, and a stop is `Stopped`.
 fn refusal_kind(failure: AttemptFailure) -> LaunchFailure {
     match failure {
         AttemptFailure::LeaseLost(part) => LaunchFailure::Stopped(stop_reason_of(part)),
@@ -539,11 +561,11 @@ fn refusal_kind(failure: AttemptFailure) -> LaunchFailure {
         | AttemptFailure::PolicyUnavailable
         | AttemptFailure::NotStarted(_)
         | AttemptFailure::Input(_) => LaunchFailure::Unavailable,
+        AttemptFailure::DeadlineExceeded => LaunchFailure::Limit(LimitKind::WallTime),
+        AttemptFailure::OutOfMemory => LaunchFailure::Limit(LimitKind::Memory),
+        AttemptFailure::OutputLimitExceeded => LaunchFailure::Limit(LimitKind::Log),
         AttemptFailure::Unobserved
-        | AttemptFailure::DeadlineExceeded
-        | AttemptFailure::OutOfMemory
         | AttemptFailure::Survivors
-        | AttemptFailure::OutputLimitExceeded
         | AttemptFailure::CleanupNotObserved
         | AttemptFailure::Routing(_)
         | AttemptFailure::Guardian(_) => LaunchFailure::Failed,

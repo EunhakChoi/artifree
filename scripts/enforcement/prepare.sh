@@ -71,7 +71,7 @@ usage: prepare.sh VERB [ARGUMENT]
                       copy input-write out-socket out-many out-big-file out-big-total
                       out-bomb out-deep out-invalid-name out-collision out-extension
                       out-no-entry out-fail out-plain
-                      crash crash-setter linger)
+                      crash crash-setter linger fail)
   kernel-log          print the last 20 kernel log lines about seccomp (type=1326) or oom
   kernel-log-access   let the runner read the kernel log and lift its rate limit; refuse while an audit daemon runs
   supervisor-clear UNIT  remove the empty attempt groups directly beneath the supervisor test unit UNIT
@@ -456,7 +456,7 @@ is_scenario() {
       lower | descriptors | watch | network | host | proc-dev | environment | marker) return 0 ;;
     copy | input-write | out-socket | out-many | out-big-file | out-big-total | out-bomb | out-deep | \
       out-invalid-name | out-collision | out-extension | out-no-entry | out-fail | out-plain) return 0 ;;
-    crash | crash-setter | linger) return 0 ;;
+    crash | crash-setter | linger | fail) return 0 ;;
     *) return 1 ;;
   esac
 }

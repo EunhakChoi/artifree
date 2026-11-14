@@ -1048,6 +1048,69 @@ fn job_a_busy_lock_spends_no_attempt() -> TestResult {
     Ok(())
 }
 
+/// The environment variable that names the payload scenario of one verdict case.
+const VERDICT_CASE: &str = "ARTIFREE_VERDICT_CASE";
+/// The one line that the `fail` scenario writes to stderr before it exits with status 3.
+const FAIL_STDERR: &str = "artifree-execution-payload: fail scenario\n";
+/// The bound that the payload's stdout and stderr share (decision 0042 rule 5).
+const LOG_BOUND: usize = 1_048_576;
+/// How long a verdict case may take to end: past the provider's 120-second wall time.
+const VERDICT_DEADLINE: Duration = Duration::from_secs(180);
+
+/// The provider's word for the end of the scenario `case` names, and the bounds of the stderr
+/// that it hands to the worker (decision 0058 rule 18, slice R03bb). The `fail` scenario writes
+/// one known line and `flood` writes past the log bound; the others write no stderr of their own.
+fn verdict_case(case: &str) -> Result<(&'static str, usize, usize), Box<dyn Error>> {
+    match case {
+        "fail" => Ok(("exit-nonzero", FAIL_STDERR.len(), FAIL_STDERR.len())),
+        "thread-refusal" => Ok(("filter-killed", 0, LOG_BOUND)),
+        "hang" => Ok(("deadline-exceeded", 0, LOG_BOUND)),
+        "memory" => Ok(("out-of-memory", 0, LOG_BOUND)),
+        "flood" => Ok(("output-limit-exceeded", 1, LOG_BOUND)),
+        other => Err(format!("unknown verdict case {other:?}").into()),
+    }
+}
+
+/// A run that fails ends with its own verdict, and the provider hands the payload's stderr to the
+/// worker within the log bound: a non-zero exit, a filter kill, the wall time, the memory and the
+/// log bound each have their own word on the worker's stderr (decision 0058 rule 18, slice
+/// R03bb). The worker still fails each job as `internal` until R03c.
+#[test]
+#[ignore = "runs only in the Linux enforcement job"]
+fn job_a_failed_run_reports_its_own_verdict() -> TestResult {
+    let case = std::env::var(VERDICT_CASE)?;
+    let (word, least, most) = verdict_case(&case)?;
+    let scratch = Scratch::new(&format!("verdict-{case}"))?;
+    let store = Store::new(&scratch.data())?;
+    store.create_artifact()?;
+    let job = store.enqueue_fixture(&format!("verdict-{case}"))?;
+    let mut worker = Worker::spawn(&scratch, &[])?;
+    let prefix = format!("attempt of job {}: {word} stderr_bytes=", job.as_str());
+    worker.wait_stderr(&prefix, within(VERDICT_DEADLINE))?;
+    let bytes: usize = worker
+        .stderr
+        .lines()
+        .find_map(|line| line.split_once(&prefix))
+        .map(|(_, count)| count.parse())
+        .ok_or("the attempt line went missing")??;
+    assert!(
+        (least..=most).contains(&bytes),
+        "the {case} run must hand over {least} to {most} bytes of stderr, got {bytes}"
+    );
+    store.wait_for_state(&job, JobState::Failed)?;
+    assert_eq!(
+        store.job_row(&job)?.failure.as_deref(),
+        Some(JobFailure::Internal.as_str()),
+        "until R03c a failed {case} run fails its job as internal"
+    );
+    assert_eq!(
+        store.attempt_of(&job)?.state,
+        AttemptState::Settled,
+        "the {case} run's attempt must be settled"
+    );
+    Ok(())
+}
+
 // --- the recovery matrix of R02bc (decision 0057 rule 20) -------------------------
 
 #[path = "execution_jobs/recovery_disable.rs"]

@@ -93,6 +93,9 @@ pub enum WorkerEvent<'a> {
         job: &'a artifree_domain::job::JobId,
         /// The provider's short word for the end, such as `succeeded`.
         detail: &'static str,
+        /// The length of the payload's standard error that the provider
+        /// handed over; its content is never printed.
+        stderr_bytes: usize,
     },
     /// The execution port refused capacity (decision 0057 rule 19), with the
     /// provider's word or operator text. Diagnostics only, like `Attempt`; it
@@ -170,8 +173,16 @@ pub fn run(
         let mut observed = |event: ClaimEvent<'_>| match event {
             ClaimEvent::Settled(record) => on_event(&WorkerEvent::Job(record)),
             ClaimEvent::Claimed(job) => on_event(&WorkerEvent::Claimed(job)),
-            ClaimEvent::Launched { job, detail } => {
-                on_event(&WorkerEvent::Attempt { job, detail });
+            ClaimEvent::Launched {
+                job,
+                detail,
+                stderr_bytes,
+            } => {
+                on_event(&WorkerEvent::Attempt {
+                    job,
+                    detail,
+                    stderr_bytes,
+                });
             }
             ClaimEvent::Refused(detail) => {
                 if last_refusal != Some(detail) {

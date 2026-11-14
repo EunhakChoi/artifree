@@ -25,7 +25,7 @@ use artifree_domain::package::{FileChange, FilePackage, PackagePath};
 use artifree_ports::artifact_store::{ArtifactStore, FileEntry};
 use artifree_ports::execution::{
     BoundRun, Capacity, Checkpoint, CheckpointUnavailable, Execution, ExecutionHost, HeldCapacity,
-    LaunchFailure, LaunchOutcome, PinnedInput, ProfileOutput, ProfileRun,
+    LaunchFailure, LaunchOutcome, LimitKind, PinnedInput, ProfileOutput, ProfileRun,
 };
 use artifree_ports::job_store::{
     AttemptRow, ExecutionClaim, JobClaim, JobRecord, JobStore, JobStoreError, ProfileCounts,
@@ -305,8 +305,8 @@ enum Launch {
     NamesAnotherRun,
     /// Cleanup observed; the payload never started.
     Unavailable,
-    /// Cleanup observed; the payload ran and failed.
-    Fails,
+    /// Cleanup observed; the payload ran and failed with this failure.
+    Fails(LaunchFailure),
     /// Cleanup not observed; a success is returned, and nothing may be written.
     NoCleanup,
     /// Renews, has the job's cancel requested in the store, renews again and stops.
@@ -445,6 +445,7 @@ impl HeldFixture {
             cleanup_observed: true,
             result: Err(LaunchFailure::Stopped(StopReason::Cancel)),
             detail: "cancelled",
+            stderr: Vec::new(),
         }
     }
 
@@ -495,6 +496,7 @@ impl HeldCapacity for HeldFixture {
                 cleanup_observed: true,
                 result: Ok(self.output(run, BoundRun::of(run))),
                 detail: "succeeded",
+                stderr: Vec::new(),
             },
             Launch::NamesAnotherRun => LaunchOutcome {
                 cleanup_observed: true,
@@ -506,21 +508,25 @@ impl HeldCapacity for HeldFixture {
                     },
                 )),
                 detail: "succeeded",
+                stderr: Vec::new(),
             },
             Launch::Unavailable => LaunchOutcome {
                 cleanup_observed: true,
                 result: Err(LaunchFailure::Unavailable),
                 detail: "unavailable",
+                stderr: Vec::new(),
             },
-            Launch::Fails => LaunchOutcome {
+            Launch::Fails(failure) => LaunchOutcome {
                 cleanup_observed: true,
-                result: Err(LaunchFailure::Failed),
+                result: Err(failure),
                 detail: "failed",
+                stderr: b"payload error\n".to_vec(),
             },
             Launch::NoCleanup => LaunchOutcome {
                 cleanup_observed: false,
                 result: Ok(self.output(run, BoundRun::of(run))),
                 detail: "unobserved",
+                stderr: Vec::new(),
             },
             Launch::StopsAtCancel => self.stop_at_cancel(run, checkpoint),
         }
@@ -532,7 +538,7 @@ fn seen_of(event: ClaimEvent<'_>) -> Seen {
     match event {
         ClaimEvent::Settled(record) => Seen::Settled(text(&record.id)),
         ClaimEvent::Claimed(job) => Seen::Claimed(text(job)),
-        ClaimEvent::Launched { job, detail } => Seen::Launched {
+        ClaimEvent::Launched { job, detail, .. } => Seen::Launched {
             job: text(job),
             detail,
         },
@@ -955,7 +961,22 @@ fn a_launch_that_never_started_fails_the_job_as_execution_unavailable() -> TestR
 
 #[test]
 fn a_launch_that_failed_fails_the_job_as_internal() -> TestResult {
-    a_failed_launch_settles_then_fails_the_job(Launch::Fails, JobFailure::Internal, "failed")
+    // Until R03c stores the failures of decision 0058 rule 18, each of them is `internal`.
+    for failure in [
+        LaunchFailure::Exited,
+        LaunchFailure::FilterKilled,
+        LaunchFailure::Limit(LimitKind::WallTime),
+        LaunchFailure::Limit(LimitKind::Memory),
+        LaunchFailure::Limit(LimitKind::Log),
+        LaunchFailure::Failed,
+    ] {
+        a_failed_launch_settles_then_fails_the_job(
+            Launch::Fails(failure),
+            JobFailure::Internal,
+            "failed",
+        )?;
+    }
+    Ok(())
 }
 
 #[test]

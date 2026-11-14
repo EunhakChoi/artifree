@@ -272,8 +272,15 @@ fn run_worker(arguments: &[OsString]) -> Result<(), WorkerFailure> {
             }
             match event {
                 WorkerEvent::Warning(error) => stderr_line(&format!("warning: {error}")),
-                WorkerEvent::Attempt { job, detail } => {
-                    stderr_line(&format!("attempt of job {}: {detail}", job.as_str()));
+                WorkerEvent::Attempt {
+                    job,
+                    detail,
+                    stderr_bytes,
+                } => {
+                    stderr_line(&format!(
+                        "attempt of job {}: {detail} stderr_bytes={stderr_bytes}",
+                        job.as_str()
+                    ));
                 }
                 WorkerEvent::Unavailable(detail) => {
                     stderr_line(&format!("execution unavailable: {detail}"));
