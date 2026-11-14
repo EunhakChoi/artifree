@@ -31,6 +31,28 @@ say() {
 # loses no record ends the measurement; its calls, beyond the fixture's allowlist, are the
 # artifact bundler-calls.txt. A record of a filter kill, of another architecture, or of a call
 # that the fixture allows only in some forms fails the job.
+# Waits until the kernel's seccomp records stop arriving: they are written asynchronously after
+# the call (attempt/kernel_log.rs polls for them too). After a first second, the count of records
+# must stay the same over two seconds of polls; the wait ends after 15 s in any case, and a count
+# that is still changing then fails the job.
+settle_kernel_log() {
+  local previous=-1 count stable=0 polls=0
+  sleep 1
+  while ((polls < 56)); do
+    count="$(dmesg | grep -c 'type=1326' || true)"
+    if [[ "$count" == "$previous" ]]; then
+      stable=$((stable + 1))
+      ((stable < 8)) || return 0
+    else
+      stable=0
+      previous=$count
+    fi
+    polls=$((polls + 1))
+    sleep 0.25
+  done
+  fail "the kernel's seccomp records were still arriving after 15 s"
+}
+
 measure_bundler() {
   local measured="$OUT/measured-calls.txt" round case run label records lost new numbers number
   local test_name=execution::attempt::bundler_tests::job_the_bundler_runs_under_the_measuring_filter
@@ -44,6 +66,7 @@ measure_bundler() {
         label="measure-$round-$case-$run"
         sudo "$PREPARE" kernel-log-clear
         run_unit "$lib_binary" "$label" "$test_name" -p Delegate=yes --setenv="ARTIFREE_MEASURE_CASE=$case"
+        settle_kernel_log
         dmesg > "$OUT/$label.kernel.txt"
         records="$(grep -F 'type=1326' -- "$OUT/$label.kernel.txt" | grep -F 'exe="/tools/bin/esbuild"' || true)"
         if grep -Eq 'audit_lost|backlog limit exceeded|callbacks suppressed|hold queue overflow' -- "$OUT/$label.kernel.txt"; then
