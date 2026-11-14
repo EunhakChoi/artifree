@@ -11,7 +11,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::{AdmissionRefusal, InspectionProfile};
+use super::AdmissionRefusal;
+use super::profile::ExecutionProfile;
 
 /// One directory per version, operator-installed and not writable by the provider (0056 rule 6). Must equal `ROOT` in `scripts/enforcement/*.sh`.
 pub(super) const TOOL_ROOT: &str = "/opt/artifree/tools/v1";
@@ -177,12 +178,14 @@ const TERMINALS_BYTES: &str = "4096";
 ///
 /// Nothing a request carries reaches this list, and the scratch's size and inode bounds are set by the bootstrap, not here.
 ///
-/// `program` names the bootstrap's program (decision 0057 rule 4).
+/// `program` names the bootstrap's program (decision 0057 rule 4), and `profile` the identity the
+/// bootstrap is given (decision 0058 rule 1).
 #[must_use]
 pub(super) fn attempt_arguments_for(
     root: &Path,
     input: &Path,
     program: EntryProgram,
+    profile: &ExecutionProfile,
 ) -> Vec<OsString> {
     let mut arguments = sandbox_arguments(root);
     // The staged input, read-only at `/input` (0056 rule 2, as reworded by the amendment of 2026-11-13, input and output).
@@ -219,7 +222,7 @@ pub(super) fn attempt_arguments_for(
     arguments.push(program.command().into());
     arguments.extend(program.prefix().iter().map(OsString::from));
     arguments.push("bootstrap".into());
-    arguments.push(InspectionProfile::fixture().identity().into());
+    arguments.push(profile.inspection.identity().into());
     arguments
 }
 
@@ -227,7 +230,12 @@ pub(super) fn attempt_arguments_for(
 #[cfg(test)]
 #[must_use]
 pub(super) fn attempt_arguments(root: &Path, input: &Path) -> Vec<OsString> {
-    attempt_arguments_for(root, input, EntryProgram::Fixture)
+    attempt_arguments_for(
+        root,
+        input,
+        EntryProgram::Fixture,
+        &super::profile::FIXTURE_EXECUTION,
+    )
 }
 
 /// Why a bounded run of a trusted command produced no usable output.

@@ -11,9 +11,9 @@
 //! selects one payload scenario with `prepare.sh scenario <name>` and runs one test by its exact
 //! name. The exit statuses are not the evidence: the kernel records are.
 
-use super::super::bootstrap::PAYLOAD;
 use super::super::launcher::TOOL_ROOT;
 use super::super::probes::{AUDIT_ARCH_X86_64, Expect, PROBES};
+use super::super::profile::FIXTURE_EXECUTION;
 use super::super::readiness::{LimitFacts, StatusFacts, parse_limits, parse_status};
 use super::AttemptPlan;
 use super::kernel_log::{KernelLog, RECORD_WAIT, SeccompRecord, await_records};
@@ -66,7 +66,7 @@ struct ExpectedRecord {
 fn payload_refusal(syscall: u64) -> ExpectedRecord {
     ExpectedRecord {
         label: format!("the payload's refusal of syscall {syscall}"),
-        exe: PAYLOAD.to_owned(),
+        exe: FIXTURE_EXECUTION.payload.to_owned(),
         arch: AUDIT_ARCH_X86_64,
         syscall,
     }

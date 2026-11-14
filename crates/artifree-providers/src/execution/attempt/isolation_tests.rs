@@ -6,8 +6,8 @@
 //! scenario and runs one test by its exact name. The payload's error numbers are reported, the
 //! host-side readings are the evidence.
 
-use super::super::bootstrap::PAYLOAD;
 use super::super::launcher::TOOL_ROOT;
+use super::super::profile::FIXTURE_EXECUTION;
 use super::super::report::sha256_hex;
 use super::mapping_tests::{StopOnDrop, line_with, process_ended};
 use super::resource_tests::{evidence_of, field_number, stdout_text, timed_launch};
@@ -514,7 +514,10 @@ fn ipv6_route_devices(text: &str) -> Vec<&str> {
 /// started with. A process that ended does not run it.
 fn runs_payload(pid: u32) -> Result<bool, Box<dyn Error>> {
     match fs::read(format!("/proc/{pid}/cmdline")) {
-        Ok(cmdline) => Ok(cmdline.split(|byte| *byte == 0).next() == Some(PAYLOAD.as_bytes())),
+        Ok(cmdline) => {
+            Ok(cmdline.split(|byte| *byte == 0).next()
+                == Some(FIXTURE_EXECUTION.payload.as_bytes()))
+        }
         Err(error) if process_ended(&error) => Ok(false),
         Err(error) => Err(error.into()),
     }

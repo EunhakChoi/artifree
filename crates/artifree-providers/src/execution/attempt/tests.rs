@@ -581,7 +581,7 @@ fn job_fixture_attempt_runs_in_its_group_and_exits() -> Result<(), Box<dyn Error
 #[ignore = "runs only in the Linux enforcement job"]
 fn job_false_ready_is_never_released() -> Result<(), Box<dyn Error>> {
     let plan = AttemptPlan {
-        stub_arguments: &["false-ready"],
+        stub_override: Some(&["false-ready"]),
         ..AttemptPlan::fixture()
     };
     assert_not_started(
@@ -627,7 +627,7 @@ fn job_wrong_release_byte_starts_no_payload() -> Result<(), Box<dyn Error>> {
 fn job_unknown_identity_starts_no_launcher() -> Result<(), Box<dyn Error>> {
     let dir = ExecutionDir::new("unknown-identity")?;
     let plan = AttemptPlan {
-        stub_arguments: &["stub", "another-profile"],
+        stub_override: Some(&["stub", "another-profile"]),
         ..AttemptPlan::fixture()
     };
     let failure = refusal_of(launch(&plan, dir.path()))?;
@@ -648,7 +648,7 @@ fn job_unknown_identity_starts_no_launcher() -> Result<(), Box<dyn Error>> {
 fn job_stalled_start_is_killed_at_the_readiness_deadline() -> Result<(), Box<dyn Error>> {
     let dir = ExecutionDir::new("stalled-start")?;
     let plan = AttemptPlan {
-        stub_arguments: &["wait"],
+        stub_override: Some(&["wait"]),
         readiness_deadline: Duration::from_secs(2),
         ..AttemptPlan::fixture()
     };

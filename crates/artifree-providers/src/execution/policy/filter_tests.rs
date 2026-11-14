@@ -14,7 +14,7 @@ use seccompiler::{
 
 use super::super::report::sha256_hex;
 use super::{
-    ALLOWED, NAMESPACE_FLAGS, PolicyError, allowlist, clone3_refusal, fixture_filters,
+    ALLOWED, FilterSet, NAMESPACE_FLAGS, PolicyError, allowlist, clone3_refusal, fixture_filters,
     policy_sha256,
 };
 
@@ -421,7 +421,7 @@ fn programs_install_the_refusal_first_and_the_allowlist_last() -> Result<(), Pol
 
 #[test]
 fn digest_covers_both_programs_in_order() -> Result<(), PolicyError> {
-    let digest = policy_sha256()?;
+    let digest = policy_sha256(FilterSet::Fixture)?;
     assert_eq!(
         digest,
         sha256_hex(&serialized(&[clone3_refusal()?, allowlist()?])),
@@ -447,7 +447,7 @@ fn digest_covers_both_programs_in_order() -> Result<(), PolicyError> {
 #[test]
 fn policy_digest_is_pinned() -> Result<(), PolicyError> {
     assert_eq!(
-        policy_sha256()?,
+        policy_sha256(FilterSet::Fixture)?,
         "1a54f4826f1cbfe1889b758deec25f374d3c4c848592bc5f872b07645c829a35",
         "the policy digest must be the pinned value of the reviewed programs"
     );

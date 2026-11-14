@@ -18,8 +18,8 @@ use super::super::readiness::{
 };
 #[cfg(target_arch = "x86_64")]
 use super::{
-    ALLOWED, CLONE, PolicyError, QUERY_ONLY, SETSOCKOPT, SOCKET, allowlist, allowlist_rules,
-    compile, fixture_filters, policy_sha256,
+    ALLOWED, CLONE, FilterSet, PolicyError, QUERY_ONLY, SETSOCKOPT, SOCKET, allowlist,
+    allowlist_rules, compile, fixture_filters, policy_sha256,
 };
 
 /// The measured bootstrap's `/proc/<pid>/status`, as the kernel printed it in the probe (0056
@@ -213,7 +213,7 @@ fn filter_compiles_and_has_a_stable_digest() -> Result<(), PolicyError> {
             "each fixture filter must compile to instructions"
         );
     }
-    let digest = policy_sha256()?;
+    let digest = policy_sha256(FilterSet::Fixture)?;
     assert_eq!(
         digest.len(),
         64,
@@ -226,7 +226,7 @@ fn filter_compiles_and_has_a_stable_digest() -> Result<(), PolicyError> {
         "the digest must be lowercase hex: {digest}"
     );
     assert_eq!(
-        policy_sha256()?,
+        policy_sha256(FilterSet::Fixture)?,
         digest,
         "the digest must not change between two builds of one filter"
     );

@@ -33,7 +33,8 @@ use rustix::thread::{CapabilitySet, CapabilitySets};
 use rustix::{io, process, stdio, thread};
 
 use super::launcher::EntryProgram;
-use super::{InspectionProfile, launcher, policy, readiness};
+use super::profile::{self, ExecutionProfile};
+use super::{launcher, policy, readiness};
 
 /// The record that starts the launcher; the provider sends it to the stub.
 pub(super) const LAUNCH: [u8; 1] = *b"L";
@@ -43,8 +44,6 @@ pub(super) const READY: [u8; 16] = *b"ARTIFREE-READY-1";
 pub(super) const RELEASE: [u8; 1] = *b"R";
 /// The record that the bootstrap writes when the payload's `exec` returned.
 pub(super) const EXEC_FAILED: [u8; 1] = *b"X";
-/// The payload executable inside the tool root, as the bootstrap sees it.
-pub(super) const PAYLOAD: &str = "/tools/bin/artifree-execution-payload";
 
 /// The lowest descriptor number for the control channel's close-on-exec copy.
 const CONTROL_MIN_DESCRIPTOR: RawFd = 3;
@@ -141,7 +140,7 @@ impl std::error::Error for BootstrapFailure {}
 ///
 /// # Errors
 ///
-/// Returns `UnknownProfile` for an identity other than the fixture profile's, `InputPath` for an input path that is not absolute (checked before the launch record is read), `ControlChannel` when the next byte is not the launch record, and `LauncherNotExecuted` when `exec` returns.
+/// Returns `UnknownProfile` for an identity that no profile in the table has, `InputPath` for an input path that is not absolute (checked before the launch record is read), `ControlChannel` when the next byte is not the launch record, and `LauncherNotExecuted` when `exec` returns.
 pub fn run_stub(identity: &str, input: &Path) -> Result<Infallible, BootstrapFailure> {
     run_stub_for(EntryProgram::Fixture, identity, input)
 }
@@ -154,13 +153,13 @@ pub fn run_stub(identity: &str, input: &Path) -> Result<Infallible, BootstrapFai
 ///
 /// # Errors
 ///
-/// Returns `UnknownProfile` for an identity other than the fixture profile's, `InputPath` for an input path that is not absolute (checked before the launch record is read), `ControlChannel` when the next byte is not the launch record, and `LauncherNotExecuted` when `exec` returns.
+/// Returns `UnknownProfile` for an identity that no profile in the table has, `InputPath` for an input path that is not absolute (checked before the launch record is read), `ControlChannel` when the next byte is not the launch record, and `LauncherNotExecuted` when `exec` returns.
 pub fn run_stub_for(
     program: EntryProgram,
     identity: &str,
     input: &Path,
 ) -> Result<Infallible, BootstrapFailure> {
-    check_identity(identity)?;
+    let profile = check_identity(identity)?;
     if !input.is_absolute() {
         return Err(BootstrapFailure::InputPath);
     }
@@ -170,7 +169,9 @@ pub fn run_stub_for(
     let root = Path::new(launcher::TOOL_ROOT);
     // `exec` returns only when the launcher did not start. Its error text is not reported; the failure names this step.
     let _ = Command::new(root.join(launcher::LAUNCHER))
-        .args(launcher::attempt_arguments_for(root, input, program))
+        .args(launcher::attempt_arguments_for(
+            root, input, program, profile,
+        ))
         .env_clear()
         .exec();
     Err(BootstrapFailure::LauncherNotExecuted)
@@ -184,7 +185,7 @@ pub fn run_stub_for(
 ///
 /// Returns the first failing step: `UnknownProfile`, `ControlChannel`, `LeakedDescriptor`, `Scratch`, `WorkingDirectory`, `Input`, `Terminals`, `Limits`, `Privileges`, `Filter`, `NotConfirmed` (the proc field), `NotReleased` or `PayloadNotExecuted`.
 pub fn run_bootstrap(identity: &str) -> Result<Infallible, BootstrapFailure> {
-    check_identity(identity)?;
+    let profile = check_identity(identity)?;
     let control = take_control()?;
     refuse_leaked_descriptors(control.as_raw_fd())?;
     mount_scratch()?;
@@ -196,26 +197,28 @@ pub fn run_bootstrap(identity: &str) -> Result<Infallible, BootstrapFailure> {
     // The control descriptor is close-on-exec, so the payload's exec closes it. Nothing is dropped
     // after the filter: the descriptor is wrapped so that no drop runs.
     let control = ManuallyDrop::new(control);
-    install_filter()?;
+    install_filter(profile)?;
     confirm_setup()?;
     write_record(control.as_fd(), &READY)?;
     if !next_record_is(control.as_fd(), RELEASE) {
         return Err(BootstrapFailure::NotReleased);
     }
     // `exec` returns only when the payload did not start. The error text is not reported; the provider learns of the failure from `EXEC_FAILED`.
-    let _ = Command::new(PAYLOAD).env_clear().exec();
+    // The profile fixes the payload, its arguments and its whole environment (decision 0058
+    // rule 1); nothing else reaches it.
+    let _ = Command::new(profile.payload)
+        .args(profile.arguments)
+        .env_clear()
+        .envs(profile.environment.iter().copied())
+        .exec();
     // Best effort: when this write fails, the provider reads end of stream and counts the attempt as not started.
     write_record(control.as_fd(), &EXEC_FAILED).ok();
     Err(BootstrapFailure::PayloadNotExecuted)
 }
 
-/// Refuses any identity other than the fixture profile's identity.
-fn check_identity(identity: &str) -> Result<(), BootstrapFailure> {
-    if identity == InspectionProfile::fixture().identity() {
-        Ok(())
-    } else {
-        Err(BootstrapFailure::UnknownProfile)
-    }
+/// The profile whose identity is exactly `identity`; any other identity is refused.
+fn check_identity(identity: &str) -> Result<&'static ExecutionProfile, BootstrapFailure> {
+    profile::by_identity(identity).ok_or(BootstrapFailure::UnknownProfile)
 }
 
 /// Step 2: copies the control channel to a close-on-exec descriptor, then makes descriptor 0 read end of stream.
@@ -408,11 +411,11 @@ fn confirm_privileges() -> Result<(), BootstrapFailure> {
     Ok(())
 }
 
-/// Step 10: installs the fixture profile's two seccomp programs in order (decision 0042 rule 4; 0056 rule 3).
+/// Step 10: installs the profile's two seccomp programs in order (decision 0042 rule 4; 0056 rule 3).
 ///
 /// The clone3 refusal is installed first and the allowlist LAST. Each `apply_filter` call needs `prctl` and `seccomp`, which the allowlist does not admit, so an allowlist installed earlier would kill the process (MEASURED (f)). `confirm_setup` then requires two filters.
-fn install_filter() -> Result<(), BootstrapFailure> {
-    let programs = policy::fixture_filters().map_err(|_| BootstrapFailure::Filter)?;
+fn install_filter(profile: &ExecutionProfile) -> Result<(), BootstrapFailure> {
+    let programs = policy::filters(profile.filter).map_err(|_| BootstrapFailure::Filter)?;
     for program in &programs {
         seccompiler::apply_filter(program).map_err(|_| BootstrapFailure::Filter)?;
     }
