@@ -133,3 +133,28 @@ test('a Cancel refused as job_ended is still shown on the ended job', () => {
     /This job has already ended, so it cannot be cancelled \(job_ended\)\./,
   );
 });
+
+// A build (decision 0058 rule 17, slice R03da) is named as such, and each of
+// its failures has words of its own; R03e adds the build action.
+const BUILD_FAILURES = {
+  execution_unavailable: /No execution worker could run the build/,
+  build_failed: /The build reported errors\./,
+  limit_exceeded: /The build ran past a limit of its sandbox/,
+  output_rejected: /does not fit the template/,
+};
+
+for (const [failure, words] of Object.entries(BUILD_FAILURES)) {
+  test(`a build that failed as ${failure} is named and explained`, () => {
+    const markup = rowMarkup(
+      {
+        ...jobIn('failed'),
+        kind: 'run_profile',
+        profile: 'react-v1',
+        failure,
+      },
+      { status: 'idle' },
+    );
+    assert.match(markup, /Build 2/);
+    assert.match(markup, words);
+  });
+}

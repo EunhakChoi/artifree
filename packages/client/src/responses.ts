@@ -18,7 +18,10 @@ import type {
   HandoffState,
   CancelJobResponse,
   EnqueueJobResponse,
+  DiagnosticLocation,
   Job,
+  JobBuild,
+  JobDiagnostic,
   JobFailure,
   JobKind,
   JobList,
@@ -94,6 +97,7 @@ const ERROR_CODES: Record<ErrorCode, true> = {
   not_in_trash: true,
   job_ended: true,
   too_many_jobs: true,
+  profile_unknown: true,
   content_conflict: true,
   data_conflict: true,
   asset_conflict: true,
@@ -740,7 +744,7 @@ export function parseFeedChange(value: unknown): FeedChange | undefined {
 // Job vocabularies are closed on purpose. A job state or failure this client
 // does not know is not shown as a guess: the response is invalid, because
 // reading an unknown state as finished or as running could be wrong.
-const JOB_KINDS: readonly JobKind[] = ['verify_revision'];
+const JOB_KINDS: readonly JobKind[] = ['verify_revision', 'run_profile'];
 const JOB_STATES: readonly JobState[] = [
   'queued',
   'running',
@@ -754,6 +758,10 @@ const JOB_FAILURES: readonly JobFailure[] = [
   'storage_unavailable',
   'lease_expired',
   'internal',
+  'execution_unavailable',
+  'build_failed',
+  'limit_exceeded',
+  'output_rejected',
 ];
 const JOB_PROBLEMS: readonly JobProblem[] = [
   'digest_mismatch',
@@ -825,6 +833,31 @@ function jobResult(value: unknown): JobResult | undefined {
   };
 }
 
+function jobBuild(value: unknown): JobBuild | undefined {
+  if (!isRecord(value)) return undefined;
+  const { file_count, byte_count } = value;
+  return isCount(file_count) && isCount(byte_count)
+    ? { file_count, byte_count }
+    : undefined;
+}
+
+function diagnosticLocation(value: unknown): DiagnosticLocation | undefined {
+  if (!isRecord(value)) return undefined;
+  const { path, line, column } = value;
+  return typeof path === 'string' && isCount(line) && isCount(column)
+    ? { path, line, column }
+    : undefined;
+}
+
+function jobDiagnostic(value: unknown): JobDiagnostic | undefined {
+  if (!isRecord(value) || typeof value.message !== 'string') return undefined;
+  const location = optional(value.location, diagnosticLocation);
+  if (location === undefined) return undefined;
+  return location.set === undefined
+    ? { message: value.message }
+    : { location: location.set, message: value.message };
+}
+
 function time(value: unknown): number | undefined {
   return isTime(value) ? value : undefined;
 }
@@ -835,6 +868,14 @@ function job(value: unknown): Job | undefined {
   const state = oneOf(JOB_STATES, value.state);
   const failure = optional(value.failure, (v) => oneOf(JOB_FAILURES, v));
   const result = optional(value.result, jobResult);
+  const build = optional(value.build, jobBuild);
+  const profile = optional(value.profile, (v) =>
+    typeof v === 'string' ? v : undefined,
+  );
+  const diagnostics =
+    value.diagnostics === undefined
+      ? []
+      : list(value.diagnostics, jobDiagnostic);
   const retryAt = optional(value.retry_at_ms, time);
   const startedAt = optional(value.started_at_ms, time);
   const finishedAt = optional(value.finished_at_ms, time);
@@ -859,6 +900,15 @@ function job(value: unknown): Job | undefined {
     !isTime(created_at_ms) ||
     failure === undefined ||
     result === undefined ||
+    build === undefined ||
+    profile === undefined ||
+    diagnostics === undefined ||
+    // A build names its profile and a verification names none; a result is a
+    // verification's and a build's counts are a build's.
+    (kind === 'run_profile') !== (profile.set !== undefined) ||
+    (kind !== 'verify_revision' && result.set !== undefined) ||
+    (kind !== 'run_profile' &&
+      (build.set !== undefined || diagnostics.length > 0)) ||
     retryAt === undefined ||
     startedAt === undefined ||
     finishedAt === undefined
@@ -876,7 +926,10 @@ function job(value: unknown): Job | undefined {
     created_at_ms,
   };
   if (failure.set !== undefined) parsed.failure = failure.set;
+  if (profile.set !== undefined) parsed.profile = profile.set;
   if (result.set !== undefined) parsed.result = result.set;
+  if (build.set !== undefined) parsed.build = build.set;
+  if (diagnostics.length > 0) parsed.diagnostics = diagnostics;
   if (retryAt.set !== undefined) parsed.retry_at_ms = retryAt.set;
   if (startedAt.set !== undefined) parsed.started_at_ms = startedAt.set;
   if (finishedAt.set !== undefined) parsed.finished_at_ms = finishedAt.set;

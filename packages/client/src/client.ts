@@ -1162,9 +1162,12 @@ export class ArtifreeClient {
   }
 
   /**
-   * Queues a verification job (decision 0030) for `request.revision` of the
-   * artifact: a worker process re-reads every file of that revision and
-   * compares its digest and size with the stored listing. This only queues
+   * Queues a job for `request.revision` of the artifact. A `verify_revision`
+   * job (decision 0030) re-reads every file of that revision and compares its
+   * digest and size with the stored listing. A `run_profile` job with
+   * `profile: 'react-v1'` (decision 0058 rule 17) builds that revision, the
+   * head or an older one, in an execution worker; a server whose build cannot
+   * build the profile rejects it with `profile_unknown`. This only queues
    * it; the server's own worker runs it unless the server was started with
    * --no-worker or as a one-shot session (see {@link getBackground}). Read the
    * job with {@link getJob}, or wait for its end with {@link followJob}. A

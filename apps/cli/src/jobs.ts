@@ -6,7 +6,7 @@ import { UsageError } from './errors.js';
 import { resolveConnection } from './profiles.js';
 
 export const JOB_HELP = `Usage:
-  artifree job enqueue <artifact-id> --revision <n> [--idempotency-key <key>]
+  artifree job enqueue <artifact-id> --revision <n> [--build <profile>] [--idempotency-key <key>]
   artifree job show <job-id> [--wait]
   artifree job list [--artifact <id>] [--limit <n>] [--page-token <token>]
   artifree job cancel <job-id> [--idempotency-key <key>]
@@ -20,7 +20,11 @@ Connection:
 
 enqueue queues a verification job for one revision of an artifact: a worker
 re-reads every file of that revision and compares each SHA-256 digest and size
-with the stored listing. It only queues the job. The server's own worker runs it
+with the stored listing. With --build react-v1 it queues a build of that
+revision instead, the head or an older one, which an execution worker runs in
+its sandbox; a server whose build cannot build the profile refuses it with
+422 profile_unknown. --build names the build profile; --profile still names the
+connection profile. It only queues the job. The server's own worker runs it
 (artifree-server serve starts one unless started with --no-worker or as a
 one-shot session). show --wait prints the job once it has ended, however it
 ended: the exit status is 0 for a failed or cancelled job too, so read its
@@ -29,8 +33,10 @@ through a connection that is lost meanwhile; show without --wait prints the
 job as it is now. A job that succeeded with verdict mismatch found
 a difference; the job itself worked.
 The job lists at most 50 mismatched package paths and the full mismatch_count.
-Jobs run trusted verification code only; they do not run the artifact's code and
-are not a sandbox.
+A verification runs trusted code only and does not run the artifact's code. A
+succeeded build shows build with its file and byte counts; a failed one shows
+failure and, for build_failed, at most 20 diagnostics, whose messages come from
+the bundler and can quote the artifact's source.
 cancel asks a job to stop. A job that has not started ends cancelled at once.
 A running one shows cancel_requested until its worker stops at its next
 checkpoint. Cancelling stops work and undoes nothing. A job that already ended
@@ -124,12 +130,15 @@ async function enqueue(args: string[]): Promise<void> {
     options: {
       ...connectionOptions,
       revision: { type: 'string' },
+      build: { type: 'string' },
       'idempotency-key': { type: 'string' },
     },
     allowPositionals: true,
     strict: true,
   });
   const artifactId = one(positionals, 'artifact-id');
+  if (values.build === '')
+    throw new UsageError('--build requires a profile name, such as react-v1.');
   if (values.revision === undefined)
     throw new UsageError(
       'enqueue requires --revision <n>; read current_revision with artifree artifact show.',
@@ -142,7 +151,9 @@ async function enqueue(args: string[]): Promise<void> {
       (idempotencyKey) =>
         client.enqueueJob(
           artifactId,
-          { kind: 'verify_revision', revision },
+          values.build === undefined
+            ? { kind: 'verify_revision', revision }
+            : { kind: 'run_profile', revision, profile: values.build },
           { idempotencyKey },
         ),
     ),

@@ -571,10 +571,15 @@ async fn enqueue_job(
         artifact_id,
         revision,
         kind,
+        profile,
         idempotency_key,
     } = parse(arguments)?;
     let key = operations::request_key("idempotency_key", &idempotency_key)?;
-    let request = EnqueueJobRequest { kind, revision };
+    let request = EnqueueJobRequest {
+        kind,
+        revision,
+        profile,
+    };
     operations::enqueue_job(state, actor, key, &artifact_id, request).await
 }
 

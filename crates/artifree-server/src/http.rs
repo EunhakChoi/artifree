@@ -39,6 +39,7 @@ use artifree_core::jobs::{Clock, SystemClock};
 use artifree_core::parts::{Boundary, ByteRange};
 use artifree_domain::change::ChangeCursor;
 use artifree_domain::identity::{ActorId, RequestKey, StateGeneration};
+use artifree_domain::job::ProfileName;
 use artifree_ports::data_store::{OutboxBinding, OutboxFence};
 use artifree_ports::token_store::TokenStore;
 use artifree_ports::user_store::UserStore;
@@ -121,6 +122,11 @@ pub struct Settings {
     /// What `GET /v1/background` reports (decision 0055, rule 5). The default
     /// reports mode `none`; a persistent server with a worker replaces it.
     pub worker_status: WorkerStatusHandle,
+    /// The build profiles this build knows (decision 0058 rule 17): an
+    /// enqueue of a build names one of them, or answers `profile_unknown`.
+    /// The default is the build's own list, empty in a release build until
+    /// R03f; tests replace it.
+    pub build_profiles: Vec<ProfileName>,
 }
 
 impl Default for Settings {
@@ -141,6 +147,7 @@ impl Default for Settings {
             allow_remote_mcp: false,
             clock: Arc::new(SystemClock),
             worker_status: WorkerStatusHandle::default(),
+            build_profiles: artifree_providers::execution::build_profiles(),
         }
     }
 }

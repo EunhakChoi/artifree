@@ -7,8 +7,9 @@ packaged bundler and its measurement), R03bcbb (the `react-v1` profile in
 the build with `enforcement-fixture`), R03ca (the store of builds and
 diagnostics), R03cb (the worker's composition, diagnostics and failures),
 R03cc (build tickets, the `/b/` route and the head status, below the
-wire), R03cda (the execution readiness, schema 16) and R03cdb (the
-claim deadline) are implemented, R03da, R03db, R03e and R03f are not**.
+wire), R03cda (the execution readiness, schema 16), R03cdb (the
+claim deadline) and R03da (the public kind, contract 0.30.0) are
+implemented, R03db, R03e and R03f are not**.
 Roadmap: R03.
 
 > **Note, 2026-11-14 (slices).** R03b is split into R03ba, R03bb and R03bc,
@@ -635,6 +636,33 @@ Roadmap: R03.
 <profile>` prints the status.
 >   - Proven by contract, HTTP, MCP, client and CLI tests for both calls and
 >     their refusals; the `/b/` route itself is proven by R03cc.
+
+> **Note, 2026-11-15 (R03da).** The public kind is implemented as the R03d
+> split note describes it, with these choices.
+>
+> - Which jobs are public is one fixed condition, the same in every build:
+>   a verification, or a `run_profile` job of `react-v1`
+>   (`artifree_domain::job::PUBLIC_PROFILE`). The store applies it to the
+>   job read, the list, cancel, the `job_changed` row and the open-job
+>   count, so a job of a profile known only for tests stays hidden there.
+>   A release build that holds a `react-v1` job from a restored database
+>   shows it; its worker ends it as `execution_unavailable`, as 0057 rule 1
+>   says.
+> - Only the enqueue depends on the build: `ArtifactService::enqueue_build`
+>   accepts `react-v1` only when the server's build profiles hold it
+>   (`Settings::build_profiles`, the build's own list by default), before
+>   anything is read or written. A name that cannot be a profile answers
+>   `profile_unknown` too and is not quoted back.
+> - The bound limits only a public enqueue. A hidden job, which only tests
+>   enqueue through the core, is neither counted nor bounded.
+> - `Job.diagnostics` is read with the job, for a failed `run_profile` job,
+>   in the same request as the job read. `Job.build` holds the counts the
+>   store keeps as the result of a succeeded `run_profile` job.
+> - The client's job parse is closed: a build without its profile, a
+>   verification with one, a verification result on a build, or a build's
+>   counts or diagnostics on a verification is an invalid response. The
+>   web only names the kind (`Build`) and its four failures; the build
+>   action stays R03e.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),

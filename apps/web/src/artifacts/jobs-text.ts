@@ -16,6 +16,7 @@ import type {
 /** The name of each kind of job. */
 const KIND_LABELS: Record<JobKind, string> = {
   verify_revision: 'Verify revision',
+  run_profile: 'Build',
 };
 
 /** The name of a kind of job, as the tab shows it. */
@@ -56,6 +57,12 @@ const FAILURE_TEXT: Record<JobFailure, string> = {
   storage_unavailable: 'Storage kept failing for every attempt.',
   lease_expired: 'A worker held the final attempt and stopped answering.',
   internal: 'The worker failed in a way it did not expect.',
+  execution_unavailable:
+    'No execution worker could run the build: none claimed it in time, or its sandbox could not start.',
+  build_failed: 'The build reported errors.',
+  limit_exceeded:
+    'The build ran past a limit of its sandbox: time, memory or log size.',
+  output_rejected: 'The build produced output that does not fit the template.',
 };
 
 /** The failure of a job that ended as `failed`, in words (rule 13). */

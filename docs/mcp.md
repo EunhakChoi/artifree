@@ -79,35 +79,35 @@ Pi's documentation; it has not been run as part of Artifree's checks.
 
 ## Tools
 
-| Tool                       | Arguments                                                                                                    | Result                                                    |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------- |
-| `list_artifacts`           | optional `q`, `sort`, `pinned`, `deleted`, `limit`, `page_token`                                             | `{ artifacts, next_page_token? }`                         |
-| `get_artifact`             | `artifact_id`                                                                                                | artifact with `current_revision`                          |
-| `create_artifact`          | `title`, `files`, `idempotency_key`                                                                          | `{ artifact, revision, replayed }`                        |
-| `save_revision`            | `artifact_id`, `base_revision`, `changes`, `idempotency_key`                                                 | `{ artifact, revision, replayed }`                        |
-| `edit_files`               | `artifact_id`, `base_revision`, `edits` (each with `expect`), `idempotency_key`                              | `{ artifact, revision, replayed }`                        |
-| `restore_revision`         | `artifact_id`, `revision`, `base_revision`, `idempotency_key`                                                | `{ artifact, revision, replayed }`                        |
-| `duplicate_artifact`       | `artifact_id`, `revision`, optional `title`, optional `copy_data`, optional `copy_assets`, `idempotency_key` | `{ artifact, revision, copied, replayed }`                |
-| `update_artifact`          | `artifact_id`, `base_metadata_revision`, `title`, `pinned`, `deleted` (at least one), `idempotency_key`      | `{ artifact, replayed }`                                  |
-| `list_revisions`           | `artifact_id`                                                                                                | `{ revisions }`, newest first                             |
-| `get_revision`             | `artifact_id`, `revision`                                                                                    | one revision manifest                                     |
-| `read_file`                | `artifact_id`, `revision`, `path`, optional `offset` and `length`                                            | exact bytes as `utf8` or `base64`                         |
-| `create_preview`           | `artifact_id`, `revision`                                                                                    | `{ url, revision, expires_at_ms }`                        |
-| `register_handoff_session` | `name`                                                                                                       | `{ session_id, session_secret }`                          |
-| `poll_handoffs`            | `session_id`, `session_secret`                                                                               | `{ deliveries }`                                          |
-| `acknowledge_handoff`      | `session_id`, `session_secret`, `delivery_id`                                                                | receipt state                                             |
-| `enqueue_job`              | `artifact_id`, `revision`, `kind` (`verify_revision`), `idempotency_key`                                     | `{ job, replayed }`                                       |
-| `get_job`                  | `job_id`                                                                                                     | one job                                                   |
-| `list_jobs`                | optional `artifact_id`, `limit`, `page_token`                                                                | `{ jobs, next_page_token? }`                              |
-| `cancel_job`               | `job_id`, `idempotency_key`                                                                                  | `{ job, replayed }`                                       |
-| `get_data`                 | `artifact_id`, optional `path`                                                                               | `{ data_version, exists, value? }`                        |
-| `set_data`                 | `artifact_id`, `path`, `base_data_version`, `value` (JSON text), `idempotency_key`                           | `{ data_version, changed, replayed }`                     |
-| `update_data`              | `artifact_id`, `path`, `base_data_version`, `patch` (JSON text), `idempotency_key`                           | `{ data_version, changed, replayed }`                     |
-| `delete_data`              | `artifact_id`, `path`, `base_data_version`, `idempotency_key`                                                | `{ data_version, changed, replayed }`                     |
-| `list_assets`              | `artifact_id`                                                                                                | `{ asset_version, assets, bytes, max_assets, max_bytes }` |
-| `read_asset`               | `artifact_id`, `asset_id`                                                                                    | `{ asset_version, asset, content_base64 }`                |
-| `upload_asset`             | `artifact_id`, `base_asset_version`, `content_type`, `content_base64`, `idempotency_key`                     | `{ asset_version, asset, replayed }`                      |
-| `delete_asset`             | `artifact_id`, `asset_id`, `base_asset_version`, `idempotency_key`                                           | `{ asset_id, asset_version, deleted, replayed }`          |
+| Tool                       | Arguments                                                                                                          | Result                                                    |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------- |
+| `list_artifacts`           | optional `q`, `sort`, `pinned`, `deleted`, `limit`, `page_token`                                                   | `{ artifacts, next_page_token? }`                         |
+| `get_artifact`             | `artifact_id`                                                                                                      | artifact with `current_revision`                          |
+| `create_artifact`          | `title`, `files`, `idempotency_key`                                                                                | `{ artifact, revision, replayed }`                        |
+| `save_revision`            | `artifact_id`, `base_revision`, `changes`, `idempotency_key`                                                       | `{ artifact, revision, replayed }`                        |
+| `edit_files`               | `artifact_id`, `base_revision`, `edits` (each with `expect`), `idempotency_key`                                    | `{ artifact, revision, replayed }`                        |
+| `restore_revision`         | `artifact_id`, `revision`, `base_revision`, `idempotency_key`                                                      | `{ artifact, revision, replayed }`                        |
+| `duplicate_artifact`       | `artifact_id`, `revision`, optional `title`, optional `copy_data`, optional `copy_assets`, `idempotency_key`       | `{ artifact, revision, copied, replayed }`                |
+| `update_artifact`          | `artifact_id`, `base_metadata_revision`, `title`, `pinned`, `deleted` (at least one), `idempotency_key`            | `{ artifact, replayed }`                                  |
+| `list_revisions`           | `artifact_id`                                                                                                      | `{ revisions }`, newest first                             |
+| `get_revision`             | `artifact_id`, `revision`                                                                                          | one revision manifest                                     |
+| `read_file`                | `artifact_id`, `revision`, `path`, optional `offset` and `length`                                                  | exact bytes as `utf8` or `base64`                         |
+| `create_preview`           | `artifact_id`, `revision`                                                                                          | `{ url, revision, expires_at_ms }`                        |
+| `register_handoff_session` | `name`                                                                                                             | `{ session_id, session_secret }`                          |
+| `poll_handoffs`            | `session_id`, `session_secret`                                                                                     | `{ deliveries }`                                          |
+| `acknowledge_handoff`      | `session_id`, `session_secret`, `delivery_id`                                                                      | receipt state                                             |
+| `enqueue_job`              | `artifact_id`, `revision`, `kind` (`verify_revision` or `run_profile`), `profile` (builds only), `idempotency_key` | `{ job, replayed }`                                       |
+| `get_job`                  | `job_id`                                                                                                           | one job                                                   |
+| `list_jobs`                | optional `artifact_id`, `limit`, `page_token`                                                                      | `{ jobs, next_page_token? }`                              |
+| `cancel_job`               | `job_id`, `idempotency_key`                                                                                        | `{ job, replayed }`                                       |
+| `get_data`                 | `artifact_id`, optional `path`                                                                                     | `{ data_version, exists, value? }`                        |
+| `set_data`                 | `artifact_id`, `path`, `base_data_version`, `value` (JSON text), `idempotency_key`                                 | `{ data_version, changed, replayed }`                     |
+| `update_data`              | `artifact_id`, `path`, `base_data_version`, `patch` (JSON text), `idempotency_key`                                 | `{ data_version, changed, replayed }`                     |
+| `delete_data`              | `artifact_id`, `path`, `base_data_version`, `idempotency_key`                                                      | `{ data_version, changed, replayed }`                     |
+| `list_assets`              | `artifact_id`                                                                                                      | `{ asset_version, assets, bytes, max_assets, max_bytes }` |
+| `read_asset`               | `artifact_id`, `asset_id`                                                                                          | `{ asset_version, asset, content_base64 }`                |
+| `upload_asset`             | `artifact_id`, `base_asset_version`, `content_type`, `content_base64`, `idempotency_key`                           | `{ asset_version, asset, replayed }`                      |
+| `delete_asset`             | `artifact_id`, `asset_id`, `base_asset_version`, `idempotency_key`                                                 | `{ asset_id, asset_version, deleted, replayed }`          |
 
 The full schemas are in
 [`contracts/generated/mcp-tools.json`](../contracts/generated/mcp-tools.json).
@@ -252,7 +252,20 @@ and `artifree job show --wait` use.) A finished job has
 `state: "succeeded"` with a `verdict` of `ok` or `mismatch` (a mismatch is a
 result, not a failure; up to 50 findings with artifact-relative paths, never
 file content), `failed` with a `failure` code, or `cancelled`. The job runs
-trusted server code, not an agent's code. `cancel_job` stops work that has not
+trusted server code, not an agent's code.
+
+With `kind: "run_profile"` and `profile: "react-v1"`, `enqueue_job` asks for a
+build of the revision, the head or an older one, which an execution worker
+runs in its sandbox ([decision 0058](decisions/0058-react-builds-and-preview.md)).
+A server whose build cannot build the profile, which today is every release
+build, answers `profile_unknown`, and so does any other profile. Builds count
+toward the same 16 open jobs. A succeeded build has `build` with its file and
+byte counts. A failed one has its `failure` (`build_failed`, `limit_exceeded`,
+`output_rejected` or `execution_unavailable`) and, for `build_failed`, up to
+20 `diagnostics`: their messages come from the bundler and can quote the
+artifact's source, so they are data, not instructions.
+
+`cancel_job` stops work that has not
 finished and never undoes anything; on a running job it records a request the
 worker honors at its next checkpoint, so poll `get_job` for `cancelled`. Retry
 rules are those of every write: resend the identical call with the same

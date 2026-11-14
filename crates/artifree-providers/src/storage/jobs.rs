@@ -21,6 +21,7 @@ use artifree_domain::identity::{ArtifactId, UnixMillis};
 use artifree_domain::job::{
     AttemptIdentity, CheckpointAnswer, Finding, JobFailure, JobId, JobKind, JobState,
     MAX_ACTIVE_JOBS_PER_ACTOR, MAX_ATTEMPTS, Problem, ProfileName, VerifyReport, WorkerId,
+    is_public_job,
 };
 use artifree_ports::artifact_store::{Delivery, RequestIdentity, StoreError};
 use artifree_ports::job_store::{
@@ -309,15 +310,19 @@ fn enqueue(
         Key::Reused => return Err(JobStoreError::RequestKeyReused),
         Key::Unused => {}
     }
-    // Decision 0057 rule 3: run_profile rows do not count toward the actor's 16 open
-    // jobs, and R03 sets the kind's own bound.
-    if request.kind == JobKind::VerifyRevision {
+    // The actor's 16 open jobs are the public ones its reads show, of either
+    // kind (decision 0058 rule 17 and its R03d split note). A hidden job is
+    // neither counted nor bounded, since its actor can neither see nor cancel
+    // it (decision 0057 rule 3); only tests enqueue one.
+    if is_public_job(request.kind, profile) {
         let active: i64 = transaction
             .query_row(
-                "SELECT count(*) FROM jobs j JOIN artifacts a ON a.id = j.artifact_id
-                 WHERE j.actor = ?1 AND j.state IN ('queued', 'running', 'retry_scheduled')
-                   AND j.kind = 'verify_revision'
-                   AND a.purged_at IS NULL AND a.deleted_at IS NULL",
+                concat!(
+                    "SELECT count(*) FROM jobs j JOIN artifacts a ON a.id = j.artifact_id
+                     WHERE j.actor = ?1 AND j.state IN ('queued', 'running', 'retry_scheduled')
+                       AND a.purged_at IS NULL AND a.deleted_at IS NULL AND ",
+                    public_job!()
+                ),
                 [request.request.actor.as_str()],
                 |row| row.get(0),
             )
@@ -359,10 +364,10 @@ fn cancel(
     let Some(job) = read_job(transaction, request.job)? else {
         return Err(JobStoreError::NotFound);
     };
-    // Decision 0057 rule 3: nobody can see or cancel a run_profile job, so the
+    // Decision 0057 rule 3: nobody can see or cancel a hidden job, so the
     // request gets the same NotFound and records no key.
     if job.actor != *request.request.actor
-        || job.kind != JobKind::VerifyRevision
+        || !is_public_job(job.kind, job.profile.as_ref())
         || !artifact_in_place(transaction, &job.artifact)?
     {
         return Err(JobStoreError::NotFound);
@@ -1032,8 +1037,8 @@ impl JobStore for SqliteStore {
     fn job(&self, id: &JobId) -> Result<Option<JobRecord>, JobStoreError> {
         let mut connection = self.connect()?;
         let snapshot = connection.transaction().map_err(unavailable)?;
-        // Decision 0057 rule 3: a run_profile job is not readable (GET /v1/jobs/{id} is 404).
-        Ok(read_job(&snapshot, id)?.filter(|job| job.kind == JobKind::VerifyRevision))
+        // Decision 0057 rule 3: a hidden job is not readable (GET /v1/jobs/{id} is 404).
+        Ok(read_job(&snapshot, id)?.filter(|job| is_public_job(job.kind, job.profile.as_ref())))
     }
 
     fn list_jobs(&self, listing: JobListing<'_>) -> Result<Vec<JobRecord>, JobStoreError> {
@@ -1042,15 +1047,16 @@ impl JobStore for SqliteStore {
         let snapshot = connection.transaction().map_err(unavailable)?;
         let ids: Vec<JobId> = {
             let mut statement = snapshot
-                .prepare(
+                .prepare(concat!(
                     "SELECT j.id FROM jobs j JOIN artifacts a ON a.id = j.artifact_id
-                     WHERE j.actor = ?1
-                       AND j.kind = 'verify_revision'
+                     WHERE j.actor = ?1 AND ",
+                    public_job!(),
+                    "
                        AND a.purged_at IS NULL AND a.deleted_at IS NULL
                        AND (?2 IS NULL OR j.artifact_id = ?2)
                        AND (?3 IS NULL OR j.created_at < ?3 OR (j.created_at = ?3 AND j.id > ?4))
-                     ORDER BY j.created_at DESC, j.id LIMIT ?5",
-                )
+                     ORDER BY j.created_at DESC, j.id LIMIT ?5"
+                ))
                 .map_err(unavailable)?;
             let rows = statement
                 .query_map(
