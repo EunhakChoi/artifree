@@ -164,7 +164,7 @@ artifree-server serve --data-dir /path/to/new-data ...
    go back to the previous binary only with a backup taken before the upgrade,
    restored into a new directory.
 
-Schema 12 adds private asset associations, independent versions, ID reservations and metadata-only operation receipts (0045). Schema 11 adds data change events and schema 10 adds multi-user identity. Schema 9 adds the application data tables (decision 0031). Schema 8 adds the job tables (decision 0030). Schema 7 adds the purge tombstone, the `purged` change kind, an index on
+Schema 15 adds the builds of `run_profile` jobs, their files and the diagnostics of a failed build, and three job failures (0058, R03ca); a backup copies them and a restore keeps them, bound to the same revisions. Schema 14 adds the `run_profile` kind and its execution attempts (0057). Schema 13 adds `job_changed` to the change feed (0055). Schema 12 adds private asset associations, independent versions, ID reservations and metadata-only operation receipts (0045). Schema 11 adds data change events and schema 10 adds multi-user identity. Schema 9 adds the application data tables (decision 0031). Schema 8 adds the job tables (decision 0030). Schema 7 adds the purge tombstone, the `purged` change kind, an index on
 file content, and the `cleanup_runs` table (decision 0029). Schema 6 adds the token table to the versioned
 schema. A server of an older release that is started again on a directory this
 build upgraded will refuse it.

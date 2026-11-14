@@ -1682,6 +1682,9 @@ fn no_unreviewed_binary_column_could_hide_a_content_digest() -> TestResult {
         "blobs.digest",
         "blobs.content",
         "revision_files.digest",
+        // A build's files are content roots too, in every purge and cleanup
+        // predicate (decision 0058 rule 12).
+        "build_files.digest",
         // Live asset associations are content roots, included in every purge
         // and cleanup predicate (0045). Receipts contain metadata, not roots:
         // replay never recreates bytes; purge scrubs digest and fingerprint.

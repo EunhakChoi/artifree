@@ -372,6 +372,16 @@ pub enum JobFailure {
     /// The worker's build does not know the job's profile, so the job cannot
     /// run anywhere this build runs (decision 0057 rule 1). It is never retried.
     ExecutionUnavailable,
+    /// The bundler exited non-zero, the filter ended it, or the revision holds
+    /// resolver configuration (decision 0058 rule 18 and its R03c split note).
+    /// The job keeps its diagnostics. It is never retried.
+    BuildFailed,
+    /// A limit of decision 0042 rule 5 ended the attempt (decision 0058 rule
+    /// 18). It is never retried.
+    LimitExceeded,
+    /// The worker refused the result it composed (decision 0058 rules 8 and
+    /// 18). It is never retried.
+    OutputRejected,
 }
 
 impl JobFailure {
@@ -384,6 +394,9 @@ impl JobFailure {
             Self::LeaseExpired => "lease_expired",
             Self::Internal => "internal",
             Self::ExecutionUnavailable => "execution_unavailable",
+            Self::BuildFailed => "build_failed",
+            Self::LimitExceeded => "limit_exceeded",
+            Self::OutputRejected => "output_rejected",
         }
     }
 
@@ -404,6 +417,9 @@ impl FromStr for JobFailure {
             Self::LeaseExpired,
             Self::Internal,
             Self::ExecutionUnavailable,
+            Self::BuildFailed,
+            Self::LimitExceeded,
+            Self::OutputRejected,
         ]
         .into_iter()
         .find(|failure| failure.as_str() == value)
@@ -453,6 +469,66 @@ impl FromStr for Problem {
             rule: "expected a problem name",
         })
     }
+}
+
+/// The most diagnostics a failed build keeps (decision 0058 rule 13).
+pub const MAX_DIAGNOSTICS: usize = 20;
+
+/// The most bytes of one diagnostic's message (decision 0058 rule 13).
+pub const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 512;
+
+/// The text of one build diagnostic (decision 0058 rule 13): at most
+/// [`MAX_DIAGNOSTIC_MESSAGE_BYTES`] bytes of UTF-8 with no control character,
+/// and not empty. The worker that splits the bundler's messages makes them fit;
+/// this type only refuses text that does not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticMessage(String);
+
+impl DiagnosticMessage {
+    /// The message text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for DiagnosticMessage {
+    type Err = InvalidValue;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.is_empty()
+            || value.len() > MAX_DIAGNOSTIC_MESSAGE_BYTES
+            || value.chars().any(char::is_control)
+        {
+            return Err(InvalidValue {
+                what: "diagnostic message",
+                rule: "expected 1 to 512 bytes of text without control characters",
+            });
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+/// Where a diagnostic points: a file of the revision, by its package path, and
+/// a line and a column in it, as the bundler counts them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLocation {
+    /// The file, as the revision names it.
+    pub path: PackagePath,
+    /// The line.
+    pub line: u32,
+    /// The column.
+    pub column: u32,
+}
+
+/// One diagnostic of a failed build (decision 0058 rule 13). A fixed diagnostic,
+/// such as the one for a filter kill, points at no file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildDiagnostic {
+    /// Where it points, if anywhere.
+    pub location: Option<SourceLocation>,
+    /// What it says.
+    pub message: DiagnosticMessage,
 }
 
 /// One mismatch: the package path, which is relative to the artifact, and
@@ -725,6 +801,10 @@ mod tests {
             JobFailure::StorageUnavailable,
             JobFailure::LeaseExpired,
             JobFailure::Internal,
+            JobFailure::ExecutionUnavailable,
+            JobFailure::BuildFailed,
+            JobFailure::LimitExceeded,
+            JobFailure::OutputRejected,
         ] {
             assert_eq!(failure.as_str().parse::<JobFailure>(), Ok(failure));
         }
@@ -803,5 +883,28 @@ mod tests {
             ..whole
         };
         assert!(clean.is_ok() && !clean.is_truncated());
+    }
+
+    #[test]
+    fn a_diagnostic_message_is_bounded_text_without_control_characters() {
+        let longest = "é".repeat(MAX_DIAGNOSTIC_MESSAGE_BYTES / 2);
+        assert_eq!(
+            longest
+                .parse::<DiagnosticMessage>()
+                .map(|message| message.as_str().len()),
+            Ok(MAX_DIAGNOSTIC_MESSAGE_BYTES)
+        );
+        for refused in [
+            String::new(),
+            format!("{longest}a"),
+            "line one\nline two".to_owned(),
+            "a\u{1b}[31m colour".to_owned(),
+            "a\u{7f}".to_owned(),
+        ] {
+            assert!(
+                refused.parse::<DiagnosticMessage>().is_err(),
+                "{refused:?} is not a diagnostic message"
+            );
+        }
     }
 }

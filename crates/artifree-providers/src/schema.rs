@@ -19,7 +19,7 @@ use crate::storage::{random_bytes, unavailable};
 
 /// The schema version this build creates and reads. It is the database's
 /// `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i64 = 14;
+pub const SCHEMA_VERSION: i64 = 15;
 
 // Asset associations and receipts deliberately retain no bytes outside `blobs`.
 const ASSET_SCHEMA: &str = "
@@ -585,6 +585,102 @@ CREATE INDEX execution_attempts_by_job ON execution_attempts (job_id);
 CREATE INDEX execution_attempts_by_state ON execution_attempts (state);
 ";
 
+/// Added in schema version 15 (decision 0058 rules 9 to 13 and 18, slice R03ca):
+/// the failures `build_failed`, `limit_exceeded` and `output_rejected`, the
+/// builds of `run_profile` jobs with their files, and the diagnostics of a
+/// failed build. The `jobs` table is rebuilt once for its checked failures;
+/// every row keeps its values.
+///
+/// A build is keyed by its artifact, revision and profile, so at most one exists
+/// for the three (rule 10). `job_id` names the job that published it. Its files'
+/// bytes are rows of `blobs`, joined by `build_files.digest` (rule 12).
+/// `job_diagnostics` holds at most 20 rows per job, each with a package path, a
+/// line and a column, or none of the three for a fixed diagnostic (rule 13).
+const BUILD_SCHEMA: &str = "
+CREATE TABLE jobs_v15 (
+    id TEXT PRIMARY KEY,
+    actor TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('verify_revision', 'run_profile')),
+    profile TEXT,
+    state TEXT NOT NULL CHECK (state IN
+        ('queued', 'running', 'retry_scheduled', 'succeeded', 'failed', 'cancelled')),
+    attempts INTEGER NOT NULL CHECK (attempts >= 0),
+    max_attempts INTEGER NOT NULL CHECK (max_attempts >= 1),
+    fence INTEGER NOT NULL CHECK (fence >= 0),
+    run_after INTEGER NOT NULL,
+    worker TEXT,
+    lease_expires_at INTEGER,
+    cancel_requested INTEGER NOT NULL CHECK (cancel_requested IN (0, 1)),
+    failure TEXT CHECK (failure IN
+        ('revision_unavailable', 'storage_unavailable', 'lease_expired', 'internal',
+         'execution_unavailable', 'build_failed', 'limit_exceeded', 'output_rejected')),
+    files_checked INTEGER CHECK (files_checked >= 0),
+    bytes_checked INTEGER CHECK (bytes_checked >= 0),
+    mismatch_count INTEGER CHECK (mismatch_count >= 0),
+    created_at INTEGER NOT NULL,
+    started_at INTEGER,
+    finished_at INTEGER,
+    FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision),
+    CHECK (attempts <= max_attempts),
+    CHECK ((state = 'running') = (worker IS NOT NULL AND lease_expires_at IS NOT NULL)),
+    CHECK ((state IN ('succeeded', 'failed', 'cancelled')) = (finished_at IS NOT NULL)),
+    CHECK ((state = 'failed') = (failure IS NOT NULL)),
+    CHECK (state = 'succeeded'
+        OR (files_checked IS NULL AND bytes_checked IS NULL AND mismatch_count IS NULL)),
+    CHECK ((kind = 'run_profile') = (profile IS NOT NULL))
+) STRICT;
+INSERT INTO jobs_v15 (id, actor, artifact_id, revision, kind, profile, state, attempts,
+        max_attempts, fence, run_after, worker, lease_expires_at, cancel_requested,
+        failure, files_checked, bytes_checked, mismatch_count, created_at, started_at,
+        finished_at)
+    SELECT id, actor, artifact_id, revision, kind, profile, state, attempts, max_attempts,
+        fence, run_after, worker, lease_expires_at, cancel_requested, failure,
+        files_checked, bytes_checked, mismatch_count, created_at, started_at, finished_at
+    FROM jobs;
+DROP TABLE jobs;
+ALTER TABLE jobs_v15 RENAME TO jobs;
+CREATE INDEX jobs_by_actor ON jobs (actor, created_at DESC, id);
+CREATE INDEX jobs_by_artifact ON jobs (artifact_id, created_at DESC, id);
+CREATE INDEX jobs_by_state ON jobs (state, run_after);
+CREATE TABLE builds (
+    artifact_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    profile TEXT NOT NULL,
+    job_id TEXT NOT NULL UNIQUE REFERENCES jobs (id),
+    tool_digest TEXT NOT NULL CHECK (length(tool_digest) = 64),
+    file_count INTEGER NOT NULL CHECK (file_count BETWEEN 1 AND 256),
+    total_bytes INTEGER NOT NULL CHECK (total_bytes >= 0),
+    published_at INTEGER NOT NULL,
+    PRIMARY KEY (artifact_id, revision, profile),
+    FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX builds_by_publication ON builds (artifact_id, published_at);
+CREATE TABLE build_files (
+    artifact_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    profile TEXT NOT NULL,
+    path TEXT NOT NULL,
+    size INTEGER NOT NULL CHECK (size >= 0),
+    digest BLOB NOT NULL REFERENCES blobs (digest),
+    PRIMARY KEY (artifact_id, revision, profile, path),
+    FOREIGN KEY (artifact_id, revision, profile)
+        REFERENCES builds (artifact_id, revision, profile)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX build_files_by_digest ON build_files (digest);
+CREATE TABLE job_diagnostics (
+    job_id TEXT NOT NULL REFERENCES jobs (id),
+    ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 0 AND 19),
+    path TEXT,
+    line INTEGER CHECK (line >= 0),
+    column_number INTEGER CHECK (column_number >= 0),
+    message TEXT NOT NULL CHECK (length(CAST(message AS BLOB)) BETWEEN 1 AND 512),
+    PRIMARY KEY (job_id, ordinal),
+    CHECK ((path IS NULL) = (line IS NULL) AND (path IS NULL) = (column_number IS NULL))
+) STRICT, WITHOUT ROWID;
+";
+
 /// Brings the database to [`SCHEMA_VERSION`] in one immediate transaction, or
 /// leaves it as it was. An empty database (version 0, no tables) is created
 /// fresh; an older version is upgraded step by step.
@@ -611,10 +707,11 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<(), StoreError> {
         .map_err(unavailable)?;
     // Decision 0057 rule 14: foreign keys are off for the jobs rebuild. The setting
     // cannot change inside a transaction, so it is cleared before BEGIN and set back
-    // after the commit or the rollback. Versions 8 to 13 hold job rows that other
-    // tables reference; deferring the checks is not enough, because DROP TABLE's
-    // implicit delete leaves a deferred violation that fails the commit.
-    let relax = enforced && (8..14).contains(&version);
+    // after the commit or the rollback. Versions 8 to 14 hold job rows that other
+    // tables reference, and schema 15 rebuilds `jobs` again (decision 0058 rule 9);
+    // deferring the checks is not enough, because DROP TABLE's implicit delete
+    // leaves a deferred violation that fails the commit.
+    let relax = enforced && (8..15).contains(&version);
     if relax {
         connection
             .pragma_update(None, "foreign_keys", false)
@@ -699,20 +796,7 @@ fn upgrade_steps(connection: &mut Connection) -> Result<(), StoreError> {
         .execute_batch(TOKEN_SCHEMA)
         .map_err(unavailable)?;
     if version < 10 {
-        let before = change_rows(&transaction)?;
-        keeping_feed_head(&transaction, USER_SCHEMA)?;
-        transaction
-            .execute_batch(ACTOR_FEED_HEADS)
-            .map_err(unavailable)?;
-        // The rebuilt feed holds every row the old one did, or the upgrade
-        // fails and nothing is changed: a cursor a client holds must not
-        // point at a position that is gone.
-        let after = change_rows(&transaction)?;
-        if before != after {
-            return Err(StoreError::Unavailable(format!(
-                "the upgrade to schema 10 would lose change rows ({before} before, {after} after)"
-            )));
-        }
+        add_users(&transaction)?;
     }
     if version < 11 {
         rebuild_changes(&transaction, DATA_CHANGE_SCHEMA, 11)?;
@@ -725,8 +809,10 @@ fn upgrade_steps(connection: &mut Connection) -> Result<(), StoreError> {
     if version < 13 {
         rebuild_changes(&transaction, JOB_CHANGE_SCHEMA, 13)?;
     }
-    if version < 14 {
-        rebuild_jobs(&transaction)?;
+    for (step, schema) in [(14, JOB_PROFILE_SCHEMA), (15, BUILD_SCHEMA)] {
+        if version < step {
+            rebuild_jobs(&transaction, schema, step)?;
+        }
     }
     // Foreign keys are off for these steps (decision 0057 rule 14), so they are
     // checked here: no table may have more foreign keys that do not resolve
@@ -1119,22 +1205,44 @@ fn job_rows(transaction: &Transaction<'_>) -> Result<i64, StoreError> {
         .map_err(unavailable)
 }
 
-/// Rebuilds `jobs` for schema 14 (decision 0057 rule 14). Every row is copied
-/// with every old column. The step fails, and the caller's transaction rolls
-/// back, when the row count differs. [`upgrade`]'s closing check finds a
-/// foreign key that it broke.
-fn rebuild_jobs(transaction: &Transaction<'_>) -> Result<(), StoreError> {
+/// The step of schema 10: users, with the change feed rebuilt for one head
+/// per actor. The rebuilt feed holds every row the old one did, or the upgrade
+/// fails and nothing is changed: a cursor a client holds must not point at a
+/// position that is gone.
+fn add_users(transaction: &Transaction<'_>) -> Result<(), StoreError> {
+    let before = change_rows(transaction)?;
+    keeping_feed_head(transaction, USER_SCHEMA)?;
+    transaction
+        .execute_batch(ACTOR_FEED_HEADS)
+        .map_err(unavailable)?;
+    let after = change_rows(transaction)?;
+    if before != after {
+        return Err(StoreError::Unavailable(format!(
+            "the upgrade to schema 10 would lose change rows ({before} before, {after} after)"
+        )));
+    }
+    Ok(())
+}
+
+/// Rebuilds `jobs` with `schema`, the step of schema `version` (14: decision
+/// 0057 rule 14; 15: decision 0058 rule 9). Every row is copied with every old
+/// column. The step fails, and the caller's transaction rolls back, when the
+/// row count differs. [`upgrade`]'s closing check finds a foreign key that it
+/// broke.
+fn rebuild_jobs(
+    transaction: &Transaction<'_>,
+    schema: &str,
+    version: i64,
+) -> Result<(), StoreError> {
     transaction
         .pragma_update(None, "defer_foreign_keys", true)
         .map_err(unavailable)?;
     let before = job_rows(transaction)?;
-    transaction
-        .execute_batch(JOB_PROFILE_SCHEMA)
-        .map_err(unavailable)?;
+    transaction.execute_batch(schema).map_err(unavailable)?;
     let after = job_rows(transaction)?;
     if before != after {
         return Err(StoreError::Unavailable(format!(
-            "the upgrade to schema 14 would lose job rows ({before} before, {after} after)"
+            "the upgrade to schema {version} would lose job rows ({before} before, {after} after)"
         )));
     }
     Ok(())

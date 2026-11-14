@@ -35,6 +35,7 @@ use super::{
 };
 
 mod attempts;
+mod builds;
 
 /// The columns of a job row, in the order [`RawJob::from_row`] reads them.
 const COLUMNS: &str = "id, actor, artifact_id, revision, kind, state, cancel_requested, attempts,
@@ -498,6 +499,9 @@ fn end(
             ],
         )
         .map_err(unavailable)?;
+    if state == JobState::Failed {
+        builds::keep_newest_diagnostics(transaction, id)?;
+    }
     Ok(())
 }
 
@@ -955,13 +959,18 @@ pub(super) fn revoke_for_purge(
             params![artifact.as_str(), now.0],
         )
         .map_err(unavailable)?;
-    transaction
-        .execute(
-            "DELETE FROM job_findings
-             WHERE job_id IN (SELECT id FROM jobs WHERE artifact_id = ?1)",
-            [artifact.as_str()],
-        )
-        .map_err(unavailable)?;
+    // Findings, and the diagnostics of a failed build (decision 0058 rule 12),
+    // may name the artifact's paths and source text.
+    for statement in [
+        "DELETE FROM job_findings
+         WHERE job_id IN (SELECT id FROM jobs WHERE artifact_id = ?1)",
+        "DELETE FROM job_diagnostics
+         WHERE job_id IN (SELECT id FROM jobs WHERE artifact_id = ?1)",
+    ] {
+        transaction
+            .execute(statement, [artifact.as_str()])
+            .map_err(unavailable)?;
+    }
     transaction
         .execute(
             "UPDATE jobs SET files_checked = NULL, bytes_checked = NULL, mismatch_count = NULL

@@ -353,3 +353,166 @@ INSERT INTO actor_feeds (actor, head)
     SELECT DISTINCT c.actor, coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'changes'), 0)
     FROM changes c;
 ";
+
+/// Schema 11: the change table as schema 11 made it. A frozen copy of `DATA_CHANGE_SCHEMA` at commit 1ddb3ac.
+pub const STEP_11: &str = "
+CREATE TABLE changes_v11 (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor TEXT NOT NULL,
+    actor_seq INTEGER NOT NULL CHECK (actor_seq >= 1),
+    artifact_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN
+        ('created', 'revised', 'metadata_updated', 'deleted', 'recovered', 'purged',
+         'data_changed')),
+    revision INTEGER NOT NULL,
+    metadata_revision INTEGER NOT NULL,
+    data_version INTEGER,
+    committed_at INTEGER NOT NULL,
+    UNIQUE (actor, actor_seq),
+    FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision),
+    FOREIGN KEY (artifact_id, metadata_revision)
+        REFERENCES metadata_revisions (artifact_id, metadata_revision),
+    CHECK ((kind = 'data_changed') = (data_version IS NOT NULL)),
+    CHECK (data_version IS NULL OR data_version >= 1)
+) STRICT;
+INSERT INTO changes_v11 (sequence, actor, actor_seq, artifact_id, kind, revision,
+        metadata_revision, committed_at)
+    SELECT sequence, actor, actor_seq, artifact_id, kind, revision, metadata_revision,
+        committed_at
+    FROM changes;
+DROP TABLE changes;
+ALTER TABLE changes_v11 RENAME TO changes;
+";
+
+/// Schema 12: the asset tables as schema 12 made them. A frozen copy of `ASSET_SCHEMA` at commit 1ddb3ac.
+pub const STEP_12: &str = "
+CREATE TABLE asset_ids (id TEXT PRIMARY KEY CHECK (length(id) = 64)) STRICT;
+CREATE TABLE asset_spaces (
+ artifact_id TEXT NOT NULL REFERENCES artifacts(id), actor TEXT NOT NULL,
+ asset_version INTEGER NOT NULL CHECK (asset_version >= 1),
+ PRIMARY KEY (artifact_id, actor)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE assets (
+ artifact_id TEXT NOT NULL REFERENCES artifacts(id), actor TEXT NOT NULL,
+ id TEXT NOT NULL REFERENCES asset_ids(id), content_type TEXT NOT NULL,
+ size INTEGER NOT NULL CHECK (size >= 1 AND size <= 5242880),
+ digest BLOB NOT NULL REFERENCES blobs(digest), created_at INTEGER NOT NULL,
+ PRIMARY KEY (artifact_id, actor, id)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX assets_by_actor ON assets(actor, artifact_id);
+CREATE INDEX assets_by_digest ON assets(digest);
+CREATE TABLE asset_requests (
+ actor TEXT NOT NULL, request_key TEXT NOT NULL,
+ fingerprint BLOB NOT NULL CHECK (length(fingerprint) = 32),
+ artifact_id TEXT NOT NULL REFERENCES artifacts(id),
+ asset_version INTEGER NOT NULL CHECK (asset_version >= 0),
+ asset_id TEXT, content_type TEXT, size INTEGER, digest BLOB, uploaded_at INTEGER,
+ deleted INTEGER NOT NULL CHECK (deleted IN (0,1)), created_at INTEGER NOT NULL,
+ PRIMARY KEY (actor, request_key)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX asset_requests_by_artifact ON asset_requests(artifact_id);
+";
+
+/// Schema 13: the change table as schema 13 made it. A frozen copy of `JOB_CHANGE_SCHEMA` at commit 1ddb3ac.
+pub const STEP_13: &str = "
+CREATE TABLE changes_v13 (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor TEXT NOT NULL,
+    actor_seq INTEGER NOT NULL CHECK (actor_seq >= 1),
+    artifact_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN
+        ('created', 'revised', 'metadata_updated', 'deleted', 'recovered', 'purged',
+         'data_changed', 'job_changed')),
+    revision INTEGER NOT NULL,
+    metadata_revision INTEGER NOT NULL,
+    data_version INTEGER,
+    job_id TEXT,
+    committed_at INTEGER NOT NULL,
+    UNIQUE (actor, actor_seq),
+    FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision),
+    FOREIGN KEY (artifact_id, metadata_revision)
+        REFERENCES metadata_revisions (artifact_id, metadata_revision),
+    FOREIGN KEY (job_id) REFERENCES jobs (id),
+    CHECK ((kind = 'data_changed') = (data_version IS NOT NULL)),
+    CHECK (data_version IS NULL OR data_version >= 1),
+    CHECK ((kind = 'job_changed') = (job_id IS NOT NULL))
+) STRICT;
+INSERT INTO changes_v13 (sequence, actor, actor_seq, artifact_id, kind, revision,
+        metadata_revision, data_version, committed_at)
+    SELECT sequence, actor, actor_seq, artifact_id, kind, revision, metadata_revision,
+        data_version, committed_at
+    FROM changes;
+DROP TABLE changes;
+ALTER TABLE changes_v13 RENAME TO changes;
+";
+
+/// Schema 14: the `jobs` rebuild and the execution attempts of schema 14. A frozen copy of `JOB_PROFILE_SCHEMA` at commit 1ddb3ac.
+pub const STEP_14: &str = "
+CREATE TABLE jobs_v14 (
+    id TEXT PRIMARY KEY,
+    actor TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('verify_revision', 'run_profile')),
+    profile TEXT,
+    state TEXT NOT NULL CHECK (state IN
+        ('queued', 'running', 'retry_scheduled', 'succeeded', 'failed', 'cancelled')),
+    attempts INTEGER NOT NULL CHECK (attempts >= 0),
+    max_attempts INTEGER NOT NULL CHECK (max_attempts >= 1),
+    fence INTEGER NOT NULL CHECK (fence >= 0),
+    run_after INTEGER NOT NULL,
+    worker TEXT,
+    lease_expires_at INTEGER,
+    cancel_requested INTEGER NOT NULL CHECK (cancel_requested IN (0, 1)),
+    failure TEXT CHECK (failure IN
+        ('revision_unavailable', 'storage_unavailable', 'lease_expired', 'internal',
+         'execution_unavailable')),
+    files_checked INTEGER CHECK (files_checked >= 0),
+    bytes_checked INTEGER CHECK (bytes_checked >= 0),
+    mismatch_count INTEGER CHECK (mismatch_count >= 0),
+    created_at INTEGER NOT NULL,
+    started_at INTEGER,
+    finished_at INTEGER,
+    FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision),
+    CHECK (attempts <= max_attempts),
+    CHECK ((state = 'running') = (worker IS NOT NULL AND lease_expires_at IS NOT NULL)),
+    CHECK ((state IN ('succeeded', 'failed', 'cancelled')) = (finished_at IS NOT NULL)),
+    CHECK ((state = 'failed') = (failure IS NOT NULL)),
+    CHECK (state = 'succeeded'
+        OR (files_checked IS NULL AND bytes_checked IS NULL AND mismatch_count IS NULL)),
+    CHECK ((kind = 'run_profile') = (profile IS NOT NULL))
+) STRICT;
+INSERT INTO jobs_v14 (id, actor, artifact_id, revision, kind, state, attempts,
+        max_attempts, fence, run_after, worker, lease_expires_at, cancel_requested,
+        failure, files_checked, bytes_checked, mismatch_count, created_at, started_at,
+        finished_at)
+    SELECT id, actor, artifact_id, revision, kind, state, attempts, max_attempts, fence,
+        run_after, worker, lease_expires_at, cancel_requested, failure, files_checked,
+        bytes_checked, mismatch_count, created_at, started_at, finished_at
+    FROM jobs;
+DROP TABLE jobs;
+ALTER TABLE jobs_v14 RENAME TO jobs;
+CREATE INDEX jobs_by_actor ON jobs (actor, created_at DESC, id);
+CREATE INDEX jobs_by_artifact ON jobs (artifact_id, created_at DESC, id);
+CREATE INDEX jobs_by_state ON jobs (state, run_after);
+CREATE TABLE execution_attempts (
+    attempt TEXT PRIMARY KEY CHECK (length(attempt) = 32),
+    job_id TEXT NOT NULL REFERENCES jobs (id),
+    fence INTEGER NOT NULL,
+    actor_generation INTEGER,
+    profile TEXT NOT NULL,
+    tool_digest TEXT NOT NULL CHECK (length(tool_digest) = 64),
+    machine TEXT NOT NULL,
+    boot TEXT NOT NULL,
+    cgroupns TEXT NOT NULL,
+    directory TEXT NOT NULL CHECK (length(directory) = 32),
+    state TEXT NOT NULL CHECK (state IN ('live', 'cleanup_pending', 'settled')),
+    revoked TEXT CHECK (revoked IN
+        ('cancel', 'trash', 'purge', 'generation', 'authority', 'lease', 'shutdown')),
+    created_at INTEGER NOT NULL,
+    settled_at INTEGER,
+    CHECK ((state = 'settled') = (settled_at IS NOT NULL))
+) STRICT;
+CREATE INDEX execution_attempts_by_job ON execution_attempts (job_id);
+CREATE INDEX execution_attempts_by_state ON execution_attempts (state);
+";

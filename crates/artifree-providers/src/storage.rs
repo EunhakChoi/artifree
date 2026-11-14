@@ -608,7 +608,8 @@ impl ArtifactStore for SqliteStore {
                 .execute(
                     "DELETE FROM blobs WHERE NOT EXISTS
                          (SELECT 1 FROM revision_files f WHERE f.digest = blobs.digest)
-                       AND NOT EXISTS (SELECT 1 FROM assets a WHERE a.digest = blobs.digest)",
+                       AND NOT EXISTS (SELECT 1 FROM assets a WHERE a.digest = blobs.digest)
+                       AND NOT EXISTS (SELECT 1 FROM build_files g WHERE g.digest = blobs.digest)",
                     [],
                 )
                 .map_err(unavailable)?;
@@ -947,28 +948,36 @@ fn purged_at(connection: &Connection, id: &ArtifactId) -> Result<UnixMillis, Sto
         .ok_or_else(|| corrupt("a purged artifact has no purge time"))
 }
 
-/// Deletes the listings of all files of an artifact's revisions, and the
-/// content that no other revision file refers to afterwards. Content shared
-/// with a copy, or with another revision, stays.
+/// Deletes the listings of all files of an artifact's revisions and builds, its
+/// builds (decision 0058 rule 12), and the content that nothing else refers to
+/// afterwards. Content shared with a copy, another revision or another build
+/// stays.
 fn remove_files(transaction: &Transaction<'_>, id: &ArtifactId) -> Result<(), StoreError> {
     let digests: Vec<Vec<u8>> = transaction
-        .prepare("SELECT DISTINCT digest FROM revision_files WHERE artifact_id = ?1")
+        .prepare(
+            "SELECT digest FROM revision_files WHERE artifact_id = ?1
+             UNION SELECT digest FROM build_files WHERE artifact_id = ?1",
+        )
         .map_err(unavailable)?
         .query_map([id.as_str()], |row| row.get(0))
         .map_err(unavailable)?
         .collect::<Result<_, _>>()
         .map_err(unavailable)?;
-    transaction
-        .execute(
-            "DELETE FROM revision_files WHERE artifact_id = ?1",
-            [id.as_str()],
-        )
-        .map_err(unavailable)?;
+    for statement in [
+        "DELETE FROM revision_files WHERE artifact_id = ?1",
+        "DELETE FROM build_files WHERE artifact_id = ?1",
+        "DELETE FROM builds WHERE artifact_id = ?1",
+    ] {
+        transaction
+            .execute(statement, [id.as_str()])
+            .map_err(unavailable)?;
+    }
     let mut remove = transaction
         .prepare_cached(
             "DELETE FROM blobs WHERE digest = ?1
                AND NOT EXISTS (SELECT 1 FROM revision_files f WHERE f.digest = ?1)
-               AND NOT EXISTS (SELECT 1 FROM assets a WHERE a.digest = ?1)",
+               AND NOT EXISTS (SELECT 1 FROM assets a WHERE a.digest = ?1)
+               AND NOT EXISTS (SELECT 1 FROM build_files g WHERE g.digest = ?1)",
         )
         .map_err(unavailable)?;
     for digest in digests {
@@ -977,14 +986,16 @@ fn remove_files(transaction: &Transaction<'_>, id: &ArtifactId) -> Result<(), St
     Ok(())
 }
 
-/// The content no revision file refers to: how many, how large, and the
-/// identity of the set (SHA-256 over a fixed prefix and the sorted digests).
+/// The content no revision file, asset or build file refers to: how many, how
+/// large, and the identity of the set (SHA-256 over a fixed prefix and the
+/// sorted digests).
 fn count_unreferenced(connection: &Connection) -> Result<UnreferencedContent, StoreError> {
     let mut statement = connection
         .prepare(
             "SELECT digest, length(content) FROM blobs b
              WHERE NOT EXISTS (SELECT 1 FROM revision_files f WHERE f.digest = b.digest)
                AND NOT EXISTS (SELECT 1 FROM assets a WHERE a.digest = b.digest)
+               AND NOT EXISTS (SELECT 1 FROM build_files g WHERE g.digest = b.digest)
              ORDER BY digest",
         )
         .map_err(unavailable)?;
