@@ -390,7 +390,7 @@ fn job_the_fixture_plan_still_yields_its_output() -> Result<(), Box<dyn Error>> 
         .output
         .map_err(|refusal| format!("the fixture output was not collected: {refusal:?}"))?;
     let files: Vec<(String, Vec<u8>)> = collected
-        .package
+        .files
         .files()
         .map(|(path, bytes)| (path.as_str().to_owned(), bytes.to_vec()))
         .collect();

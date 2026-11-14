@@ -809,6 +809,17 @@ sudo "$PREPARE" package-modify
 run_unit "$lib_binary" react-v1-modified execution::attempt::bundler_tests::job_react_v1_refuses_a_modified_root -p Delegate=yes
 sudo "$PREPARE" package-restore
 
+# Part 17 is the worker's half of builds (R03cb): each case is one react-v1 job (or a job of the
+# react-v1 check, which runs the fixture's payload under react-v1's filter) through the real worker,
+# and the test checks the end rule 18 names, its diagnostics and the published build.
+say "part 17: builds through the worker (0058, R03cb)"
+for case in template bad-import resolver no-script; do
+  run_server_job copy "server-build-$case" builds::job_a_build_ends_as_its_case_names --setenv="ARTIFREE_BUILD_CASE=$case"
+done
+run_server_job thread-refusal server-build-filter builds::job_a_build_ends_as_its_case_names --setenv=ARTIFREE_BUILD_CASE=filter
+run_server_job flood server-build-flood builds::job_a_build_ends_as_its_case_names --setenv=ARTIFREE_BUILD_CASE=flood
+sudo "$PREPARE" scenario exit
+
 say "restore the routing and the profile"
 sudo "$PREPARE" routing-pipe
 sudo "$PREPARE" profile-off

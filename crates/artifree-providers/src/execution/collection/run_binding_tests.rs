@@ -10,7 +10,7 @@
 
 use std::error::Error;
 
-use artifree_domain::package::{FilePackage, PackagePath};
+use artifree_domain::package::{FileSet, PackagePath};
 use artifree_ports::execution::BoundRun;
 use sha2::{Digest, Sha256};
 
@@ -55,7 +55,7 @@ fn bound_run(generation: Option<u64>) -> BoundRun {
 /// The manifest of the one-file package under a binding that carries `run`.
 fn manifest_of(run: Option<BoundRun>) -> TestResult<OutputManifest> {
     let path: PackagePath = "index.html".parse()?;
-    let package = FilePackage::new(vec![(path, INDEX_HTML.to_vec())])?;
+    let package = FileSet::new(vec![(path, INDEX_HTML.to_vec())])?;
     let binding = ManifestBinding {
         profile: "artifree-fixture-inspection-v1",
         profile_manifest_sha256: [1; 32],

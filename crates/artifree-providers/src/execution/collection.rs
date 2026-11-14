@@ -16,12 +16,13 @@ use std::os::fd::OwnedFd;
 use std::str::FromStr;
 
 use artifree_domain::package::{
-    FilePackage, MAX_FILE_BYTES, MAX_PACKAGE_BYTES, MAX_PATH_SEGMENTS, PackageError, PackagePath,
+    FileSet, MAX_FILE_BYTES, MAX_PACKAGE_BYTES, MAX_PATH_SEGMENTS, PackageError, PackagePath,
 };
 use artifree_ports::execution::BoundRun;
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, Stat};
 use sha2::{Digest, Sha256};
 
+use super::profile::OutputRule;
 #[cfg(test)]
 use super::report::hex;
 use super::staging::RESOLVE;
@@ -94,7 +95,8 @@ pub(super) enum CollectionRefusal {
     TooLarge,
     /// A name that is not UTF-8, or a path that is not a portable package path.
     InvalidPath,
-    /// The collected files do not form a valid `FilePackage`.
+    /// The collected files break a package rule, or, under `OutputRule::Package`, have no
+    /// `index.html`.
     Package(PackageReason),
 }
 
@@ -128,11 +130,11 @@ pub(super) struct OutputManifest {
 }
 
 impl OutputManifest {
-    /// The manifest of `package` under `binding`.
-    fn of(package: &FilePackage, binding: &ManifestBinding) -> Self {
+    /// The manifest of `files` under `binding`.
+    fn of(files: &FileSet, binding: &ManifestBinding) -> Self {
         Self {
             binding: binding.clone(),
-            files: package
+            files: files
                 .files()
                 .map(|(path, bytes)| {
                     let sha256: [u8; 32] = Sha256::digest(bytes).into();
@@ -214,16 +216,18 @@ fn run_lines(run: &BoundRun) -> String {
     )
 }
 
-/// A collected package with its manifest.
+/// The collected files with their manifest.
 #[derive(Debug)]
 pub(super) struct CollectedOutput {
-    /// The admitted files.
-    pub(super) package: FilePackage,
+    /// The admitted files. Under `OutputRule::Package` they hold `index.html`.
+    pub(super) files: FileSet,
     /// The manifest that binds those files.
     pub(super) manifest: OutputManifest,
 }
 
-/// Collects the output root held by `out`, which the keeper holds (0042, rule 7).
+/// Collects the output root held by `out`, which the keeper holds (0042, rule 7), under the
+/// profile's output rule: a package needs its `index.html`, a bundle does not (decision 0058 rule
+/// 8).
 ///
 /// # Errors
 ///
@@ -231,8 +235,9 @@ pub(super) struct CollectedOutput {
 pub(super) fn collect(
     out: &OwnedFd,
     binding: &ManifestBinding,
+    rule: OutputRule,
 ) -> Result<CollectedOutput, CollectionRefusal> {
-    collect_with(out, binding, &mut |_, _| {})
+    collect_with(out, binding, rule, &mut |_, _| {})
 }
 
 /// `collect`, with `hook` run for each entry between its classification and its open. The unit
@@ -240,6 +245,7 @@ pub(super) fn collect(
 fn collect_with(
     out: &OwnedFd,
     binding: &ManifestBinding,
+    rule: OutputRule,
     hook: &mut dyn FnMut(&OwnedFd, &str),
 ) -> Result<CollectedOutput, CollectionRefusal> {
     let mut walk = Walk {
@@ -249,10 +255,13 @@ fn collect_with(
         paths: BTreeSet::new(),
     };
     walk_directory(out, "", 0, &mut walk, hook)?;
-    let package = FilePackage::new(walk.files)
-        .map_err(|error| CollectionRefusal::Package(package_reason(&error)))?;
-    let manifest = OutputManifest::of(&package, binding);
-    Ok(CollectedOutput { package, manifest })
+    let refused = |error: PackageError| CollectionRefusal::Package(package_reason(&error));
+    let files = FileSet::new(walk.files).map_err(refused)?;
+    if rule == OutputRule::Package && files.file(&PackagePath::entry()).is_none() {
+        return Err(refused(PackageError::MissingEntry));
+    }
+    let manifest = OutputManifest::of(&files, binding);
+    Ok(CollectedOutput { files, manifest })
 }
 
 /// What the traversal has read so far.

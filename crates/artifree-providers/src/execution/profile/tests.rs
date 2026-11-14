@@ -2,8 +2,8 @@
 
 use super::super::policy::FilterSet;
 use super::{
-    FIXTURE_EXECUTION, MEASUREMENT, PROFILES, REACT_V1, REACT_V1_FILTER_CHECK, TEST_ENTRIES,
-    by_identity, by_name, filter_sets,
+    FIXTURE_EXECUTION, MEASUREMENT, OutputRule, PROFILES, REACT_V1, REACT_V1_FILTER_CHECK,
+    TEST_ENTRIES, by_identity, by_name, filter_sets,
 };
 
 #[test]
@@ -52,17 +52,28 @@ fn react_v1_is_found_by_its_exact_name_and_identity() {
 }
 
 #[test]
-fn the_test_entries_are_found_by_identity_but_never_by_name() {
-    assert_eq!(
-        by_identity("artifree-bundler-measurement-v1"),
-        Some(&MEASUREMENT)
-    );
+fn the_react_v1_check_is_a_build_profile_with_the_fixtures_payload() {
+    assert_eq!(by_name("react-v1-check"), Some(&REACT_V1_FILTER_CHECK));
     assert_eq!(
         by_identity("artifree-react-v1-filter-check"),
         Some(&REACT_V1_FILTER_CHECK)
     );
     assert_eq!(REACT_V1_FILTER_CHECK.payload, FIXTURE_EXECUTION.payload);
     assert_eq!(REACT_V1_FILTER_CHECK.filter, FilterSet::ReactV1);
+    let builds: Vec<&str> = PROFILES
+        .iter()
+        .filter(|profile| profile.output == OutputRule::Bundle)
+        .map(|profile| profile.name)
+        .collect();
+    assert_eq!(builds, ["react-v1", "react-v1-check"]);
+}
+
+#[test]
+fn the_test_entries_are_found_by_identity_but_never_by_name() {
+    assert_eq!(
+        by_identity("artifree-bundler-measurement-v1"),
+        Some(&MEASUREMENT)
+    );
     for entry in TEST_ENTRIES {
         assert_eq!(entry.name, "");
         assert_eq!(by_name(entry.name), None);
@@ -104,4 +115,10 @@ fn a_feature_build_offers_every_profile_in_the_table_with_its_claims() {
         .collect();
     let table: Vec<&str> = PROFILES.iter().map(|profile| profile.name).collect();
     assert_eq!(offered, table);
+    let builds = super::super::build_profiles();
+    let built: Vec<&str> = builds
+        .iter()
+        .map(artifree_domain::job::ProfileName::as_str)
+        .collect();
+    assert_eq!(built, ["react-v1", "react-v1-check"]);
 }

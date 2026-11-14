@@ -70,7 +70,7 @@ use super::guardian::{self, GuardianReason};
 use super::lock::{AdmissionLock, LockRefusal};
 use super::policy::FilterSet;
 use super::probe_group::{self, ProbeGroup};
-use super::profile::{self, ExecutionProfile, FIXTURE_EXECUTION, InputRule};
+use super::profile::{self, ExecutionProfile, FIXTURE_EXECUTION, InputRule, OutputRule};
 use super::readiness::{self, GroupObservation};
 use super::registry::{self, HostIdentity, Identity, QuarantineReason, Reconciled, Registry};
 use super::report::HostReport;
@@ -1113,7 +1113,7 @@ fn run_registered(
         return Err(refused(AttemptFailure::Quarantined));
     }
     let binding = manifest_binding(plan.profile, &held.report, &filter, input_digest, run);
-    let output = collect_output(keeper, passed.exit, &binding);
+    let output = collect_output(keeper, passed.exit, &binding, plan.profile.output);
     Ok(AttemptEvidence {
         group: group_path,
         limits: passed.limits,
@@ -1355,11 +1355,14 @@ fn collect_output(
     keeper: Option<Keeper>,
     exit: ExitStatus,
     binding: &ManifestBinding,
+    rule: OutputRule,
 ) -> Result<CollectedOutput, OutputRefusal> {
     let Some(keeper) = keeper.filter(|_| exit.code() == Some(0)) else {
         return Err(OutputRefusal::NotCollected);
     };
-    keeper.collect(binding).map_err(OutputRefusal::Refused)
+    keeper
+        .collect(binding, rule)
+        .map_err(OutputRefusal::Refused)
 }
 
 /// The last routing check, once the group is empty (0056 rule 5, as reworded by the amendment of

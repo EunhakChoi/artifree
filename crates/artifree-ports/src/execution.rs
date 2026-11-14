@@ -12,7 +12,7 @@ use artifree_domain::SourceRevision;
 use artifree_domain::change::FeedId;
 use artifree_domain::identity::{ActorId, ArtifactId, StateGeneration};
 use artifree_domain::job::{AttemptIdentity, CheckpointAnswer, JobId, ProfileName, StopReason};
-use artifree_domain::package::FilePackage;
+use artifree_domain::package::{FilePackage, FileSet};
 
 use crate::artifact_store::FileEntry;
 use crate::job_store::{AttemptRow, ProfileCounts};
@@ -194,12 +194,13 @@ impl BoundRun {
     }
 }
 
-/// The output of a run that succeeded and was admitted: the counts, the profile
+/// The output of a run that succeeded and was admitted: its files, the profile
 /// and tool digest the manifest names, and the values the run is bound to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileOutput {
-    /// The files and bytes of the admitted output.
-    pub counts: ProfileCounts,
+    /// The admitted files. A build profile's hold no `index.html`: the worker
+    /// composes them with the revision (decision 0058 rule 8).
+    pub files: FileSet,
     /// The profile the manifest names.
     pub profile: ProfileName,
     /// The tool root manifest digest the manifest names, 64 lowercase hex
@@ -207,6 +208,20 @@ pub struct ProfileOutput {
     pub tool_digest: String,
     /// The values the manifest binds the run to.
     pub bound: BoundRun,
+}
+
+impl ProfileOutput {
+    /// The number of files and bytes of the output, saturating at `u64::MAX`.
+    #[must_use]
+    pub fn counts(&self) -> ProfileCounts {
+        let bytes = self.files.files().fold(0_u64, |total, (_, content)| {
+            total.saturating_add(u64::try_from(content.len()).unwrap_or(u64::MAX))
+        });
+        ProfileCounts {
+            files: u64::try_from(self.files.len()).unwrap_or(u64::MAX),
+            bytes,
+        }
+    }
 }
 
 /// Why a launch produced no output.
@@ -218,6 +233,10 @@ pub enum LaunchFailure {
     /// The payload did not start: the host, the quarantine, the registry, the
     /// input staging, the group or the guardian refused.
     Unavailable,
+    /// The payload did not start because the input holds a file that would
+    /// change how the bundler resolves an import (decision 0058 rule 2). It is
+    /// the revision that is wrong, not the host.
+    ResolverConfiguration,
     /// The payload exited with a status other than 0 (decision 0058 rule 18).
     Exited,
     /// The system call filter killed the payload (decision 0058 rule 18).
@@ -226,8 +245,10 @@ pub enum LaunchFailure {
     /// 18). A limit that the payload sees as a failed call ends it as
     /// [`LaunchFailure::Exited`] instead.
     Limit(LimitKind),
-    /// The payload ran and another part of its verdict failed, or its output
-    /// was refused (decision 0042 rule 7).
+    /// The payload exited 0 and its output was refused by the collection rules
+    /// of decision 0042 rule 7.
+    OutputRefused,
+    /// The payload ran and another part of its verdict failed.
     Failed,
 }
 

@@ -3,6 +3,10 @@
 //! real `SQLite` store and a scripted port. The launch is scripted and runs no
 //! payload, so every host runs these tests.
 //!
+//! A job of a build profile (decision 0058, slice R03cb) is composed with its
+//! revision and published as a build, or ends with rule 18's failures and rule
+//! 13's diagnostics.
+//!
 //! The service and the worker's store are two connections to one database file.
 //! Time is fixed, so nothing sleeps.
 
@@ -21,8 +25,9 @@ use artifree_domain::job::{
     AttemptIdentity, AttemptState, CheckpointAnswer, JobFailure, JobId, JobKind, JobState,
     ProfileName, Revocation, StopReason, WorkerId,
 };
-use artifree_domain::package::{FileChange, FilePackage, PackagePath};
+use artifree_domain::package::{FileChange, FilePackage, FileSet, PackagePath};
 use artifree_ports::artifact_store::{ArtifactStore, FileEntry};
+use artifree_ports::build_store::BuildStore;
 use artifree_ports::execution::{
     BoundRun, Capacity, Checkpoint, CheckpointUnavailable, Execution, ExecutionHost, HeldCapacity,
     LaunchFailure, LaunchOutcome, LimitKind, PinnedInput, ProfileOutput, ProfileRun,
@@ -34,17 +39,40 @@ use artifree_providers::storage::{DATABASE_FILE, SqliteStore};
 use rusqlite::Connection;
 
 type TestResult = Result<(), Box<dyn Error>>;
+/// Files with their content.
+type Files = Vec<(PackagePath, Vec<u8>)>;
+/// A stored diagnostic as its location and its message.
+type Shown = (Option<(String, u32, u32)>, String);
 
 const LEASE_MS: u64 = 1_000;
 const NOW: UnixMillis = UnixMillis(1_000_000);
 const INDEX_V1: &str = "<h1>pinned revision one</h1>";
 const INDEX_V2: &str = "<h1>head revision two</h1>";
 const STYLE: &str = "h1{color:red}";
-/// The counts the scripted launch reports for its output.
+/// The output of the scripted fixture launch.
+const FIXTURE_OUTPUT: &[(&str, &str)] = &[
+    ("index.html", "<h1>fixture output</h1>"),
+    ("copy.txt", "copied 15 bytes"),
+];
+/// The counts of [`FIXTURE_OUTPUT`].
 const OUTPUT_COUNTS: ProfileCounts = ProfileCounts {
     files: 2,
     bytes: 38,
 };
+/// The template revision of a build profile (decision 0058 rule 7).
+const TEMPLATE: &[(&str, &str)] = &[
+    (
+        "index.html",
+        "<!doctype html><div id=\"root\"></div><script type=\"module\" src=\"./app.js\"></script>",
+    ),
+    ("src/main.tsx", "render(<App />);"),
+    ("logo.svg", "<svg/>"),
+];
+/// The bundler's output that the scripted build launch hands over.
+const BUNDLE: &[(&str, &str)] = &[
+    ("app.js", "console.log(\"built\");"),
+    ("app.css", "h1{color:blue}"),
+];
 /// The word the scripted capacity gives for a refusal.
 const REFUSAL: &str = "quarantined";
 const TOOL_DIGEST: &str = concat!(
@@ -129,6 +157,14 @@ fn package(index: &str) -> Result<FilePackage, Box<dyn Error>> {
     Ok(FilePackage::new(files)?)
 }
 
+/// The validated pairs of `entries`.
+fn pairs(entries: &[(&str, &str)]) -> Result<Files, Box<dyn Error>> {
+    entries
+        .iter()
+        .map(|(path, content)| Ok((parsed::<PackagePath>(path)?, content.as_bytes().to_vec())))
+        .collect()
+}
+
 fn text(job: &JobId) -> String {
     job.as_str().to_owned()
 }
@@ -151,12 +187,27 @@ struct World {
     owner: ActorId,
     artifact: ArtifactId,
     profile: ProfileName,
+    /// The build profiles the worker is given: the world's profile, or none.
+    builds: Vec<ProfileName>,
     worker: WorkerId,
     _dir: TempDir,
 }
 
 impl World {
+    /// A world whose profile is the fixture, which is no build profile.
     fn new() -> Result<Self, Box<dyn Error>> {
+        Self::with(&package(INDEX_V1)?, "fixture", false)
+    }
+
+    /// A world whose profile is the build profile `react-v1` and whose revision
+    /// is the template with `extra` files.
+    fn building(extra: &[(&str, &str)]) -> Result<Self, Box<dyn Error>> {
+        let mut files = pairs(TEMPLATE)?;
+        files.extend(pairs(extra)?);
+        Self::with(&FilePackage::new(files)?, "react-v1", true)
+    }
+
+    fn with(revision: &FilePackage, profile: &str, build: bool) -> Result<Self, Box<dyn Error>> {
         let dir = TempDir::new()?;
         let database = dir.0.join(DATABASE_FILE);
         let store = SqliteStore::open(&database)?;
@@ -164,14 +215,20 @@ impl World {
         let owner: ActorId = parsed("owner")?;
         let key: RequestKey = parsed("create-key")?;
         let title: Title = parsed("Title")?;
-        let created = service.create(&owner, &key, &title, &package(INDEX_V1)?)?;
+        let created = service.create(&owner, &key, &title, revision)?;
+        let profile: ProfileName = parsed(profile)?;
         Ok(Self {
             store,
             service,
             database,
             owner,
             artifact: created.artifact.id,
-            profile: parsed("fixture")?,
+            builds: if build {
+                vec![profile.clone()]
+            } else {
+                Vec::new()
+            },
+            profile,
             worker: parsed("worker-execution")?,
             _dir: dir,
         })
@@ -298,8 +355,10 @@ enum Answer {
     Held,
 }
 
-/// The stderr that a failed launch of the fake port hands over.
-const FAILED_STDERR: &[u8] = b"payload error\n";
+/// The stderr that a failed launch of the fake port hands over: one error in
+/// the bundler's form, with its location, its quoted excerpt and its count.
+const FAILED_STDERR: &[u8] = b"\xe2\x9c\x98 [ERROR] Could not resolve \"left-pad\"\n\n    \
+../input/src/main.tsx:1:16:\n      1 \xe2\x94\x82 import pad from \"left-pad\";\n\n1 error\n";
 
 /// How a held launch ends.
 #[derive(Debug, Clone, Copy)]
@@ -325,6 +384,8 @@ struct Scene {
     attempt: AttemptIdentity,
     reconciled: Vec<AttemptIdentity>,
     launch: Launch,
+    /// The files of a successful launch's output.
+    output: &'static [(&'static str, &'static str)],
 }
 
 fn scene(answer: Answer, launch: Launch) -> Scene {
@@ -333,6 +394,7 @@ fn scene(answer: Answer, launch: Launch) -> Scene {
         attempt: held_attempt(),
         reconciled: Vec::new(),
         launch,
+        output: FIXTURE_OUTPUT,
     }
 }
 
@@ -371,6 +433,7 @@ impl Execution for FakeExecution {
                 attempt: self.scene.attempt,
                 reconciled: self.scene.reconciled.clone(),
                 launch: self.scene.launch,
+                output: self.scene.output,
             })),
         }
     }
@@ -386,6 +449,7 @@ struct HeldFixture {
     attempt: AttemptIdentity,
     reconciled: Vec<AttemptIdentity>,
     launch: Launch,
+    output: &'static [(&'static str, &'static str)],
 }
 
 impl fmt::Debug for HeldFixture {
@@ -429,13 +493,25 @@ impl HeldFixture {
         }
     }
 
-    fn output(&self, run: &ProfileRun<'_>, bound: BoundRun) -> ProfileOutput {
-        ProfileOutput {
-            counts: OUTPUT_COUNTS,
+    /// The scripted output. Files that break a package rule are a broken
+    /// script, which is logged as a problem and fails the launch.
+    fn output(
+        &self,
+        run: &ProfileRun<'_>,
+        bound: BoundRun,
+    ) -> Result<ProfileOutput, LaunchFailure> {
+        let files = pairs(self.output)
+            .and_then(|files| FileSet::new(files).map_err(Into::into))
+            .map_err(|error| {
+                self.shared.log.push(Seen::Problem(error.to_string()));
+                LaunchFailure::Failed
+            })?;
+        Ok(ProfileOutput {
+            files,
             profile: run.profile.clone(),
             tool_digest: self.tool_digest.clone(),
             bound,
-        }
+        })
     }
 
     /// Renews, has the job's cancel requested in the store, renews again, and
@@ -499,19 +575,19 @@ impl HeldCapacity for HeldFixture {
         match self.launch {
             Launch::Succeeds => LaunchOutcome {
                 cleanup_observed: true,
-                result: Ok(self.output(run, BoundRun::of(run))),
+                result: self.output(run, BoundRun::of(run)),
                 detail: "succeeded",
                 stderr: Vec::new(),
             },
             Launch::NamesAnotherRun => LaunchOutcome {
                 cleanup_observed: true,
-                result: Ok(self.output(
+                result: self.output(
                     run,
                     BoundRun {
                         fence: run.fence + 1,
                         ..BoundRun::of(run)
                     },
-                )),
+                ),
                 detail: "succeeded",
                 stderr: Vec::new(),
             },
@@ -529,7 +605,7 @@ impl HeldCapacity for HeldFixture {
             },
             Launch::NoCleanup => LaunchOutcome {
                 cleanup_observed: false,
-                result: Ok(self.output(run, BoundRun::of(run))),
+                result: self.output(run, BoundRun::of(run)),
                 detail: "unobserved",
                 stderr: Vec::new(),
             },
@@ -571,6 +647,7 @@ fn run_once(
         &Calm,
         Profiles {
             known: std::slice::from_ref(&world.profile),
+            builds: &world.builds,
             execution,
         },
         &mut |event| log.push(seen_of(event)),
@@ -971,18 +1048,28 @@ fn a_launch_that_never_started_fails_the_job_as_execution_unavailable() -> TestR
         JobFailure::ExecutionUnavailable,
         "unavailable",
         0,
+    )?;
+    // Resolver configuration is a build's failure; a profile that is no build
+    // profile keeps it as the refusal before the payload that it is.
+    a_failed_launch_settles_then_fails_the_job(
+        Launch::Fails(LaunchFailure::ResolverConfiguration),
+        JobFailure::ExecutionUnavailable,
+        "failed",
+        FAILED_STDERR.len(),
     )
 }
 
 #[test]
 fn a_launch_that_failed_fails_the_job_as_internal() -> TestResult {
-    // Until R03c stores the failures of decision 0058 rule 18, each of them is `internal`.
+    // A profile that is no build profile has none of decision 0058 rule 18's
+    // failures: each failed run is `internal`.
     for failure in [
         LaunchFailure::Exited,
         LaunchFailure::FilterKilled,
         LaunchFailure::Limit(LimitKind::WallTime),
         LaunchFailure::Limit(LimitKind::Memory),
         LaunchFailure::Limit(LimitKind::Log),
+        LaunchFailure::OutputRefused,
         LaunchFailure::Failed,
     ] {
         a_failed_launch_settles_then_fails_the_job(
@@ -1292,5 +1379,234 @@ fn a_failed_cleanup_pending_mark_is_reported_for_a_retry() -> TestResult {
         ("running".to_owned(), 1),
         "the job stays running with its claim counted"
     );
+    Ok(())
+}
+
+// --- builds (decision 0058, slice R03cb) ----------------------------------
+
+/// The paths of a package, in path order.
+fn paths_of(package: &FilePackage) -> Vec<String> {
+    package
+        .files()
+        .map(|(path, _)| path.as_str().to_owned())
+        .collect()
+}
+
+/// Runs one claim of a `react-v1` job of `world` with a held launch that ends
+/// as `launch` and hands over `output`, and returns the job's record.
+fn run_build(
+    world: &World,
+    launch: Launch,
+    output: &'static [(&'static str, &'static str)],
+) -> Result<JobRecord, Box<dyn Error>> {
+    let log = Arc::new(Log::default());
+    let job = world.enqueue_fixture("build-key")?;
+    let execution = FakeExecution {
+        shared: world.shared(&log),
+        scene: Scene {
+            output,
+            ..scene(Answer::Held, launch)
+        },
+    };
+    let record = finished(run_once(world, Some(&execution), &log)?)?;
+    assert_eq!(record.id, job, "the claimed job is the one that ran");
+    assert_eq!(problems(&log.snapshot()?), Vec::<String>::new());
+    assert_eq!(
+        world.attempt(&held_attempt())?.state,
+        AttemptState::Settled,
+        "the attempt is settled before the job ends"
+    );
+    Ok(record)
+}
+
+/// Decision 0058 rules 8 and 11: a passing build is the bundle with the
+/// revision's files outside `src/`, published with the job's success, whose
+/// counts are the build's.
+#[test]
+fn a_passing_build_is_composed_and_published_with_the_jobs_success() -> TestResult {
+    let world = World::building(&[("src/app.css", "h1{}")])?;
+    let record = run_build(&world, Launch::Succeeds, BUNDLE)?;
+
+    assert_eq!(record.state, JobState::Succeeded);
+    let files = world
+        .store
+        .build_files(&world.artifact, SourceRevision(1), &world.profile)?
+        .ok_or("the build was not published")?;
+    assert_eq!(
+        paths_of(&files),
+        ["app.css", "app.js", "index.html", "logo.svg"],
+        "the bundle and the revision's files outside src/"
+    );
+    assert_eq!(
+        files.file(&parsed("app.js")?),
+        Some(&b"console.log(\"built\");"[..])
+    );
+    let bytes = files
+        .files()
+        .map(|(_, content)| content.len())
+        .sum::<usize>();
+    assert_eq!(
+        record.counts,
+        Some(ProfileCounts {
+            files: 4,
+            bytes: u64::try_from(bytes)?,
+        }),
+        "the job's counts are the published build's"
+    );
+    let build = world
+        .store
+        .latest_build(&world.artifact, &world.profile)?
+        .ok_or("no latest build")?;
+    assert_eq!(
+        (&build.job, build.tool_digest.as_str()),
+        (&record.id, TOOL_DIGEST)
+    );
+    assert_eq!(world.store.diagnostics(&build.job)?, Vec::new());
+    Ok(())
+}
+
+/// The failure, and the diagnostics as (location, message), that a build job
+/// ended with.
+fn build_end(
+    world: &World,
+    record: &JobRecord,
+) -> Result<(Option<JobFailure>, Vec<Shown>), Box<dyn Error>> {
+    assert_eq!(record.state, JobState::Failed);
+    assert_eq!(record.counts, None, "a failed build publishes no counts");
+    assert_eq!(
+        world
+            .store
+            .build(&world.artifact, SourceRevision(1), &world.profile)?,
+        None,
+        "a failed build publishes nothing"
+    );
+    let diagnostics = world
+        .store
+        .diagnostics(&record.id)?
+        .into_iter()
+        .map(|diagnostic| {
+            (
+                diagnostic
+                    .location
+                    .map(|at| (at.path.as_str().to_owned(), at.line, at.column)),
+                diagnostic.message.as_str().to_owned(),
+            )
+        })
+        .collect();
+    Ok((record.failure, diagnostics))
+}
+
+/// Decision 0058 rules 13 and 18: a non-zero exit is `build_failed` with the
+/// bundler's messages as diagnostics at their package paths, a filter kill is
+/// `build_failed` with its fixed diagnostic, a limit is `limit_exceeded` and a
+/// refused output is `output_rejected`, both without diagnostics.
+#[test]
+fn each_failed_build_ends_with_its_own_failure_and_diagnostics() -> TestResult {
+    let no_file = |text: &str| (None, text.to_owned());
+    let cases: [(LaunchFailure, JobFailure, Vec<Shown>); 6] = [
+        (
+            LaunchFailure::Exited,
+            JobFailure::BuildFailed,
+            vec![(
+                Some(("src/main.tsx".to_owned(), 1, 16)),
+                "Could not resolve \"left-pad\"".to_owned(),
+            )],
+        ),
+        (
+            LaunchFailure::FilterKilled,
+            JobFailure::BuildFailed,
+            vec![no_file(
+                "the bundler was stopped because it made a system call outside its filter",
+            )],
+        ),
+        (
+            LaunchFailure::Limit(LimitKind::WallTime),
+            JobFailure::LimitExceeded,
+            Vec::new(),
+        ),
+        (
+            LaunchFailure::Limit(LimitKind::Memory),
+            JobFailure::LimitExceeded,
+            Vec::new(),
+        ),
+        (
+            LaunchFailure::Limit(LimitKind::Log),
+            JobFailure::LimitExceeded,
+            Vec::new(),
+        ),
+        (
+            LaunchFailure::OutputRefused,
+            JobFailure::OutputRejected,
+            Vec::new(),
+        ),
+    ];
+    for (launched, failure, diagnostics) in cases {
+        let world = World::building(&[])?;
+        let record = run_build(&world, Launch::Fails(launched), BUNDLE)?;
+        assert_eq!(
+            build_end(&world, &record)?,
+            (Some(failure), diagnostics),
+            "{launched:?}"
+        );
+    }
+    Ok(())
+}
+
+/// Decision 0058, note "R03c split": a revision that holds resolver
+/// configuration is the user's project at fault, so it ends as `build_failed`
+/// with one fixed diagnostic that names the first such path.
+#[test]
+fn resolver_configuration_is_a_failed_build_that_names_the_first_path() -> TestResult {
+    let world = World::building(&[("src/tsconfig.json", "{}"), ("src/zz/package.json", "{}")])?;
+    let record = run_build(
+        &world,
+        Launch::Fails(LaunchFailure::ResolverConfiguration),
+        BUNDLE,
+    )?;
+    assert_eq!(
+        build_end(&world, &record)?,
+        (
+            Some(JobFailure::BuildFailed),
+            vec![(
+                None,
+                "src/tsconfig.json would change how imports resolve; react-v1 builds only with \
+                 its preinstalled packages, so remove it"
+                    .to_owned()
+            )]
+        )
+    );
+    Ok(())
+}
+
+/// Decision 0058 rules 7 and 8: an output that cannot be composed ends the job
+/// as `output_rejected` and publishes nothing; a refusal before the payload and
+/// another failed verdict keep their meaning for a build.
+#[test]
+fn a_build_that_cannot_be_composed_is_output_rejected() -> TestResult {
+    const EXTRA_OUTPUT: &[(&str, &str)] = &[("app.js", "x"), ("chunk.js", "y")];
+    const NO_SCRIPT: &[(&str, &str)] = &[("app.css", "x")];
+    const COLLIDING: &[(&str, &str)] = &[("app.js", "x"), ("logo.svg", "<svg/>")];
+    for output in [EXTRA_OUTPUT, NO_SCRIPT, COLLIDING] {
+        let world = World::building(&[])?;
+        let record = run_build(&world, Launch::Succeeds, output)?;
+        assert_eq!(
+            build_end(&world, &record)?,
+            (Some(JobFailure::OutputRejected), Vec::new()),
+            "{output:?}"
+        );
+    }
+    for (launch, failure) in [
+        (Launch::Unavailable, JobFailure::ExecutionUnavailable),
+        (Launch::Fails(LaunchFailure::Failed), JobFailure::Internal),
+        (Launch::NamesAnotherRun, JobFailure::Internal),
+    ] {
+        let world = World::building(&[])?;
+        let record = run_build(&world, launch, BUNDLE)?;
+        assert_eq!(
+            build_end(&world, &record)?,
+            (Some(failure), Vec::new()),
+            "{launch:?}"
+        );
+    }
     Ok(())
 }

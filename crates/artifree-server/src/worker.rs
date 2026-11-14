@@ -152,8 +152,10 @@ pub fn run(
     on_event(&WorkerEvent::Ready { worker: &worker });
     // The profiles of this build are fixed for the life of the process.
     let known = artifree_providers::execution::known_profiles();
+    let builds = artifree_providers::execution::build_profiles();
     let profiles = Profiles {
         known: &known,
+        builds: &builds,
         execution,
     };
     let mut failures = 0_u32;
@@ -170,27 +172,8 @@ pub fn run(
         // Whether this call reported a refusal; a call without one (capacity held,
         // busy, or no port asked) ends a run of identical refusals.
         let mut refused_now = false;
-        let mut observed = |event: ClaimEvent<'_>| match event {
-            ClaimEvent::Settled(record) => on_event(&WorkerEvent::Job(record)),
-            ClaimEvent::Claimed(job) => on_event(&WorkerEvent::Claimed(job)),
-            ClaimEvent::Launched {
-                job,
-                detail,
-                stderr_bytes,
-            } => {
-                on_event(&WorkerEvent::Attempt {
-                    job,
-                    detail,
-                    stderr_bytes,
-                });
-            }
-            ClaimEvent::Refused(detail) => {
-                if last_refusal != Some(detail) {
-                    on_event(&WorkerEvent::Unavailable(detail));
-                }
-                last_refusal = Some(detail);
-                refused_now = true;
-            }
+        let mut observed = |event: ClaimEvent<'_>| {
+            pass_on(event, on_event, &mut last_refusal, &mut refused_now);
         };
         let step = worker::run_next_with(
             &store,
@@ -267,6 +250,39 @@ fn open_store(data_dir: &Path) -> Result<(SqliteStore, WorkerId), String> {
     let mut random = [0_u8; 4];
     getrandom::fill(&mut random).map_err(|error| format!("no system randomness: {error}"))?;
     Ok((store, WorkerId::from_random(random)))
+}
+
+/// Passes one claim event on to `on_event`. A refusal is passed on only when it differs from the
+/// last one, so that a refusal that lasts, such as a quarantine, is reported once; `refused_now`
+/// records that this call reported one.
+fn pass_on(
+    event: ClaimEvent<'_>,
+    on_event: &mut dyn FnMut(&WorkerEvent<'_>),
+    last_refusal: &mut Option<&'static str>,
+    refused_now: &mut bool,
+) {
+    match event {
+        ClaimEvent::Settled(record) => on_event(&WorkerEvent::Job(record)),
+        ClaimEvent::Claimed(job) => on_event(&WorkerEvent::Claimed(job)),
+        ClaimEvent::Launched {
+            job,
+            detail,
+            stderr_bytes,
+        } => {
+            on_event(&WorkerEvent::Attempt {
+                job,
+                detail,
+                stderr_bytes,
+            });
+        }
+        ClaimEvent::Refused(detail) => {
+            if *last_refusal != Some(detail) {
+                on_event(&WorkerEvent::Unavailable(detail));
+            }
+            *last_refusal = Some(detail);
+            *refused_now = true;
+        }
+    }
 }
 
 /// Writes the `cleanup_pending` mark of each attempt in `unmarked` again and keeps the ones that

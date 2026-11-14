@@ -18,7 +18,6 @@ use std::fs;
 use artifree_domain::package::{FilePackage, PackagePath};
 
 use super::super::AdmissionRefusal;
-use super::super::collection::{CollectionRefusal, PackageReason};
 use super::super::launcher::{EntryProgram, KILLED_BY_SIGSYS};
 use super::super::probe_group::PROBE_LIMITS;
 use super::super::profile::{MEASUREMENT, REACT_V1, REACT_V1_FILTER_CHECK};
@@ -146,9 +145,9 @@ fn react_v1_plan() -> AttemptPlan {
 
 /// Decision 0058 rules 1 to 4 (slice R03bcbb): `react-v1` builds the case in
 /// `ARTIFREE_REACT_CASE` under its own filter and the limits of 0042 rule 5. The template exits 0,
-/// and its output is collected within the output limits and is refused only
-/// for its missing `index.html`, which R03c's composition adds (rule 8). A bad import exits 1
-/// with the one message that names the import.
+/// and its output is collected within the output limits as the bundle alone: `app.js` and
+/// `app.css`, without `index.html`, which the worker's composition adds (rule 8, slice R03cb). A
+/// bad import exits 1 with the one message that names the import.
 #[test]
 #[ignore = "runs only in the Linux enforcement job"]
 fn job_react_v1_builds_the_template_within_the_limits() -> Result<(), Box<dyn Error>> {
@@ -175,12 +174,19 @@ fn job_react_v1_builds_the_template_within_the_limits() -> Result<(), Box<dyn Er
                 Some(0),
                 "the template must build; stderr: {stderr}"
             );
+            let collected = evidence
+                .output
+                .as_ref()
+                .map_err(|refusal| format!("the bundle was not collected: {refusal:?}"))?;
+            let paths: Vec<&str> = collected
+                .files
+                .files()
+                .map(|(path, _)| path.as_str())
+                .collect();
             assert_eq!(
-                evidence.output.as_ref().err(),
-                Some(&OutputRefusal::Refused(CollectionRefusal::Package(
-                    PackageReason::MissingEntry
-                ))),
-                "the output is read within its limits and lacks only index.html"
+                paths,
+                ["app.css", "app.js"],
+                "the bundle is read within its limits"
             );
         }
         "bad-import" => {
@@ -211,7 +217,7 @@ fn job_react_v1_builds_the_template_within_the_limits() -> Result<(), Box<dyn Er
 #[ignore = "runs only in the Linux enforcement job"]
 fn job_react_v1_kills_a_call_outside_its_filter() -> Result<(), Box<dyn Error>> {
     // The server is the entry program, as for the measurement: the fixture program is built
-    // without the feature, so it knows neither test entry.
+    // without the feature, so it knows neither the check nor the measurement.
     let plan = AttemptPlan {
         program: EntryProgram::Server,
         profile: &REACT_V1_FILTER_CHECK,

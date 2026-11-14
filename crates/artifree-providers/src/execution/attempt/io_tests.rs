@@ -97,7 +97,7 @@ fn has_line(text: &str, line: &str) -> bool {
 /// The files of a collected package with their bytes, in path order.
 fn files_of(collected: &CollectedOutput) -> Vec<(String, Vec<u8>)> {
     collected
-        .package
+        .files
         .files()
         .map(|(path, bytes)| (path.as_str().to_owned(), bytes.to_vec()))
         .collect()

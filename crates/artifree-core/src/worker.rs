@@ -15,8 +15,14 @@
 //! store, checks them against the listing, and launches them through the port.
 //! This module knows no profile, no Linux and no provider: a worker without a
 //! port claims trusted kinds and ends unknown-profile jobs only. There is no
-//! network use here. Building React sources (R03) and calling model providers
-//! (P01) are not implemented.
+//! network use here.
+//!
+//! A job of a build profile, which [`Profiles::builds`] names (decision 0058,
+//! slice R03cb), ends differently: its output is composed with the revision
+//! ([`crate::build::compose`]) and published as a build through
+//! [`BuildStore::publish_build`], and a failed run ends with the failures of
+//! rule 18 and the diagnostics of rule 13 through [`BuildStore::fail_build`].
+//! Calling model providers (P01) is not implemented.
 //!
 //! A worker that loses its lease (it stalled past the expiry and another
 //! worker claimed the job, or a purge revoked the job) learns it at its next
@@ -27,14 +33,15 @@ use std::fmt;
 
 use artifree_domain::identity::UnixMillis;
 use artifree_domain::job::{
-    AttemptIdentity, CheckpointAnswer, Finding, JobFailure, JobId, JobKind, JobState, MAX_FINDINGS,
-    Problem, ProfileName, StopReason, VerifyReport, WorkerId,
+    AttemptIdentity, BuildDiagnostic, CheckpointAnswer, Finding, JobFailure, JobId, JobKind,
+    JobState, MAX_FINDINGS, Problem, ProfileName, StopReason, VerifyReport, WorkerId,
 };
 use artifree_domain::package::FilePackage;
 use artifree_ports::artifact_store::{ArtifactStore, StoreError};
+use artifree_ports::build_store::{BuildPublication, BuildStore};
 use artifree_ports::execution::{
     BoundRun, Capacity, Checkpoint as CheckpointPort, CheckpointUnavailable, Execution,
-    HeldCapacity, LaunchFailure, PinnedInput, ProfileRun,
+    HeldCapacity, LaunchFailure, LaunchOutcome, PinnedInput, ProfileOutput, ProfileRun,
 };
 use artifree_ports::job_store::{
     Checkpoint, ExecutionClaim, JobClaim, JobRecord, JobStore, JobStoreError, Lease,
@@ -42,6 +49,7 @@ use artifree_ports::job_store::{
 };
 use sha2::{Digest, Sha256};
 
+use crate::build;
 use crate::jobs::Clock;
 
 /// When a failed attempt is tried again: `base_ms` after the first attempt,
@@ -117,6 +125,10 @@ pub struct Profiles<'a> {
     /// `known_profiles`, so a due `run_profile` job of another profile ends as
     /// `execution_unavailable`.
     pub known: &'a [ProfileName],
+    /// The build profiles among `known` (decision 0058 rule 8): their output is
+    /// composed with the revision and published as a build, and their failures
+    /// are rule 18's.
+    pub builds: &'a [ProfileName],
     /// The execution port of a worker that has an execution directory. `None`
     /// claims trusted kinds only and spends no attempt.
     pub execution: Option<&'a dyn Execution>,
@@ -127,6 +139,7 @@ impl fmt::Debug for Profiles<'_> {
         formatter
             .debug_struct("Profiles")
             .field("known", &self.known)
+            .field("builds", &self.builds)
             .field("execution", &self.execution.is_some())
             .finish()
     }
@@ -223,18 +236,24 @@ pub fn run_next_observed<S: ArtifactStore + JobStore>(
     pace: &dyn Pace,
     on_claim: &mut dyn FnMut(ClaimEvent<'_>),
 ) -> Result<Step, JobStoreError> {
-    run_next_with(
+    let profiles = Profiles {
+        known: &[],
+        builds: &[],
+        execution: None,
+    };
+    let stores = Stores {
         store,
-        clock,
-        worker,
-        config,
-        pace,
-        Profiles {
-            known: &[],
-            execution: None,
-        },
-        on_claim,
-    )
+        builds: None,
+    };
+    run_claimed(&stores, clock, worker, config, pace, profiles, on_claim)
+}
+
+/// The stores of one claim. Only a worker with an execution port runs a
+/// `run_profile` job, and only [`run_next_with`] gives it one, together with
+/// the build store.
+struct Stores<'a, S> {
+    store: &'a S,
+    builds: Option<&'a dyn BuildStore>,
 }
 
 /// Claims the oldest due job and runs it to an end the store records, or
@@ -272,14 +291,15 @@ pub fn run_next<S: ArtifactStore + JobStore>(
 /// records a new attempt with the capacity's identities. When the lock is busy
 /// or admission refuses, the claim takes trusted kinds only and spends no
 /// attempt. A held capacity is released once its job's attempt is settled, or
-/// at the end of the call.
+/// at the end of the call. A job of a build profile is published as a build,
+/// or fails with rule 18's failures (decision 0058, slice R03cb).
 ///
 /// # Errors
 ///
 /// [`JobStoreError::Unavailable`] when the store fails around the capacity, the
 /// settlement, the claim or the result. The job then keeps its lease until it
 /// expires, and a later claim runs it again, as [`run_next_observed`] documents.
-pub fn run_next_with<S: ArtifactStore + JobStore>(
+pub fn run_next_with<S: ArtifactStore + JobStore + BuildStore>(
     store: &S,
     clock: &dyn Clock,
     worker: &WorkerId,
@@ -288,6 +308,24 @@ pub fn run_next_with<S: ArtifactStore + JobStore>(
     profiles: Profiles<'_>,
     on_claim: &mut dyn FnMut(ClaimEvent<'_>),
 ) -> Result<Step, JobStoreError> {
+    let stores = Stores {
+        store,
+        builds: Some(store),
+    };
+    run_claimed(&stores, clock, worker, config, pace, profiles, on_claim)
+}
+
+/// The body of [`run_next_with`] and [`run_next_observed`].
+fn run_claimed<S: ArtifactStore + JobStore>(
+    stores: &Stores<'_, S>,
+    clock: &dyn Clock,
+    worker: &WorkerId,
+    config: &WorkerConfig,
+    pace: &dyn Pace,
+    profiles: Profiles<'_>,
+    on_claim: &mut dyn FnMut(ClaimEvent<'_>),
+) -> Result<Step, JobStoreError> {
+    let store = stores.store;
     let mut held = match profiles.execution {
         Some(execution) => take_capacity(store, clock, execution, on_claim)?,
         None => None,
@@ -329,8 +367,13 @@ pub fn run_next_with<S: ArtifactStore + JobStore>(
             Err(error) => Err(error),
         };
     };
+    let build = job
+        .profile
+        .as_ref()
+        .is_some_and(|profile| profiles.builds.contains(profile));
     let profile_claim = ProfileClaim {
         store,
+        builds: if build { stores.builds } else { None },
         clock,
         config,
         pace,
@@ -415,6 +458,8 @@ fn add_ms(time: UnixMillis, ms: u64) -> UnixMillis {
 /// The parts of one claimed `run_profile` job that its run uses.
 struct ProfileClaim<'a, S> {
     store: &'a S,
+    /// The build store when the job's profile is a build profile.
+    builds: Option<&'a dyn BuildStore>,
     clock: &'a dyn Clock,
     config: &'a WorkerConfig,
     pace: &'a dyn Pace,
@@ -469,6 +514,9 @@ fn run_profile<S: ArtifactStore + JobStore>(
         Ok(input) => input,
         Err(failure) => return settle_and_fail(claim, capacity, failure),
     };
+    // A build is composed with the revision it was launched with, which the
+    // launch takes (decision 0058 rule 8).
+    let build = claim.builds.map(|builds| (builds, input.package.clone()));
     // The record of the attempt names the database the claim was made in
     // (decision 0042 rule 6). Without it no record can be written, so the attempt
     // is settled and the job failed, as a failed input read is.
@@ -521,13 +569,35 @@ fn run_profile<S: ArtifactStore + JobStore>(
     if settled.state != JobState::Running {
         return Ok(Step::Finished(settled));
     }
-    let now = claim.clock.now();
-    match outcome.result {
+    let LaunchOutcome { result, stderr, .. } = outcome;
+    let result = match result {
         Ok(output)
             if output.bound == BoundRun::of(&run)
                 && output.profile == *profile
                 && output.tool_digest == tool_digest =>
         {
+            Ok(output)
+        }
+        // An output bound to another run is never published.
+        Ok(_) => Err(LaunchFailure::Failed),
+        Err(failure) => Err(failure),
+    };
+    match build {
+        Some((builds, source)) => end_build(claim, builds, &attempt, result, &source, &stderr),
+        None => end_profile(claim, &attempt, result),
+    }
+}
+
+/// Ends a settled `run_profile` job of a profile that is no build profile with
+/// the end of its run (decision 0057 rule 12): the output's counts, or a
+/// failure. Every failed run ends as `internal`, as before decision 0058.
+fn end_profile<S: JobStore>(
+    claim: &ProfileClaim<'_, S>,
+    attempt: &AttemptIdentity,
+    result: Result<ProfileOutput, LaunchFailure>,
+) -> Result<Step, JobStoreError> {
+    match result {
+        Ok(output) => {
             let binding = ProfileBinding {
                 profile: &output.profile,
                 tool_digest: output.tool_digest.as_str(),
@@ -535,26 +605,106 @@ fn run_profile<S: ArtifactStore + JobStore>(
             record_end(
                 claim.store.complete_profile_job(
                     claim.lease,
-                    &attempt,
+                    attempt,
                     binding,
-                    output.counts,
-                    now,
+                    output.counts(),
+                    claim.clock.now(),
                 ),
                 &claim.job.id,
             )
         }
-        // Until the failures of decision 0058 rule 18 are stored (slice R03c),
-        // every failed run ends as `internal`.
-        Ok(_)
-        | Err(
+        Err(
             LaunchFailure::Exited
             | LaunchFailure::FilterKilled
             | LaunchFailure::Limit(_)
+            | LaunchFailure::OutputRefused
             | LaunchFailure::Failed,
         ) => fail_settled(claim, JobFailure::Internal),
         Err(LaunchFailure::Stopped(_)) => Ok(Step::LeaseLost(claim.lease.job.clone())),
-        Err(LaunchFailure::Unavailable) => fail_settled(claim, JobFailure::ExecutionUnavailable),
+        Err(LaunchFailure::Unavailable | LaunchFailure::ResolverConfiguration) => {
+            fail_settled(claim, JobFailure::ExecutionUnavailable)
+        }
     }
+}
+
+/// Ends a settled job of a build profile (decision 0058 rules 8, 13 and 18): a
+/// passing run is composed with `source` and published; a failed one ends as
+/// `build_failed` with its diagnostics, `limit_exceeded` or `output_rejected`.
+/// A stop, a refusal before the payload and any other failed verdict keep the
+/// meaning they have for every profile.
+fn end_build<S: JobStore>(
+    claim: &ProfileClaim<'_, S>,
+    builds: &dyn BuildStore,
+    attempt: &AttemptIdentity,
+    result: Result<ProfileOutput, LaunchFailure>,
+    source: &FilePackage,
+    stderr: &[u8],
+) -> Result<Step, JobStoreError> {
+    let (failure, diagnostics) = match result {
+        Ok(output) => return publish(claim, builds, attempt, output, source),
+        Err(LaunchFailure::Stopped(_)) => return Ok(Step::LeaseLost(claim.lease.job.clone())),
+        Err(LaunchFailure::Unavailable) => {
+            return fail_settled(claim, JobFailure::ExecutionUnavailable);
+        }
+        Err(LaunchFailure::Failed) => return fail_settled(claim, JobFailure::Internal),
+        Err(LaunchFailure::Exited) => (JobFailure::BuildFailed, build::diagnostics(stderr)),
+        Err(LaunchFailure::FilterKilled) => {
+            (JobFailure::BuildFailed, build::filter_kill_diagnostics())
+        }
+        Err(LaunchFailure::ResolverConfiguration) => (
+            JobFailure::BuildFailed,
+            build::resolver_diagnostics(source.first_resolver_configuration()),
+        ),
+        Err(LaunchFailure::Limit(_)) => (JobFailure::LimitExceeded, Vec::new()),
+        Err(LaunchFailure::OutputRefused) => (JobFailure::OutputRejected, Vec::new()),
+    };
+    fail_build(claim, builds, attempt, failure, &diagnostics)
+}
+
+/// Composes a passing build with its revision and publishes it with the job's
+/// success (decision 0058 rules 8 and 11). A refused composition ends the job
+/// as `output_rejected`.
+fn publish<S>(
+    claim: &ProfileClaim<'_, S>,
+    builds: &dyn BuildStore,
+    attempt: &AttemptIdentity,
+    output: ProfileOutput,
+    source: &FilePackage,
+) -> Result<Step, JobStoreError> {
+    let Ok(files) = build::compose(output.files, source) else {
+        return fail_build(claim, builds, attempt, JobFailure::OutputRejected, &[]);
+    };
+    let published = builds.publish_build(BuildPublication {
+        lease: claim.lease,
+        attempt,
+        binding: ProfileBinding {
+            profile: &output.profile,
+            tool_digest: output.tool_digest.as_str(),
+        },
+        files: &files,
+        now: claim.clock.now(),
+    });
+    record_end(published.map(|(record, _)| record), &claim.job.id)
+}
+
+/// Ends a settled job of a build profile with one of rule 18's failures.
+fn fail_build<S>(
+    claim: &ProfileClaim<'_, S>,
+    builds: &dyn BuildStore,
+    attempt: &AttemptIdentity,
+    failure: JobFailure,
+    diagnostics: &[BuildDiagnostic],
+) -> Result<Step, JobStoreError> {
+    record_end(
+        builds.fail_build(
+            claim.lease,
+            attempt,
+            failure,
+            diagnostics,
+            claim.clock.now(),
+        ),
+        &claim.job.id,
+    )
 }
 
 /// Settles the attempt of a claim whose launch never started, then fails the
