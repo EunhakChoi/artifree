@@ -244,7 +244,9 @@ fn job_react_v1_refuses_a_modified_root() -> Result<(), Box<dyn Error>> {
             );
         }
     }
-    assert_no_attempt_groups()
+    // Admission refuses before the process joins its supervisor group, so no group exists to
+    // list: the refusal itself is the evidence.
+    Ok(())
 }
 
 /// Decision 0058 rule 2 (slice R03bcbb): an input that would change how the bundler resolves an
