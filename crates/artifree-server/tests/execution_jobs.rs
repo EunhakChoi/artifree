@@ -351,6 +351,17 @@ impl Worker {
     /// Waits until the worker has started the attempt of its job: an attempt row is unsettled
     /// and the attempt's group is in the worker's group. Returns the attempt and its group.
     fn started_attempt(&self, store: &Store) -> Result<(AttemptIdentity, PathBuf), Box<dyn Error>> {
+        let (attempt, group) = self.attempt_group(store)?;
+        poll(within(DEADLINE), "the attempt group", || {
+            Ok(group.is_dir().then_some(()))
+        })?;
+        Ok((attempt, group))
+    }
+
+    /// Waits for the unsettled attempt row of its job and returns it with the path of its group,
+    /// which may not exist yet or any more: an attempt that pauses after its group ended (at
+    /// `collecting`) may have removed it before the test looks.
+    fn attempt_group(&self, store: &Store) -> Result<(AttemptIdentity, PathBuf), Box<dyn Error>> {
         let attempt = poll(within(DEADLINE), "an unsettled attempt row", || {
             Ok(store
                 .port
@@ -358,11 +369,7 @@ impl Worker {
                 .first()
                 .map(|row| row.attempt))
         })?;
-        let group = self.group.join(group_name(&attempt));
-        poll(within(DEADLINE), "the attempt group", || {
-            Ok(group.is_dir().then_some(()))
-        })?;
-        Ok((attempt, group))
+        Ok((attempt, self.group.join(group_name(&attempt))))
     }
 
     /// Waits until the attempt of its job runs its payload: the attempt is started and a process

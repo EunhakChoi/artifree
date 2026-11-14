@@ -131,7 +131,8 @@ fn job_disable_and_enable_before_publication_cancels_the_job() -> TestResult {
     let queued = store.enqueue_fixture("queued")?;
     pause_launch(&scratch.execution(), COLLECTING_STALL)?;
     let worker = Worker::spawn(&scratch, &[])?;
-    let (_, group) = worker.started_attempt(&store)?;
+    // The pause comes after the group ended, so the group may be gone before it is looked for.
+    let (_, group) = worker.attempt_group(&store)?;
     wait_marker(&scratch.execution(), "collecting")?;
     set_disabled(&store, true)?;
     set_disabled(&store, false)?;
