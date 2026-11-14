@@ -8,7 +8,8 @@ the build with `enforcement-fixture`), R03ca (the store of builds and
 diagnostics), R03cb (the worker's composition, diagnostics and failures),
 R03cc (build tickets, the `/b/` route and the head status, below the
 wire), R03cda (the execution readiness, schema 16) and R03cdb (the
-claim deadline) are implemented, R03d to R03f are not**. Roadmap: R03.
+claim deadline) are implemented, R03da, R03db, R03e and R03f are not**.
+Roadmap: R03.
 
 > **Note, 2026-11-14 (slices).** R03b is split into R03ba, R03bb and R03bc,
 > and rule 5 moves to R03f. A release build compiles no attempt, worker port,
@@ -557,6 +558,69 @@ claim deadline) are implemented, R03d to R03f are not**. Roadmap: R03.
 >   readiness window; a verify renewal cannot mark the row, because the
 >   trusted worker runs verify jobs too and must never look ready.
 
+> **Note, 2026-11-15 (R03d split).** R03d is split into R03da, the public
+> kind, and R03db, build tickets and the head status. Each covers the
+> contract, the API, MCP, the TypeScript client and the CLI for its part, so
+> that HTTP, MCP and the CLI keep one behavior; the web stays R03e. R03da
+> comes first, since a build ticket and the status name a build that only a
+> public job can request. This note fixes the wire shapes that rules 14, 16
+> and 17 leave open; it changes no numbered rule.
+>
+> - **R03da, the public kind (contract 0.30.0).**
+>   - `JobKind` gains `run_profile`. `EnqueueJobRequest` gains `profile`,
+>     which `run_profile` requires and `verify_revision` refuses
+>     (`invalid_request`). The idempotency fingerprint already includes it.
+>   - A profile that the server's build does not know answers
+>     `profile_unknown` (`422`), and nothing is enqueued or recorded. A
+>     release build knows none until R03f.
+>   - `Job` gains `profile`, present exactly for `run_profile`, and
+>     `diagnostics`, present only on a failed `run_profile` job that has
+>     some: at most 20, each a `message` and an optional `location` of
+>     `path`, `line` and `column`. They are attached under the read rule of
+>     13 that the head status uses; a job read by any other caller, or while
+>     the artifact is in the trash, leaves the field out.
+>   - The wire `JobFailure` gains `execution_unavailable`, `build_failed`,
+>     `limit_exceeded` and `output_rejected`. A succeeded `run_profile` job
+>     has no `result`; R03db reads its build.
+>   - The job reads, cancel and the change feed cover a `run_profile` job
+>     of a profile the server's build knows; one of another profile stays
+>     hidden as 0057 rule 3 hides it (`404`, out of the lists and the feed).
+>     Cancel is that of 0030 rule 6: a running build stops at its next
+>     checkpoint and is `cancelled` after its cleanup (0057). The feed
+>     records changes from R03da on; earlier ones are not backfilled.
+>   - Every open job counts toward the actor's 16, of either kind and any
+>     profile, since each holds a place in the queue.
+>   - MCP: `enqueue_job` takes `profile`, and the job tools and the server
+>     instructions describe the kind. The client parses the kind, the
+>     fields and the failures, and its enqueue takes the profile. The CLI
+>     gains `artifree job enqueue <artifact-id> --revision <n> --build
+<profile>`; `--profile` keeps naming the connection profile. The web
+>     only names the new kind and failures, with no build action.
+>   - Proven by contract tests, and by API, MCP, client and CLI tests: an
+>     enqueue and its replay, a key reused with another profile, an unknown
+>     profile and a release build's refusal, a profile on `verify_revision`,
+>     the open-job bound across both kinds, the reads, the feed and cancel,
+>     and diagnostics left out for a caller who may not read the artifact.
+> - **R03db, build tickets and the head status (contract 0.31.0).**
+>   - `POST /v1/artifacts/{id}/revisions/{revision}/builds/{profile}/previews`
+>     issues a build ticket through the management preview operation with
+>     the build target and answers a `Preview` (`201`). A revision without
+>     that build is `not_found`, and a profile the build does not know is
+>     `profile_unknown`.
+>   - `GET /v1/artifacts/{id}/builds/{profile}` reads the head status of
+>     rule 16: the profile, the head revision, the latest build's revision
+>     if any, `status` (`built`, `pending`, `failed` or `none`), and for
+>     `pending` and `failed` the job's id, with the failure and the
+>     diagnostics for `failed`. The read rule of 13 applies: any other
+>     caller gets `not_found`.
+>   - MCP: `create_preview` takes an optional `profile` for a build preview,
+>     and a read tool `get_build_status` gives the status. The client gains
+>     both calls. The CLI's `artifree artifact preview` gains `--build
+<profile>`, and `artifree artifact build-status <id> --build
+<profile>` prints the status.
+>   - Proven by contract, HTTP, MCP, client and CLI tests for both calls and
+>     their refusals; the `/b/` route itself is proven by R03cc.
+
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),
 > [0057](0057-connecting-execution-to-jobs.md) (the `run_profile` kind and
@@ -811,7 +875,7 @@ stands.
     job, and R03e passes Chromium and Firefox smoke. Until R03f, R03bcbb to
     R03e run `react-v1` only in the build with `enforcement-fixture`, and a
     release build knows no profile: before R03d its `run_profile` jobs stay
-    internal (0057 rule 2), and from R03d its enqueue of `react-v1` is
+    internal (0057 rule 2), and from R03da its enqueue of `react-v1` is
     refused with `profile_unknown` (rule 17).
 
 | Slice   | What it adds                                                                                                                                                                                                                                                                                                                                                                                                                                   | Proven where                                                                                                                                                                                                                                                                                                                                                               |
@@ -827,7 +891,8 @@ stands.
 | R03cc   | Rules 14 to 16 below the wire, and the read rule of 13: the build target of the management preview operation, build tickets and their revocation, the `/b/{ticket}/` route, and the head status on R03ca's latest-build query.                                                                                                                                                                                                                 | SQLite and service tests on any host for the head status, ticket revocation and the refusal of diagnostics to a caller who may not read the revision; HTTP tests for the `/b/` route under the CSP sandbox; the enforcement job for the preview of a published build.                                                                                                      |
 | R03cda  | Rule 20's readiness: schema 16 with `execution_workers`, the execution worker's row written at capacity and at each lease renewal (at most once a minute), deleted at a refusal and emptied at a restore, and `execution.ready` in `GET /v1/background`, with contract 0.29.0.                                                                                                                                                                 | Store and core tests with the injected clock for the row at capacity and at a renewal, the one-minute rewrite, the refusal, the pruning, the window's edges and the restore; contract and API tests for the readiness; the enforcement job, where a worker with capacity makes it ready.                                                                                   |
 | R03cdb  | Rule 20's deadline, after R03cda: every worker's claim loop ends a known build profile's queued job with no attempt row, outside the trash and of an enabled actor, ten minutes after its enqueue as `execution_unavailable` while no execution worker is ready.                                                                                                                                                                               | Tests on any host with the injected clock for the deadline's edge, a ready worker, a job with an attempt row, a job in the trash, a disabled user's job, a profile that is not a build profile, an execution worker's loop, a job claimed first, a worker row seen after now and a worker's start-up wait; the enforcement job unchanged.                                  |
-| R03d    | Rule 17 and the wire half of 18: the public kind, `profile_unknown`, the contract, MCP and the CLI, including build tickets.                                                                                                                                                                                                                                                                                                                   | Contract, API, MCP and CLI tests, including refusals and the open-job bound.                                                                                                                                                                                                                                                                                               |
+| R03da   | Rule 17 and the wire half of 18: the public kind, `profile`, `profile_unknown`, the new failures and the diagnostics on the job reads, contract 0.30.0, in the API, MCP, the client and the CLI.                                                                                                                                                                                                                                               | Contract, API, MCP, client and CLI tests, including refusals and the open-job bound.                                                                                                                                                                                                                                                                                       |
+| R03db   | The wire half of rules 14 and 16: the build preview route and the head status read, contract 0.31.0, in the API, MCP, the client and the CLI.                                                                                                                                                                                                                                                                                                  | Contract, HTTP, MCP, client and CLI tests for both calls and their refusals.                                                                                                                                                                                                                                                                                               |
 | R03e    | The web: a build action, head status and diagnostics, and the build preview with its "latest" notice.                                                                                                                                                                                                                                                                                                                                          | Component tests, and Chromium and Firefox smoke for the request, the pending and failed states and the refusal. No smoke host runs a profile, so a successful build and its `/b/` preview are proven by component tests and by the enforcement job at the HTTP level.                                                                                                      |
 | R03f    | Rules 5 and 21: the release build for x86_64 Linux compiles the launch path and knows `react-v1`, and the operator documentation and the supported-host statement.                                                                                                                                                                                                                                                                             | Release-archive and clean-install checks of the launch path; the enforcement job runs the release binary's worker; review of the documentation.                                                                                                                                                                                                                            |
 
