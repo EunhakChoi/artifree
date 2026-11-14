@@ -456,6 +456,9 @@ fn run_profile<S: ArtifactStore + JobStore>(
         Ok(input) => input,
         Err(failure) => return settle_and_fail(claim, capacity, failure),
     };
+    // The record of the attempt names the database the claim was made in
+    // (decision 0042 rule 6).
+    let database = claim.store.database_identity()?;
     let run = ProfileRun {
         job: &claim.job.id,
         fence: claim.lease.fence,
@@ -466,6 +469,7 @@ fn run_profile<S: ArtifactStore + JobStore>(
         revision: claim.job.revision,
         profile,
         lease_ms: claim.config.lease_ms,
+        database,
     };
     let checkpoint = StoreCheckpoint {
         store: claim.store,
@@ -480,8 +484,11 @@ fn run_profile<S: ArtifactStore + JobStore>(
         detail: outcome.detail,
     });
     if !outcome.cleanup_observed {
-        // Nothing is written: the attempt stays unsettled and the capacity, with
-        // its lock, is dropped here.
+        // The record stays and the provider is quarantined; the row becomes
+        // `cleanup_pending`, which no worker settles (decision 0057 rules 10 and
+        // 19). Nothing else is written, and the capacity, with its lock, is
+        // dropped here.
+        claim.store.mark_cleanup_pending(&attempt)?;
         return Ok(Step::Unsettled(claim.lease.job.clone()));
     }
     let settled = settle_record(claim.store, claim.clock, &attempt)?;

@@ -10,8 +10,16 @@
 //! outcome. Dropping the held capacity releases the lock, so the caller drops it after it has
 //! settled the attempt.
 //!
-//! Not here: the recovery matrix of R02bc, any wire contract and any command. A release build has
-//! no adapter, so its worker claims trusted kinds and ends unknown-profile jobs only (0057 rule 2).
+//! Test-only, in this feature build only: a file `pause` in the execution directory pauses a launch
+//! for the enforcement job (decision 0057, R02bc). Its one line is `<phase> hold` or
+//! `<phase> stall <milliseconds>`, where `<phase>` is one of the provider's phase words
+//! (`registered`, `created`, `guarded`, `started`, `ready`, `running`, `collecting`) or
+//! `settled`, a pause when the held capacity is dropped after the caller settled the attempt and
+//! before it publishes. The empty marker file `<phase>` is created in the directory `paused`
+//! beside it, which the test makes. A missing, unreadable or malformed file pauses nothing. The
+//! record of each launch is a `v2` record naming the database, the job and the fence of the claim.
+//! Not here: any wire contract and any command. A release build has no adapter, so its worker
+//! claims trusted kinds and ends unknown-profile jobs only (0057 rule 2), and has no pause.
 
 use std::fmt;
 use std::fs;
@@ -32,12 +40,12 @@ use artifree_ports::job_store::{AttemptRow, ProfileCounts};
 use super::admission;
 use super::attempt::{
     self, AttemptEvidence, AttemptFailure, AttemptPlan, Heartbeat, Launched, LeaseLoss,
-    OutputRefusal,
+    OutputRefusal, Pause, PauseMode, Phase,
 };
 use super::cgroup;
 use super::guardian::GuardianReason;
 use super::launcher::EntryProgram;
-use super::registry::{self, Identity, QuarantineReason};
+use super::registry::{self, Identity, QuarantineReason, RecordRun};
 use super::staging::{InputListing, VerifiedInput};
 use super::{AdmissionRefusal, FIXTURE_PROFILE, read_bounded};
 
@@ -45,6 +53,14 @@ use super::{AdmissionRefusal, FIXTURE_PROFILE, read_bounded};
 const DIRECTORY_IDENTITY_FILE: &str = "directory-identity";
 /// The largest identity file that is read. A longer file is malformed and refuses the start.
 const IDENTITY_FILE_BYTES: u64 = 64;
+/// The pause file of the execution directory (see the module documentation).
+const PAUSE_FILE: &str = "pause";
+/// The directory beside the pause file that receives the marker files; the test makes it.
+const PAUSED_DIR: &str = "paused";
+/// The pause word of the pause after the caller settled the attempt and before it publishes.
+const SETTLED_WORD: &str = "settled";
+/// The largest pause file that is read.
+const PAUSE_BYTES: u64 = 64;
 
 /// Why the worker refuses to start with an execution directory (decision 0057 rule 18). The text
 /// names the missing facility, and the worker prints it on stderr.
@@ -153,6 +169,7 @@ impl Execution for FixtureExecution {
             attempt: AttemptIdentity::from_random(identity.0),
             execution_dir: self.execution_dir.clone(),
             launched: false,
+            settled_pause: None,
         }))
     }
 }
@@ -179,6 +196,9 @@ struct HeldFixture {
     execution_dir: PathBuf,
     /// Whether the launch already ran, so that a second call launches nothing.
     launched: bool,
+    /// The pause at `settled`, read at the launch and kept only when the launch observed its
+    /// cleanup, so that the core settles the attempt before the pause.
+    settled_pause: Option<PauseMode>,
 }
 
 impl HeldCapacity for HeldFixture {
@@ -212,6 +232,7 @@ impl HeldCapacity for HeldFixture {
             return not_launched("not-launched");
         }
         self.launched = true;
+        let pause = read_pause(&self.execution_dir);
         let PinnedInput { package, listing } = input;
         let Ok(verified) = VerifiedInput::verify(package, listing_of(listing)) else {
             return not_launched("input-refused");
@@ -220,6 +241,7 @@ impl HeldCapacity for HeldFixture {
             lease: Duration::from_millis(run.lease_ms),
             program: EntryProgram::Server,
             checkpoint_at_release: true,
+            pause: pause.phase,
             ..AttemptPlan::fixture()
         };
         let mut renew = |_heartbeat: u32| heartbeat_of(checkpoint.renew());
@@ -229,10 +251,34 @@ impl HeldCapacity for HeldFixture {
             &self.held,
             Identity(self.attempt.bytes()),
             verified,
-            Some(BoundRun::of(run)),
+            Some((
+                BoundRun::of(run),
+                RecordRun {
+                    database: run.database,
+                    job: run.job.clone(),
+                    fence: run.fence,
+                },
+            )),
             &self.execution_dir,
         );
+        // Only a launch whose cleanup was observed is settled before the capacity is dropped; an
+        // unsettled one must not mark `settled`.
+        if launched.record_removed {
+            self.settled_pause = pause.settled;
+        }
         outcome(&launched, run, &self.tool_digest)
+    }
+}
+
+impl Drop for HeldFixture {
+    // The core drops the capacity after it settled the attempt and before it publishes (decision
+    // 0057 rule 10), so a pause here is the `settled` phase of the recovery matrix (R02bc).
+    fn drop(&mut self) {
+        if self.launched
+            && let Some(mode) = self.settled_pause
+        {
+            attempt::pause_marked(&self.execution_dir.join(PAUSED_DIR), SETTLED_WORD, mode);
+        }
     }
 }
 
@@ -242,6 +288,49 @@ fn not_launched(detail: &'static str) -> LaunchOutcome {
         cleanup_observed: true,
         result: Err(LaunchFailure::Unavailable),
         detail,
+    }
+}
+
+/// The test-only pause that the pause file asks for.
+#[derive(Debug, Default)]
+struct PauseRequest {
+    /// A pause at one of the provider's phases.
+    phase: Option<Pause>,
+    /// A pause when the held capacity is dropped after its launch.
+    settled: Option<PauseMode>,
+}
+
+/// Reads the pause file of `execution_dir`. A missing, unreadable or malformed file asks for
+/// no pause.
+fn read_pause(execution_dir: &Path) -> PauseRequest {
+    let Ok(bytes) = read_bounded(&execution_dir.join(PAUSE_FILE), PAUSE_BYTES) else {
+        return PauseRequest::default();
+    };
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return PauseRequest::default();
+    };
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let (word, mode) = match words.as_slice() {
+        [word, "hold"] => (*word, PauseMode::Hold),
+        [word, "stall", millis] => match millis.parse::<u64>() {
+            Ok(millis) => (*word, PauseMode::Stall(Duration::from_millis(millis))),
+            Err(_) => return PauseRequest::default(),
+        },
+        _ => return PauseRequest::default(),
+    };
+    if word == SETTLED_WORD {
+        return PauseRequest {
+            phase: None,
+            settled: Some(mode),
+        };
+    }
+    PauseRequest {
+        phase: Phase::from_word(word).map(|phase| Pause {
+            phase,
+            mode,
+            markers: execution_dir.join(PAUSED_DIR),
+        }),
+        settled: None,
     }
 }
 

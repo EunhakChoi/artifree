@@ -636,6 +636,31 @@ run_server_job hang server-stalled-worker job_a_stalled_worker_ends_the_attempt_
 run_server_job exit server-busy-lock job_a_busy_lock_spends_no_attempt
 sudo "$PREPARE" scenario exit
 
+# Part 14 is the recovery matrix of R02bc (decision 0057 rule 20, the R02bc row; 0042 rule 8). Each
+# case is one ignored test of execution_jobs in a delegated unit, with its own scenario and label.
+# run_server_job checks that no payload, probe or entry point outlived each case. The kill phases
+# are the words of the provider's Phase (execution/attempt.rs) and the worker's `settled` pause;
+# the record's removal before settlement (at collecting) is the separate server-kill-removed case.
+say "part 14: the recovery matrix of R02bc (decision 0057 rule 20; 0042 rule 8)"
+for phase in registered created guarded started ready running settled; do
+  run_server_job copy "server-kill-$phase" recovery_kill::job_a_supervisor_killed_at_a_phase_is_cleaned_before_reclaim --setenv="ARTIFREE_KILL_PHASE=$phase"
+done
+run_server_job copy server-kill-removed recovery_kill::job_a_kill_between_record_removal_and_settlement_is_settled_without_a_record
+run_server_job copy server-restored-fresh recovery_restore::job_a_restored_database_beside_a_fresh_directory_settles_nothing_and_quarantines
+run_server_job hang server-stuck-cleanup recovery_restore::job_a_stuck_cleanup_keeps_the_quarantine
+run_server_job survivors-hang server-purge-race recovery_races::job_purge_racing_a_sigterm_ignoring_descendant_keeps_its_tombstone
+run_server_job copy server-trash-claim recovery_races::job_trash_and_recovery_never_publish_the_old_attempt --setenv=ARTIFREE_TRASH_AT=claim
+run_server_job hang server-trash-heartbeat recovery_races::job_trash_and_recovery_never_publish_the_old_attempt --setenv=ARTIFREE_TRASH_AT=heartbeat
+run_server_job copy server-trash-publication recovery_races::job_trash_and_recovery_never_publish_the_old_attempt --setenv=ARTIFREE_TRASH_AT=publication
+run_server_job hang server-disable-heartbeat recovery_disable::job_disable_and_enable_before_a_heartbeat_stops_the_attempt
+run_server_job copy server-disable-publication recovery_disable::job_disable_and_enable_before_publication_cancels_the_job
+for across in restart restore; do
+  run_server_job copy "server-disable-$across" recovery_disable::job_disable_and_enable_is_not_forgotten_across_a_restart_or_restore --setenv="ARTIFREE_ACROSS=$across"
+done
+run_server_job copy server-two-workers recovery_workers::job_two_workers_never_run_an_old_and_a_new_attempt_together
+run_server_job copy server-resume recovery_workers::job_queued_and_retry_jobs_resume_after_trash_and_restart
+sudo "$PREPARE" scenario exit
+
 say "restore the routing and the profile"
 sudo "$PREPARE" routing-pipe
 sudo "$PREPARE" profile-off

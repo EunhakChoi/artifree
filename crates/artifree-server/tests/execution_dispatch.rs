@@ -959,7 +959,7 @@ fn a_launch_that_failed_fails_the_job_as_internal() -> TestResult {
 }
 
 #[test]
-fn an_unobserved_cleanup_writes_nothing() -> TestResult {
+fn an_unobserved_cleanup_marks_the_attempt_cleanup_pending_and_nothing_else() -> TestResult {
     let world = World::new()?;
     let log = Arc::new(Log::default());
     let job = world.enqueue_fixture("unobserved-key")?;
@@ -987,8 +987,8 @@ fn an_unobserved_cleanup_writes_nothing() -> TestResult {
     );
     assert_eq!(
         world.attempt(&held_attempt())?.state,
-        AttemptState::Live,
-        "the core wrote nothing to the attempt"
+        AttemptState::CleanupPending,
+        "an attempt whose cleanup was not observed becomes cleanup_pending (0057 rules 10 and 19)"
     );
     assert_eq!(
         unsettled_attempts(&world)?,

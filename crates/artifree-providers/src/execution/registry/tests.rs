@@ -119,6 +119,7 @@ fn sample_record() -> Record {
         cgroupns: NAMESPACE.to_owned(),
         parent: PARENT.to_owned(),
         group: GROUP.to_owned(),
+        run: None,
     }
 }
 
@@ -141,6 +142,7 @@ fn record_on(identity: Identity, facts: &HostIdentity, parent: &str) -> Record {
         cgroupns: facts.cgroupns.clone(),
         parent: parent.to_owned(),
         group: identity.group_name(),
+        run: None,
     }
 }
 

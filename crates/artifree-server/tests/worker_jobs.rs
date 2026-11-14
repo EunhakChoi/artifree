@@ -11,6 +11,7 @@ use artifree_core::jobs::Clock;
 use artifree_core::worker::{Pace, Step, WorkerConfig, run_next};
 use artifree_domain::SourceRevision;
 use artifree_domain::change::ChangeSequence;
+use artifree_domain::change::FeedId;
 use artifree_domain::identity::{ActorId, ArtifactId, UnixMillis};
 use artifree_domain::job::VerifyReport;
 use artifree_domain::job::{
@@ -267,6 +268,9 @@ impl JobStore for Flaky {
     ) -> Result<SettleOutcome, JobStoreError> {
         self.inner.settle_attempt(attempt, now)
     }
+    fn mark_cleanup_pending(&self, attempt: &AttemptIdentity) -> Result<(), JobStoreError> {
+        self.inner.mark_cleanup_pending(attempt)
+    }
     fn complete_profile_job(
         &self,
         lease: &Lease,
@@ -283,6 +287,9 @@ impl JobStore for Flaky {
     }
     fn unsettled_attempts(&self) -> Result<Vec<AttemptRow>, JobStoreError> {
         self.inner.unsettled_attempts()
+    }
+    fn database_identity(&self) -> Result<FeedId, JobStoreError> {
+        self.inner.database_identity()
     }
 }
 
