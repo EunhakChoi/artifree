@@ -17,7 +17,9 @@ use artifree_ports::artifact_store::StoreError;
 use artifree_ports::build_store::{
     BuildPublication, BuildRecord, BuildSnapshot, BuildStore, MAX_BUILDS_PER_ARTIFACT, Publication,
 };
-use artifree_ports::job_store::{JobRecord, JobStoreError, Lease, ProfileCounts, Retry};
+use artifree_ports::job_store::{
+    JobRecord, JobStoreError, Lease, ProfileCounts, READY_WINDOW_MS, Retry,
+};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
@@ -532,15 +534,20 @@ fn newest_job(
 
 /// The jobs that rule 20 can end, before their profile is compared: queued
 /// `run_profile` jobs enqueued at or before `?1`, without an attempt row, of an
-/// artifact in place.
+/// artifact in place and an enabled actor, while no execution worker was seen
+/// within `?3` before `?2`, now (decision 0058 rule 20).
 const UNCLAIMED: &str = "FROM jobs j JOIN artifacts a ON a.id = j.artifact_id
      WHERE j.kind = 'run_profile' AND j.state = 'queued' AND j.created_at <= ?1
        AND a.purged_at IS NULL AND a.deleted_at IS NULL
-       AND NOT EXISTS (SELECT 1 FROM execution_attempts e WHERE e.job_id = j.id)";
+       AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id = j.actor AND u.disabled_at IS NOT NULL)
+       AND NOT EXISTS (SELECT 1 FROM execution_attempts e WHERE e.job_id = j.id)
+       AND NOT EXISTS (SELECT 1 FROM execution_workers w WHERE w.last_seen >= ?2 - ?3)";
 
 /// The jobs that rule 20 ends: queued `run_profile` jobs of `profiles`,
 /// enqueued at or before `enqueued_by`, without an attempt row, of an artifact
-/// in place. Each ends as `execution_unavailable`, with its change recorded.
+/// in place and an enabled actor, while no execution worker is ready at `now`.
+/// Each ends as `execution_unavailable`, with its change recorded (the record
+/// keeps `run_profile` out of the change feed until R03d).
 fn expire(
     transaction: &Transaction<'_>,
     profiles: &[ProfileName],
@@ -554,7 +561,7 @@ fn expire(
             ))
             .map_err(unavailable)?;
         let rows = statement
-            .query_map([enqueued_by.0], |row| {
+            .query_map(params![enqueued_by.0, now.0, READY_WINDOW_MS], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
             })
             .map_err(unavailable)?;
@@ -663,7 +670,7 @@ impl BuildStore for SqliteStore {
             .connect()?
             .query_row(
                 &format!("SELECT EXISTS (SELECT 1 {UNCLAIMED})"),
-                [enqueued_by.0],
+                params![enqueued_by.0, now.0, READY_WINDOW_MS],
                 |row| row.get(0),
             )
             .map_err(unavailable)?;

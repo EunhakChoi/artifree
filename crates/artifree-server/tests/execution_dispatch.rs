@@ -27,7 +27,7 @@ use artifree_domain::job::{
 };
 use artifree_domain::package::{FileChange, FilePackage, FileSet, PackagePath};
 use artifree_ports::artifact_store::{ArtifactStore, FileEntry};
-use artifree_ports::build_store::BuildStore;
+use artifree_ports::build_store::{BuildStore, CLAIM_DEADLINE_MS};
 use artifree_ports::execution::{
     BoundRun, Capacity, Checkpoint, CheckpointUnavailable, Execution, ExecutionHost, HeldCapacity,
     LaunchFailure, LaunchOutcome, LimitKind, PinnedInput, ProfileOutput, ProfileRun,
@@ -874,6 +874,40 @@ fn a_busy_lock_and_a_trusted_worker_write_no_row() -> TestResult {
         presence_rows(&world.database)?,
         [(world.worker.as_str().to_owned(), old)]
     );
+    Ok(())
+}
+
+/// Decision 0058 rule 20 (slice R03cdb): a worker given capacity marks itself
+/// seen before the deadline runs, so an old build job is claimed by it, not
+/// ended as `execution_unavailable`.
+#[test]
+fn held_capacity_claims_an_old_build_job_instead_of_ending_it() -> TestResult {
+    let world = World::with(&package(INDEX_V1)?, "fixture", true)?;
+    let log = Arc::new(Log::default());
+    let job = world
+        .service
+        .enqueue_profile_job(
+            &world.owner,
+            &parsed("old-build-key")?,
+            &world.artifact,
+            SourceRevision(1),
+            &world.profile,
+            UnixMillis(NOW.0 - CLAIM_DEADLINE_MS),
+        )?
+        .job
+        .id;
+    let execution = FakeExecution {
+        shared: world.shared(&log),
+        scene: scene(Answer::Held, Launch::Unavailable),
+    };
+    run_once(&world, Some(&execution), &log)?;
+    let events = worker_events(&log.snapshot()?);
+    assert_eq!(
+        events.first(),
+        Some(&Seen::Claimed(text(&job))),
+        "the old job is claimed first: {events:?}"
+    );
+    assert!(!events.contains(&Seen::Settled(text(&job))), "{events:?}");
     Ok(())
 }
 

@@ -201,8 +201,9 @@ pub trait BuildStore {
 
     /// Ends as `execution_unavailable`, in one transaction, every queued
     /// `run_profile` job of one of `profiles` that was enqueued at or before
-    /// `enqueued_by`, has no attempt row and whose artifact is in place
-    /// (decision 0058 rule 20, slice R03cda), and returns them as ended. A job
+    /// `enqueued_by`, has no attempt row, whose artifact is in place and whose
+    /// actor is enabled, while no execution worker is ready at `now` (decision
+    /// 0058 rule 20, slice R03cdb), and returns them as ended. A job
     /// with an attempt row, even one that a graceful release gave back, is
     /// left to 0057. A claim takes the same write lock, so a job is either
     /// claimed or ended, never both.

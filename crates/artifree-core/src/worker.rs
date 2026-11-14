@@ -325,11 +325,13 @@ pub fn run_next_with<S: ArtifactStore + JobStore + BuildStore + ExecutionPresenc
 
 /// Ends the jobs of this build's build profiles that no execution worker
 /// claimed within [`CLAIM_DEADLINE_MS`] of their enqueue, as
-/// `execution_unavailable` (decision 0058 rule 20, slice R03cda), and reports
-/// each as [`ClaimEvent::Settled`]. Every worker does this before its claim, so
-/// the trusted worker, which always runs, ends them when no execution worker
-/// does. A worker without the build store, or a build without a build
-/// profile, ends nothing.
+/// `execution_unavailable` while no execution worker is ready (decision 0058
+/// rule 20, slice R03cdb), and reports each as [`ClaimEvent::Settled`]. Every
+/// worker does this after asking for capacity and before its claim, so an
+/// execution worker given capacity has marked itself seen first and ends
+/// nothing, and the trusted worker, which always runs, ends them when no
+/// execution worker is ready. A worker without the build store, or a build
+/// without a build profile, ends nothing.
 fn expire_unclaimed<S>(
     stores: &Stores<'_, S>,
     clock: &dyn Clock,
@@ -361,7 +363,6 @@ fn run_claimed<S: ArtifactStore + JobStore>(
     on_claim: &mut dyn FnMut(ClaimEvent<'_>),
 ) -> Result<Step, JobStoreError> {
     let store = stores.store;
-    expire_unclaimed(stores, clock, profiles, on_claim)?;
     let mut held = match profiles.execution {
         Some(execution) => {
             // Only a worker that can run a build counts as ready (decision
@@ -374,6 +375,7 @@ fn run_claimed<S: ArtifactStore + JobStore>(
         }
         None => None,
     };
+    expire_unclaimed(stores, clock, profiles, on_claim)?;
     let claim = store.claim_job(JobClaim {
         worker,
         now: clock.now(),

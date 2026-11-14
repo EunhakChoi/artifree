@@ -1,10 +1,12 @@
-//! The claim deadline of decision 0058 rule 20 (slice R03cda), against a real
+//! The claim deadline of decision 0058 rule 20 (slice R03cdb), against a real
 //! `SQLite` store: a worker's claim loop, here the trusted worker's (no
 //! execution port), ends a build profile's job that no execution worker
 //! claimed within ten minutes of its enqueue as `execution_unavailable`, and
-//! leaves alone a job with an attempt row, a job whose artifact is in the
-//! trash and a job of a profile that is not a build profile. Time is a fixed
-//! clock, so nothing sleeps.
+//! leaves alone a job with an attempt row, a running job, a job whose
+//! artifact is in the trash, a disabled user's job, a job of a profile that is
+//! not a build profile, and every job while an execution worker is ready. An
+//! execution worker's loop ends jobs as the trusted worker's does. Time is a
+//! fixed clock, so nothing sleeps.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -17,13 +19,18 @@ use artifree_domain::job::{AttemptIdentity, JobFailure, JobId, JobState, Profile
 use artifree_domain::package::{FilePackage, PackagePath};
 use artifree_domain::{MetadataRevision, SourceRevision};
 use artifree_ports::build_store::CLAIM_DEADLINE_MS;
-use artifree_ports::job_store::{ExecutionClaim, JobClaim, JobStore};
+use artifree_ports::execution::{Capacity, Execution};
+use artifree_ports::job_store::{
+    AttemptRow, ExecutionClaim, ExecutionPresence, JobClaim, JobStore, READY_WINDOW_MS,
+};
 use artifree_providers::storage::{DATABASE_FILE, SqliteStore};
 use rusqlite::Connection;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 const ENQUEUED: i64 = 1_000_000;
+/// The owner, a registered user.
+const OWNER: &str = "u-00000000000000000000000000000001";
 const LEASE_MS: u64 = 30_000;
 
 /// A directory for one test's database, removed when the test ends.
@@ -101,7 +108,12 @@ impl Fixture {
         let path = dir.0.join(DATABASE_FILE);
         let store = SqliteStore::open(&path)?;
         let service = ArtifactService::new(SqliteStore::open(&path)?);
-        let owner: ActorId = parsed("owner")?;
+        let owner: ActorId = parsed(OWNER)?;
+        // The owner is a registered user, so that the test can disable it.
+        Connection::open(&path)?.execute(
+            "INSERT INTO users (id, label, created_at) VALUES (?1, 'Owner', '2026-11-15T00:00:00Z')",
+            [OWNER],
+        )?;
         let package = FilePackage::new(vec![(PackagePath::entry(), b"<h1>1</h1>".to_vec())])?;
         let created = service.create(
             &owner,
@@ -144,6 +156,16 @@ impl Fixture {
     /// profiles, `react-v1` is its build profile, and it has no execution
     /// port. Returns the jobs the turn reported as ended.
     fn turn(&self, now: i64) -> Result<Vec<JobId>, Box<dyn std::error::Error>> {
+        self.turn_with(now, None)
+    }
+
+    /// One turn of a worker's claim loop at `now`, with `execution` as its
+    /// port (`None` for the trusted worker).
+    fn turn_with(
+        &self,
+        now: i64,
+        execution: Option<&dyn Execution>,
+    ) -> Result<Vec<JobId>, Box<dyn std::error::Error>> {
         let known = [self.build.clone(), self.other.clone()];
         let builds = [self.build.clone()];
         let mut ended = Vec::new();
@@ -156,7 +178,7 @@ impl Fixture {
             Profiles {
                 known: &known,
                 builds: &builds,
-                execution: None,
+                execution,
             },
             &mut |event| {
                 if let ClaimEvent::Settled(record) = event {
@@ -165,7 +187,7 @@ impl Fixture {
             },
         )?;
         if !matches!(step, Step::Idle) {
-            return Err(format!("the trusted worker ran a job: {step:?}").into());
+            return Err(format!("the worker ran a job: {step:?}").into());
         }
         Ok(ended)
     }
@@ -212,9 +234,16 @@ fn an_unclaimed_build_ends_ten_minutes_after_its_enqueue() -> TestResult {
     let job = fixture.enqueue(&fixture.build.clone(), "build", ENQUEUED)?;
 
     assert_eq!(fixture.turn(ENQUEUED + CLAIM_DEADLINE_MS - 1)?, Vec::new());
-    assert_eq!(fixture.row(&job)?, queued(), "a millisecond before the deadline");
+    assert_eq!(
+        fixture.row(&job)?,
+        queued(),
+        "a millisecond before the deadline"
+    );
 
-    assert_eq!(fixture.turn(ENQUEUED + CLAIM_DEADLINE_MS)?, vec![job.clone()]);
+    assert_eq!(
+        fixture.turn(ENQUEUED + CLAIM_DEADLINE_MS)?,
+        vec![job.clone()]
+    );
     assert_eq!(fixture.row(&job)?, unavailable(), "at the deadline");
     assert_eq!(
         fixture.turn(ENQUEUED + CLAIM_DEADLINE_MS + 1)?,
@@ -250,7 +279,9 @@ fn a_job_with_an_attempt_is_left_alone() -> TestResult {
         })?
         .claimed
         .ok_or("no job was due")?;
-    fixture.store.settle_attempt(&attempt, UnixMillis(ENQUEUED + 2))?;
+    fixture
+        .store
+        .settle_attempt(&attempt, UnixMillis(ENQUEUED + 2))?;
     fixture
         .store
         .release_job(&claimed.lease, UnixMillis(ENQUEUED + 3))?;
@@ -282,5 +313,106 @@ fn only_a_build_profile_outside_the_trash_ends() -> TestResult {
         queued(),
         "a profile that is not a build profile waits for its worker"
     );
+    Ok(())
+}
+
+/// An execution port whose admission always refuses, so its worker holds no
+/// capacity and keeps no readiness row.
+struct Refusing;
+
+impl Execution for Refusing {
+    fn capacity(&self, _unsettled: &[AttemptRow]) -> Capacity {
+        Capacity::Refused("refused")
+    }
+}
+
+/// Rule 20 applies only while no execution worker is ready: a worker seen
+/// within five minutes keeps an old job queued, and once its row is older the
+/// job ends.
+#[test]
+fn a_ready_execution_worker_keeps_an_old_job_queued() -> TestResult {
+    let fixture = Fixture::new()?;
+    let job = fixture.enqueue(&fixture.build.clone(), "ready", ENQUEUED)?;
+    let seen = ENQUEUED + CLAIM_DEADLINE_MS;
+    fixture
+        .store
+        .mark_seen(&parsed::<WorkerId>("execution-worker")?, UnixMillis(seen))?;
+
+    assert_eq!(fixture.turn(seen + READY_WINDOW_MS)?, Vec::new());
+    assert_eq!(fixture.row(&job)?, queued(), "a worker is still ready");
+
+    assert_eq!(fixture.turn(seen + READY_WINDOW_MS + 1)?, vec![job.clone()]);
+    assert_eq!(
+        fixture.row(&job)?,
+        unavailable(),
+        "no worker is ready any more"
+    );
+    Ok(())
+}
+
+/// A disabled user's job stays queued, as the claim leaves it (0036), and ends
+/// once the user is enabled again.
+#[test]
+fn a_disabled_users_job_is_left_queued() -> TestResult {
+    let fixture = Fixture::new()?;
+    let job = fixture.enqueue(&fixture.build.clone(), "disabled", ENQUEUED)?;
+    let late = ENQUEUED + CLAIM_DEADLINE_MS;
+    let disable = |at: Option<&str>| {
+        Connection::open(fixture.dir.0.join(DATABASE_FILE))?.execute(
+            "UPDATE users SET disabled_at = ?2 WHERE id = ?1",
+            rusqlite::params![OWNER, at],
+        )?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    };
+
+    disable(Some("2026-11-15T00:00:00Z"))?;
+    assert_eq!(fixture.turn(late)?, Vec::new());
+    assert_eq!(fixture.row(&job)?, queued(), "a disabled user's job waits");
+
+    disable(None)?;
+    assert_eq!(fixture.turn(late)?, vec![job.clone()]);
+    assert_eq!(fixture.row(&job)?, unavailable());
+    Ok(())
+}
+
+/// Every worker's claim loop applies the deadline: an execution worker that is
+/// refused capacity, and so is not ready, ends the job too.
+#[test]
+fn an_execution_workers_loop_ends_an_old_job() -> TestResult {
+    let fixture = Fixture::new()?;
+    let job = fixture.enqueue(&fixture.build.clone(), "execution", ENQUEUED)?;
+    let late = ENQUEUED + CLAIM_DEADLINE_MS;
+    assert_eq!(fixture.turn_with(late, Some(&Refusing))?, vec![job.clone()]);
+    assert_eq!(fixture.row(&job)?, unavailable());
+    Ok(())
+}
+
+/// A job that an execution worker claimed is running, not queued, and the
+/// deadline leaves it to its lease.
+#[test]
+fn a_claimed_job_is_not_ended() -> TestResult {
+    let fixture = Fixture::new()?;
+    let job = fixture.enqueue(&fixture.build.clone(), "claimed", ENQUEUED)?;
+    let known = [fixture.build.clone()];
+    fixture
+        .store
+        .claim_job(JobClaim {
+            worker: &parsed::<WorkerId>("execution-worker")?,
+            now: UnixMillis(ENQUEUED + 1),
+            lease_ms: LEASE_MS,
+            known_profiles: &known,
+            execution: Some(ExecutionClaim {
+                attempt: AttemptIdentity::from_random([6; 16]),
+                tool_digest: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                machine: "machine-a",
+                boot: "boot-a",
+                cgroupns: "cgroupns-a",
+                directory: "0123456789abcdef0123456789abcdef",
+            }),
+        })?
+        .claimed
+        .ok_or("no job was due")?;
+    assert_eq!(fixture.turn(ENQUEUED + 2 * CLAIM_DEADLINE_MS)?, Vec::new());
+    assert_eq!(fixture.row(&job)?.0, "running");
     Ok(())
 }
