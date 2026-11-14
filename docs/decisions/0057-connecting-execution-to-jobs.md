@@ -97,6 +97,15 @@ bootstrap|stub|guardian` refuses with status 2 in a build without it.
 > - trash and recovery at claim, heartbeat and publication;
 > - queued and retry jobs resuming after a restart;
 > - a stuck cleanup that keeps the quarantine.
+
+> **Note, 2026-11-14 (0058, R03bcbb).** Rule 2's feature now adds a second
+> profile, `react-v1` of decision 0058, beside `fixture`, so a worker built
+> with it passes both names with every claim and runs a `react-v1` job
+> through the same launch. A release build still knows no profile; 0058
+> rule 5 gives it `react-v1` in R03f. The feature also adds two launch
+> entries with no store name, which no job can name: the bundler
+> measurement of R03bcba and the `react-v1` filter check, the fixture's
+> payload under `react-v1`'s filter.
 >
 > The two workers run one after the other, since each must be the only
 > process of its delegated group. The second starts on another execution

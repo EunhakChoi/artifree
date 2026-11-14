@@ -1,6 +1,10 @@
 //! The profile table finds a profile only by its exact name or identity.
 
-use super::{FIXTURE_EXECUTION, PROFILES, by_identity, by_name};
+use super::super::policy::FilterSet;
+use super::{
+    FIXTURE_EXECUTION, MEASUREMENT, PROFILES, REACT_V1, REACT_V1_FILTER_CHECK, TEST_ENTRIES,
+    by_identity, by_name, filter_sets,
+};
 
 #[test]
 fn the_fixture_is_found_by_its_exact_name_and_identity() {
@@ -13,7 +17,15 @@ fn the_fixture_is_found_by_its_exact_name_and_identity() {
 
 #[test]
 fn a_near_miss_finds_no_profile() {
-    for name in ["", "Fixture", "fixture ", "fixture-v2", "react-v1"] {
+    for name in [
+        "",
+        "Fixture",
+        "fixture ",
+        "fixture-v2",
+        "React-v1",
+        "react-v2",
+        "react",
+    ] {
         assert_eq!(by_name(name), None, "{name:?}");
     }
     for identity in [
@@ -21,17 +33,63 @@ fn a_near_miss_finds_no_profile() {
         "artifree-fixture-inspection-v2",
         "artifree-fixture-inspection-v1 ",
         "fixture",
+        "react-v1",
+        "artifree-react-v2",
     ] {
         assert_eq!(by_identity(identity), None, "{identity:?}");
     }
 }
 
 #[test]
-fn names_and_identities_are_unique() {
+fn react_v1_is_found_by_its_exact_name_and_identity() {
+    assert_eq!(by_name("react-v1"), Some(&REACT_V1));
+    assert_eq!(by_identity("artifree-react-v1"), Some(&REACT_V1));
+    // The profile runs what was measured, under the filter built from that measurement.
+    assert_eq!(REACT_V1.payload, MEASUREMENT.payload);
+    assert_eq!(REACT_V1.arguments, MEASUREMENT.arguments);
+    assert_eq!(REACT_V1.environment, MEASUREMENT.environment);
+    assert_eq!(REACT_V1.filter, FilterSet::ReactV1);
+}
+
+#[test]
+fn the_test_entries_are_found_by_identity_but_never_by_name() {
+    assert_eq!(
+        by_identity("artifree-bundler-measurement-v1"),
+        Some(&MEASUREMENT)
+    );
+    assert_eq!(
+        by_identity("artifree-react-v1-filter-check"),
+        Some(&REACT_V1_FILTER_CHECK)
+    );
+    assert_eq!(REACT_V1_FILTER_CHECK.payload, FIXTURE_EXECUTION.payload);
+    assert_eq!(REACT_V1_FILTER_CHECK.filter, FilterSet::ReactV1);
+    for entry in TEST_ENTRIES {
+        assert_eq!(entry.name, "");
+        assert_eq!(by_name(entry.name), None);
+    }
+}
+
+#[test]
+fn every_filter_is_offered_once() {
+    let sets: Vec<FilterSet> = filter_sets().collect();
+    assert_eq!(
+        sets,
+        [FilterSet::Fixture, FilterSet::ReactV1, FilterSet::Measure]
+    );
+}
+
+#[test]
+fn profile_names_are_set_and_unique_and_identities_are_unique() {
     for (index, profile) in PROFILES.iter().enumerate() {
+        assert!(!profile.name.is_empty(), "a profile has a store name");
         for other in PROFILES.iter().skip(index + 1) {
             assert_ne!(profile.name, other.name);
-            assert_ne!(profile.inspection.identity(), other.inspection.identity());
+        }
+    }
+    let entries: Vec<_> = PROFILES.iter().chain(TEST_ENTRIES).collect();
+    for (index, entry) in entries.iter().enumerate() {
+        for other in entries.iter().skip(index + 1) {
+            assert_ne!(entry.inspection.identity(), other.inspection.identity());
         }
     }
 }

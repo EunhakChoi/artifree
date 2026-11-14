@@ -384,3 +384,40 @@ fn a_leftover_that_cannot_be_removed_refuses_staging() -> Result<(), Box<dyn Err
     );
     Ok(())
 }
+
+/// A verified input of `files`, each holding one byte, beside the entry document.
+fn input_with(files: &[&str]) -> Result<VerifiedInput, Box<dyn Error>> {
+    let mut all = vec![(PackagePath::entry(), b"<!doctype html>".to_vec())];
+    for path in files {
+        all.push((path.parse()?, b"x".to_vec()));
+    }
+    let package = FilePackage::new(all).map_err(|error| format!("{error:?}"))?;
+    let listing = InputListing::of(&package);
+    VerifiedInput::verify(package, listing).map_err(|refusal| format!("{refusal:?}").into())
+}
+
+#[test]
+fn resolver_files_and_package_directories_are_found_at_any_depth() -> Result<(), Box<dyn Error>> {
+    for path in [
+        "tsconfig.json",
+        "src/jsconfig.json",
+        "package.json",
+        "src/deep/Package.JSON",
+        "node_modules/left-pad/index.js",
+        "src/node_modules/react/index.js",
+        "src/Node_Modules/x.js",
+    ] {
+        assert!(input_with(&[path])?.holds_resolver_file(), "{path}");
+    }
+    for path in [
+        "src/main.tsx",
+        "src/package.json.txt",
+        "src/tsconfig.base.json",
+        "src/node_modules.js",
+        "src/my_node_modules/x.js",
+        "data/config.json",
+    ] {
+        assert!(!input_with(&[path])?.holds_resolver_file(), "{path}");
+    }
+    Ok(())
+}

@@ -2,8 +2,9 @@
 
 Date: 2026-11-14. Status: **accepted; R03a (the package rules), R03ba
 (the profile table), R03bb (the provider's verdicts), R03bca (the
-versioned, packaged and protected tool root) and R03bcba (the lock list, the
-packaged bundler and its measurement) are implemented, R03bcbb to R03f are
+versioned, packaged and protected tool root), R03bcba (the lock list, the
+packaged bundler and its measurement) and R03bcbb (the `react-v1` profile in
+the build with `enforcement-fixture`) are implemented, R03c to R03f are
 not**. Roadmap: R03.
 
 > **Note, 2026-11-14 (slices).** R03b is split into R03ba, R03bb and R03bc,
@@ -175,6 +176,52 @@ not**. Roadmap: R03.
 > refused form of `clone`, `prlimit64`, `socket` or `setsockopt` fails the
 > job. The job also refuses a wrong SHA-256 before anything is written, and
 > refuses a changed file of the `react` package as a modified root.
+
+> **Note, 2026-11-14 (R03bcbb).** The test build and the build with
+> `enforcement-fixture` know `react-v1`: the root's bundler with the argv and
+> environment of the measurement, under the filter `ReactV1`. Its refusal is
+> the fixture's. Its allowlist is the fixture's with twelve calls added. The
+> first nine are the measured ones of the artifact `bundler-calls.txt` of the
+> first passing run: `ioctl`, `nanosleep`, `getpid`, `getcwd`, `epoll_ctl`,
+> `tgkill`, `epoll_pwait`, `eventfd2` and `epoll_create1`. The other three are
+> the vDSO's `gettimeofday`, `time` and `getcpu`, listed as unmeasured; the
+> fixture already allows `clock_gettime`. The measurement records a call but
+> not its arguments, and `ioctl` reaches the handler of every descriptor, so
+> it is allowed only for the two read-only terminal queries the bundler makes
+> before it prints (`TCGETS` and `TIOCGWINSZ`). The template run shows that
+> this is enough. Every other added call is allowed whatever its arguments. Keeping the fixture's allowlist under the
+> added calls follows from the measurement: it logged only calls outside
+> that list, so it says nothing about which of the fixture's calls the
+> bundler leaves unused. The esbuild option `--sourcemap` takes no `false`
+> value, so the argv leaves it out; esbuild writes no source map unless asked,
+> which is rule 1's "no source maps". The bundler also reads resolver
+> configuration from the files above each module it imports. A
+> `tsconfig.json` or `jsconfig.json` can map an import to a module of the
+> revision, a `package.json` can remap it through its `browser` or `imports`
+> field, and a `node_modules` directory can shadow `NODE_PATH`. Each of
+> them would let a revision import a module that rule 2 refuses. So
+> `react-v1` refuses an input that holds a file of those names or any file
+> under a `node_modules` directory, at any depth and in any ASCII case. The
+> refusal comes before anything is staged, and the attempt then ends as an
+> input refusal. The worker reports it as unavailable until R03c gives builds
+> their own failures (rule 18). The enforcement job (part 16) shows:
+>
+> - the template builds and exits 0 in an attempt group that reads back the
+>   limits of 0042 rule 5. Its output is collected within the output limits
+>   and refused only for its missing `index.html`, which R03c's composition
+>   adds (rule 8). This proves rule 23's assumption for R03bcbb, so 0042 is
+>   not amended;
+> - a bad import exits 1 with the one message that names it, and the same
+>   import mapped to a module of the revision by `tsconfig.json` is refused
+>   before it is staged;
+> - a call outside the filter is killed with exactly its record. The bundler
+>   cannot be made to make such a call, so an entry with no store name runs
+>   the fixture's payload under `react-v1`'s filter, and its thread calls
+>   `unshare`;
+> - a changed file of the `react` package refuses the `react-v1` attempt as a
+>   modified root. Admission checks the whole root before any profile matters,
+>   so this shows the root check that `react-v1` runs behind, as part 5 does
+>   for the fixture.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),
