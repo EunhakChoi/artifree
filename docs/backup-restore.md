@@ -169,6 +169,11 @@ file content, and the `cleanup_runs` table (decision 0029). Schema 6 adds the to
 schema. A server of an older release that is started again on a directory this
 build upgraded will refuse it.
 
+The TypeScript and JSX source files that packages accept from contract 0.28.0
+(0058, R03a) keep schema 14. A server of an earlier release reports an
+artifact that holds a `.ts`, `.tsx` or `.jsx` file as corrupt, so go back to
+it only with a backup taken before the upgrade.
+
 The UTF-8 application-data path expansion (0046) keeps schema 12. Existing JSON
 members and ASCII request keys need no migration. Restart the server and client
 together before using the expanded paths, and restart any member-list traversal;

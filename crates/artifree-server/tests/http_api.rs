@@ -1812,6 +1812,42 @@ async fn preview_serves_a_pinned_revision_in_an_opaque_sandbox() -> TestResult {
 }
 
 #[tokio::test]
+async fn preview_serves_typescript_and_jsx_source_as_plain_text() -> TestResult {
+    let harness = Harness::new();
+    let source = "export const App = () => <h1>hi</h1>;";
+    let reply = harness
+        .create(
+            "create-source-1",
+            &json!({
+                "title": "React",
+                "files": [
+                    { "path": "index.html", "encoding": "utf8", "content": "<h1>shell</h1>" },
+                    { "path": "src/main.tsx", "encoding": "utf8", "content": source },
+                    { "path": "src/util.ts", "encoding": "utf8", "content": "export {};" },
+                    { "path": "src/App.JSX", "encoding": "utf8", "content": source }
+                ]
+            }),
+        )
+        .await?;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", error_code(&reply));
+    let id = reply.json()?["artifact"]["id"]
+        .as_str()
+        .ok_or("missing artifact id")?
+        .to_owned();
+    let url = preview_url(&harness, &id, 1).await?;
+    for path in ["src/main.tsx", "src/util.ts", "src/App.JSX"] {
+        let served = harness.content(&format!("{url}{path}")).await?;
+        assert_eq!(
+            (served.status, served.header(header::CONTENT_TYPE)),
+            (StatusCode::OK, "text/plain; charset=utf-8"),
+            "{path} must never be served as script"
+        );
+        assert_eq!(served.header(header::X_CONTENT_TYPE_OPTIONS), "nosniff");
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn expired_preview_links_stop_working() -> TestResult {
     let harness = Harness::with_ttl(Duration::ZERO);
     let id = created_id(&harness).await?;

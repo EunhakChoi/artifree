@@ -10,12 +10,18 @@ implemented, R03b to R03f are not**. Roadmap: R03.
 > [0003](0003-local-html-artifact-slice.md) (packages and the preview origin) and
 > [0029](0029-retention-and-cleanup.md) (content references and purge).
 
-> **Note, 2026-11-14 (R03a).** Rule 6 is implemented as three more
-> extensions of the existing plain-text type rather than a new type, so the
-> list of media types stays at 20 and a `.ts`, `.tsx` or `.jsx` file is
-> served as `text/plain; charset=utf-8` with `nosniff`, like a `.txt` file.
-> `.cjs` stays refused. The runtime SDK's list, the shared path fixtures and
-> the published `package_rules` follow, and the contract is 0.28.0.
+> **Note, 2026-11-14 (R03a).** Rule 6 is implemented as a 21st media type,
+> `Source`, for `.ts`, `.tsx` and `.jsx` in any case. Its `Content-Type` is
+> `text/plain; charset=utf-8`, sent with `nosniff`, so the preview origin
+> never serves source as script; the type keeps source apart from `.txt`
+> for the later slices. `.cjs` stays refused. The runtime SDK's list, the
+> shared path fixtures and the published `package_rules` follow, and the
+> contract is 0.28.0. Two consequences of sharing the path rules: the
+> provider's output collection now also accepts these extensions, which R03c's
+> composition (rule 8) narrows to `app.js` and `app.css`; and, as with the path
+> expansion of 0046, the schema stays at 14, so a previous release started on
+> a directory that holds such a file reports that artifact as corrupt. Going
+> back needs a backup taken before the upgrade (0027).
 
 ## Context
 
@@ -55,7 +61,7 @@ The earlier records leave these parts to R03:
 - **0042 section 8:** R03's presentation changes need Chromium and Firefox
   smoke checks.
 
-Packages today follow 0003: at most 256 files of 5 MiB and 25 MiB in
+Before R03a, packages followed 0003: at most 256 files of 5 MiB and 25 MiB in
 total, an `index.html`, and a closed list of 20 media types that has no
 `.ts`, `.tsx`, `.jsx` or `.cjs`. The same rules are mirrored in the runtime
 SDK and the shared path fixtures, and published as `package_rules`. A

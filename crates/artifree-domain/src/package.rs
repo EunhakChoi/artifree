@@ -95,8 +95,7 @@ pub enum MediaType {
     Avif,
     /// Icon files.
     Icon,
-    /// Plain text, including TypeScript and JSX source, which is never
-    /// served as script (decision 0058 rule 6).
+    /// Plain text.
     Text,
     /// Markdown text.
     Markdown,
@@ -114,11 +113,14 @@ pub enum MediaType {
     Wasm,
     /// XML documents.
     Xml,
+    /// TypeScript and JSX source, served as plain text and never as script
+    /// (decision 0058 rule 6).
+    Source,
 }
 
 impl MediaType {
     /// Every media type a package accepts, so clients can list them.
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::Html,
         Self::Css,
         Self::JavaScript,
@@ -139,6 +141,7 @@ impl MediaType {
         Self::Otf,
         Self::Wasm,
         Self::Xml,
+        Self::Source,
     ];
 
     /// The lowercase file extensions that give a path this type. Case is
@@ -157,7 +160,7 @@ impl MediaType {
             Self::Webp => &["webp"],
             Self::Avif => &["avif"],
             Self::Icon => &["ico"],
-            Self::Text => &["txt", "ts", "tsx", "jsx"],
+            Self::Text => &["txt"],
             Self::Markdown => &["md"],
             Self::Csv => &["csv"],
             Self::Woff => &["woff"],
@@ -166,6 +169,7 @@ impl MediaType {
             Self::Otf => &["otf"],
             Self::Wasm => &["wasm"],
             Self::Xml => &["xml"],
+            Self::Source => &["ts", "tsx", "jsx"],
         }
     }
 
@@ -193,7 +197,7 @@ impl MediaType {
             Self::Webp => "image/webp",
             Self::Avif => "image/avif",
             Self::Icon => "image/x-icon",
-            Self::Text => "text/plain; charset=utf-8",
+            Self::Text | Self::Source => "text/plain; charset=utf-8",
             Self::Markdown => "text/markdown; charset=utf-8",
             Self::Csv => "text/csv; charset=utf-8",
             Self::Woff => "font/woff",
@@ -596,7 +600,7 @@ mod tests {
     #[test]
     fn source_files_are_plain_text_never_script() {
         for value in ["src/main.tsx", "src/util.ts", "src/App.JSX"] {
-            assert_eq!(path(value).media_type(), MediaType::Text, "{value}");
+            assert_eq!(path(value).media_type(), MediaType::Source, "{value}");
             assert_eq!(
                 path(value).media_type().essence(),
                 "text/plain; charset=utf-8",
