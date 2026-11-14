@@ -1,7 +1,13 @@
 # 0058: React builds and their preview
 
 Date: 2026-11-14. Status: **accepted; R03a (the package rules) is
-implemented, R03b to R03f are not**. Roadmap: R03.
+implemented, R03ba to R03f are not**. Roadmap: R03.
+
+> **Note, 2026-11-14 (slices).** R03b is split into R03ba, R03bb and R03bc,
+> and rule 5 moves to R03f. A release build compiles no attempt, worker port,
+> collection, staging, registry or lock today (0056 rule 16), so letting it
+> know `react-v1` is a change of its own, and it lands with the supported-host
+> statement it makes true. No other rule changes.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),
@@ -98,7 +104,7 @@ stands.
    from the bundler on the supported host, kept separate from the fixture's
    table. A call outside it ends the attempt (rule 18 names the failure).
 4. **The limits of 0042 rule 5 are unchanged.** If the bundler cannot build
-   the template within them, R03b amends 0042; it does not raise a limit in
+   the template within them, R03bc amends 0042; it does not raise a limit in
    code.
 5. **Which builds know `react-v1`.** This amends 0056 rule 4 and 0057
    rule 2. The server built for x86_64 Linux knows `react-v1` in its release
@@ -212,7 +218,7 @@ stands.
     - `output_rejected`: rule 8 refused the result.
 
     `execution_unavailable`, cleanup failures and lease loss keep their
-    meaning. R03b extends the provider's verdict so these cases are told
+    meaning. R03bb extends the provider's verdict so these cases are told
     apart and the bundler's stderr is handed to the worker within the 1 MiB
     log bound; today all three reach `internal`.
 
@@ -250,25 +256,30 @@ stands.
 
 22. R03 is delivered in this order. Each slice passes `npm run check` and
     `npm run build`; slices that touch the worker also pass the enforcement
-    job, and R03e passes Chromium and Firefox smoke.
+    job, and R03e passes Chromium and Firefox smoke. Until R03f, R03c to
+    R03e run `react-v1` only in the build with `enforcement-fixture`; a
+    release build knows no profile and refuses its enqueue with
+    `profile_unknown` (rule 5).
 
-| Slice | What it adds                                                                                                                                                                                          | Proven where                                                                                                                                                                                                                                   |
-| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| R03a  | Rule 6: the media types, the SDK mirror, the fixtures, `package_rules` and the contract bump.                                                                                                         | Unit and contract tests on any host; a `.tsx` file is accepted and served as text; mutations of the new types.                                                                                                                                 |
-| R03b  | Rules 1 to 5, 19 and the provider half of 18: the profile, its filter, the verdicts and stderr hand-off, the versioned root path, the lock list and the packaging script used by the enforcement job. | The enforcement job: the template builds within every limit; a bad import, a forbidden call and a limit each give their own verdict; a modified root is refused.                                                                               |
-| R03c  | Rules 7 to 16, 20 and the store half of 18: composition, schema 15, publication, references, retention, diagnostics, build tickets, the `/b/` route, head status and the claim deadline.              | SQLite tests on any host for each transaction, reference and retention rule, the first-build-kept rule, purge, backup, restore and the deadline; the enforcement job for a published build, a `build_failed` with diagnostics and its preview. |
-| R03d  | Rule 17 and the wire half of 18: the public kind, `profile_unknown`, the contract, MCP and the CLI, including build tickets.                                                                          | Contract, API, MCP and CLI tests, including refusals and the open-job bound.                                                                                                                                                                   |
-| R03e  | The web: a build action, head status and diagnostics, and the build preview with its "latest" notice.                                                                                                 | Component tests and Chromium and Firefox smoke.                                                                                                                                                                                                |
-| R03f  | Rule 21: the operator documentation and the supported-host statement.                                                                                                                                 | Review; the enforcement job follows the documented steps.                                                                                                                                                                                      |
+| Slice | What it adds                                                                                                                                                                                                                                                      | Proven where                                                                                                                                                                                                                                   |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R03a  | Rule 6: the media types, the SDK mirror, the fixtures, `package_rules` and the contract bump.                                                                                                                                                                     | Unit and contract tests on any host; a `.tsx` file is accepted and served as text; mutations of the new types.                                                                                                                                 |
+| R03ba | The provider half of rules 1 and 3: a profile table that holds each profile's identity, payload, argv, environment, filter and manifest bytes, used at every site that names the fixture today; the fixture becomes its one entry, with no change in behavior.    | Unit tests on any host for the table and each selection site; the enforcement job unchanged.                                                                                                                                                   |
+| R03bb | The provider half of rule 18: verdicts that tell a non-zero payload exit, a limit of 0042 rule 5 and a filter kill apart, and the hand-off of the payload's stderr within the 1 MiB log bound. The worker still ends every such failure as `internal` until R03c. | The enforcement job: the fixture exits non-zero, exceeds each limit and makes a forbidden call, and each gives its own verdict and the bounded stderr.                                                                                         |
+| R03bc | Rules 1 to 4 and 19 in the build with `enforcement-fixture`: `react-v1` with its measured filter, the lock list, the packaging script that `prepare.sh` then uses, and the versioned root path.                                                                   | The enforcement job: the template builds within every limit, a bad import fails with diagnostics, a forbidden call is killed, and a modified root is refused.                                                                                  |
+| R03c  | Rules 7 to 16, 20 and the store half of 18: composition, schema 15, publication, references, retention, diagnostics, build tickets, the `/b/` route, head status and the claim deadline.                                                                          | SQLite tests on any host for each transaction, reference and retention rule, the first-build-kept rule, purge, backup, restore and the deadline; the enforcement job for a published build, a `build_failed` with diagnostics and its preview. |
+| R03d  | Rule 17 and the wire half of 18: the public kind, `profile_unknown`, the contract, MCP and the CLI, including build tickets.                                                                                                                                      | Contract, API, MCP and CLI tests, including refusals and the open-job bound.                                                                                                                                                                   |
+| R03e  | The web: a build action, head status and diagnostics, and the build preview with its "latest" notice.                                                                                                                                                             | Component tests and Chromium and Firefox smoke.                                                                                                                                                                                                |
+| R03f  | Rules 5 and 21: the release build for x86_64 Linux compiles the launch path and knows `react-v1`, the provider checks the root's owner and modes, and the operator documentation and the supported-host statement.                                                | Release-archive and clean-install checks of the launch path; the enforcement job runs the release binary's worker; review of the documentation.                                                                                                |
 
 ### What a slice still has to settle
 
 23. These are assumptions the named slice must prove, and amend this record
     if they fail:
-    - R03b: that the bundler builds the template under the limits of 0042
+    - R03bc: that the bundler builds the template under the limits of 0042
       rule 5 with one CPU and 64 tasks, and that its system calls fit a
       filter no wider than the boundary allows.
-    - R03b: that the bundler resolves the preinstalled packages through the
+    - R03bc: that the bundler resolves the preinstalled packages through the
       profile's environment alone, without a configuration file in the
       revision, and that its messages can be split into rule 13's fields.
     - R03c: that a 25 MiB publication fits in one SQLite transaction within
