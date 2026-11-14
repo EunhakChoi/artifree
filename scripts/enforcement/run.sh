@@ -795,6 +795,17 @@ say "part 15: the bundler's system calls under the measuring filter (0058, R03bc
 measure_bundler
 sudo "$PREPARE" measured-calls-off
 
+say "part 16: the react-v1 profile under its own filter and the limits of 0042 (0058, R03bcbb)"
+react_test=execution::attempt::bundler_tests::job_react_v1_builds_the_template_within_the_limits
+for case in template bad-import; do
+  run_unit "$lib_binary" "react-v1-$case" "$react_test" -p Delegate=yes --setenv="ARTIFREE_REACT_CASE=$case"
+  cp -- "$OUT/attempt-report.txt" "$OUT/react-v1-$case.report.txt"
+done
+run_in_scenario "$lib_binary" bundler_tests thread-refusal react-v1-filter job_react_v1_kills_a_call_outside_its_filter
+sudo "$PREPARE" package-modify
+run_unit "$lib_binary" react-v1-modified execution::attempt::bundler_tests::job_react_v1_refuses_a_modified_root -p Delegate=yes
+sudo "$PREPARE" package-restore
+
 say "restore the routing and the profile"
 sudo "$PREPARE" routing-pipe
 sudo "$PREPARE" profile-off

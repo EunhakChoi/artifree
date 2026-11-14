@@ -1,5 +1,7 @@
-//! The fixture profile's seccomp programs for `x86_64` (decisions 0042 rule 4 and 0056 rule 3).
-//! The public syscall mapping of 0042 rule 8 belongs to a later slice.
+//! The seccomp programs for `x86_64` of the fixture profile (decisions 0042 rule 4 and 0056 rule 3)
+//! and, in the test build and the `enforcement-fixture` build, of the bundler measurement and the
+//! `react-v1` profile (decision 0058 rule 3). The public syscall mapping of 0042 rule 8 belongs to
+//! a later slice.
 //!
 //! The bootstrap installs two programs, in this order. The first is the refusal: it makes
 //! `clone3` fail with `ENOSYS`, so libc falls back to `clone`. The second is the allowlist: it
@@ -43,6 +45,12 @@ pub(super) enum FilterSet {
     /// Only the test build and the `enforcement-fixture` build know it.
     #[cfg(any(test, feature = "enforcement-fixture"))]
     Measure,
+    /// The `react-v1` profile's refusal and allowlist (decision 0058 rule 3, slice R03bcbb): the
+    /// fixture's refusal, and the fixture's allowlist with the bundler's calls of
+    /// `REACT_V1_MEASURED` and `REACT_V1_UNMEASURED` added. Only the test build and the
+    /// `enforcement-fixture` build know it (rule 22).
+    #[cfg(any(test, feature = "enforcement-fixture"))]
+    ReactV1,
 }
 
 /// The two programs of `set`, in installation order. For `Measure`, no call is added to the
@@ -72,6 +80,11 @@ pub(super) fn filters_with(
         }
         #[cfg(any(test, feature = "enforcement-fixture"))]
         FilterSet::Measure => measure_filters(measured),
+        #[cfg(any(test, feature = "enforcement-fixture"))]
+        FilterSet::ReactV1 => {
+            let _ = measured;
+            react_v1_filters()
+        }
     }
 }
 
@@ -314,6 +327,69 @@ pub(super) fn fixture_filters() -> Result<[BpfProgram; 2], PolicyError> {
     {
         Err(PolicyError)
     }
+}
+
+/// The calls that the bundler made beyond the fixture's allowlist, as the measurement of R03bcba
+/// recorded them on the Linux runner on 2026-11-14 (the artifact `bundler-calls.txt`; it converged
+/// in its second round over the template, a bad import and 200 generated modules). Sorted by
+/// number. The Go runtime's poller and timers explain most of them: `epoll_create1`, `epoll_ctl`,
+/// `epoll_pwait` and `eventfd2` wait for its descriptors, `nanosleep` backs its sleeps, and
+/// `getpid` with `tgkill` signal its own threads for preemption; the attempt's PID namespace keeps
+/// `tgkill` inside the attempt. `getcwd` resolves paths, and `ioctl` asks whether a descriptor is a
+/// terminal. The attempt's descriptors are pipes and files, so no terminal is reachable.
+#[cfg(all(target_arch = "x86_64", any(test, feature = "enforcement-fixture")))]
+pub(super) const REACT_V1_MEASURED: [(&str, i64); 9] = [
+    ("ioctl", 16),
+    ("nanosleep", 35),
+    ("getpid", 39),
+    ("getcwd", 79),
+    ("epoll_ctl", 233),
+    ("tgkill", 234),
+    ("epoll_pwait", 281),
+    ("eventfd2", 290),
+    ("epoll_create1", 291),
+];
+
+/// Calls that the vDSO answers, so the measurement could not see them (decision 0058, note
+/// "R03bcb split"). On a host whose clock source the vDSO cannot use, the same code makes the
+/// real call, as the fixture's table notes for `clock_gettime`, which the fixture already allows.
+/// Read-only: each reads a clock or the current CPU. Sorted by number.
+#[cfg(all(target_arch = "x86_64", any(test, feature = "enforcement-fixture")))]
+pub(super) const REACT_V1_UNMEASURED: [(&str, i64); 3] =
+    [("gettimeofday", 96), ("time", 201), ("getcpu", 309)];
+
+/// The `react-v1` profile's two programs: the fixture's `clone3` refusal, then the fixture's
+/// allowlist with the bundler's calls added unconditionally. The allowlist is installed last for
+/// the fixture's reason.
+///
+/// # Errors
+/// Returns `PolicyError` when the architecture is not `x86_64` or the compiler rejects the rules.
+#[cfg(any(test, feature = "enforcement-fixture"))]
+fn react_v1_filters() -> Result<[BpfProgram; 2], PolicyError> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        Ok([clone3_refusal()?, compile(react_v1_rules()?)?])
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        Err(PolicyError)
+    }
+}
+
+/// The `react-v1` allowlist's rules: the fixture's, and an empty rule vector for each call of
+/// `REACT_V1_MEASURED` and `REACT_V1_UNMEASURED`, none of which the fixture restricts.
+///
+/// # Errors
+/// Returns `PolicyError` when the compiler rejects a condition or a rule.
+#[cfg(all(target_arch = "x86_64", any(test, feature = "enforcement-fixture")))]
+pub(super) fn react_v1_rules() -> Result<BTreeMap<i64, Vec<SeccompRule>>, PolicyError> {
+    let mut rules = allowlist_rules()?;
+    // No added call is one the fixture lists, perhaps with arguments (the table test), so no
+    // insertion widens a rule of the fixture.
+    for (_, number) in REACT_V1_MEASURED.into_iter().chain(REACT_V1_UNMEASURED) {
+        rules.insert(number, Vec::new());
+    }
+    Ok(rules)
 }
 
 /// The measured-calls file of the bundler measurement, relative to the tool root (decision 0058,
@@ -607,6 +683,9 @@ mod filter_tests;
 
 #[cfg(all(test, target_arch = "x86_64"))]
 mod measure_tests;
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod react_v1_tests;
 
 #[cfg(test)]
 mod measured_calls_tests;

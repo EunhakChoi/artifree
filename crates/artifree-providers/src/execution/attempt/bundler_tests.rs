@@ -1,12 +1,14 @@
-//! The bundler measurement (decision 0058, note "R03bcb split", slice R03bcba): the root's
-//! bundler builds a test template inside the attempt's sandbox with the argv and environment of
-//! rule 1, under the measuring filter, which kills only the calls the public syscall mapping
-//! refuses and leaves a kernel record for every call the fixture does not allow.
+//! The bundler in the attempt's sandbox (decision 0058). The measurement (note "R03bcb split",
+//! slice R03bcba) builds a test template with the argv and environment of rule 1 under the
+//! measuring filter, which kills only the calls the public syscall mapping refuses and leaves a
+//! kernel record for every call the fixture does not allow. The `react-v1` tests (slice R03bcbb)
+//! build it as the profile, under the profile's own filter and the limits of 0042 rule 5, and show
+//! that the filter kills a call outside it.
 //!
-//! The test is ignored here, because it launches the bundler in its attempt group.
-//! `scripts/enforcement/run.sh` (part 15) runs it once per input in `ARTIFREE_MEASURE_CASE`,
-//! several times each, and reads the kernel records between runs. The template is test support:
-//! the real templates belong to T01b.
+//! The tests are ignored here, because they launch in an attempt group.
+//! `scripts/enforcement/run.sh` runs the measurement once per input in `ARTIFREE_MEASURE_CASE`
+//! (part 15), and the `react-v1` tests once per case (part 16). The template is test support: the
+//! real templates belong to T01b.
 
 use std::env;
 use std::error::Error;
@@ -15,12 +17,15 @@ use std::fs;
 
 use artifree_domain::package::{FilePackage, PackagePath};
 
+use super::super::AdmissionRefusal;
+use super::super::collection::{CollectionRefusal, PackageReason};
 use super::super::launcher::{EntryProgram, KILLED_BY_SIGSYS};
-use super::super::profile::MEASUREMENT;
+use super::super::profile::{MEASUREMENT, REACT_V1, REACT_V1_FILTER_CHECK};
 use super::super::staging::{InputListing, VerifiedInput};
-use super::resource_tests::evidence_of;
-use super::tests::ExecutionDir;
-use super::{AttemptPlan, launch_with};
+use super::kernel_log::{KernelLog, RECORD_WAIT, await_records};
+use super::resource_tests::{evidence_of, stdout_text, timed_launch};
+use super::tests::{ExecutionDir, assert_no_attempt_groups};
+use super::{AttemptFailure, AttemptPlan, OutputRefusal, launch_with};
 
 /// The template's entry document.
 const INDEX: &[u8] = include_bytes!("bundler_template/index.html");
@@ -32,6 +37,20 @@ const STYLE: &[u8] = include_bytes!("bundler_template/app.css");
 const BAD_IMPORT: &[u8] = b"import pad from \"left-pad\";\nconsole.log(pad(\"x\", 3));\n";
 /// How many generated modules the larger input imports, below the package's 256 files.
 const LARGE_MODULES: usize = 200;
+/// The limits of decision 0042 rule 5 as the attempt group reads them back.
+const LIMITS: [(&str, &str); 5] = [
+    ("memory.max", "1073741824"),
+    ("memory.swap.max", "0"),
+    ("memory.oom.group", "1"),
+    ("cpu.max", "100000 100000"),
+    ("pids.max", "64"),
+];
+/// The log bound of decision 0042 rule 5: the payload's stderr is handed over within it.
+const LOG_BOUND: usize = 1 << 20;
+/// The system-call number of `unshare`, which the `thread-refusal` scenario calls from a thread.
+const UNSHARE: u64 = 272;
+/// The signal of a seccomp refusal, `SIGSYS`, as the kernel records it.
+const SIGSYS: u32 = 31;
 
 /// The input of one measured case.
 fn input_of(case: &str) -> Result<VerifiedInput, Box<dyn Error>> {
@@ -112,4 +131,127 @@ fn job_the_bundler_runs_under_the_measuring_filter() -> Result<(), Box<dyn Error
         );
     }
     Ok(())
+}
+
+/// The plan of a `react-v1` attempt: the server as the entry program, as for a job.
+fn react_v1_plan() -> AttemptPlan {
+    AttemptPlan {
+        program: EntryProgram::Server,
+        profile: &REACT_V1,
+        ..AttemptPlan::fixture()
+    }
+}
+
+/// Decision 0058 rules 1 to 4 (slice R03bcbb): `react-v1` builds the case in
+/// `ARTIFREE_REACT_CASE` under its own filter and the limits of 0042 rule 5. The template exits 0,
+/// and its output is collected within the output limits and is refused only
+/// for its missing `index.html`, which R03c's composition adds (rule 8). A bad import exits 1
+/// with the bounded message that names the import.
+#[test]
+#[ignore = "runs only in the Linux enforcement job"]
+fn job_react_v1_builds_the_template_within_the_limits() -> Result<(), Box<dyn Error>> {
+    let case = env::var("ARTIFREE_REACT_CASE")?;
+    let dir = ExecutionDir::new("react-v1")?;
+    let evidence = evidence_of(launch_with(&react_v1_plan(), input_of(&case)?, dir.path()))?;
+    if let Some(report) = env::var_os("ARTIFREE_ATTEMPT_REPORT") {
+        fs::write(report, evidence.to_string())?;
+    }
+    let stderr = String::from_utf8_lossy(&evidence.stderr);
+    let limits: Vec<(&str, &str)> = evidence
+        .limits
+        .iter()
+        .map(|(control, value)| (*control, value.as_str()))
+        .collect();
+    assert_eq!(limits, LIMITS, "the attempt group holds the limits of 0042");
+    assert!(
+        evidence.stderr.len() <= LOG_BOUND,
+        "stderr is within the log bound"
+    );
+    match case.as_str() {
+        "template" => {
+            assert_eq!(
+                evidence.exit.code(),
+                Some(0),
+                "the template must build; stderr: {stderr}"
+            );
+            assert_eq!(
+                evidence.output.as_ref().err(),
+                Some(&OutputRefusal::Refused(CollectionRefusal::Package(
+                    PackageReason::MissingEntry
+                ))),
+                "the output is read within its limits and lacks only index.html"
+            );
+        }
+        "bad-import" => {
+            assert_eq!(evidence.exit.code(), Some(1), "stderr: {stderr}");
+            assert!(
+                stderr.contains("Could not resolve \"left-pad\""),
+                "the unknown import must be named; stderr: {stderr}"
+            );
+            assert_eq!(
+                evidence.output.as_ref().err(),
+                Some(&OutputRefusal::NotCollected)
+            );
+        }
+        other => return Err(format!("unknown react-v1 case {other:?}").into()),
+    }
+    assert_no_attempt_groups()
+}
+
+/// Decision 0058 rule 3 (slice R03bcbb): a call outside `react-v1`'s filter kills the attempt.
+/// The fixture's payload runs under that filter, and its `thread-refusal` scenario calls
+/// `unshare` from a thread; the kernel holds exactly that refusal.
+#[test]
+#[ignore = "runs only in the Linux enforcement job"]
+fn job_react_v1_kills_a_call_outside_its_filter() -> Result<(), Box<dyn Error>> {
+    let plan = AttemptPlan {
+        profile: &REACT_V1_FILTER_CHECK,
+        ..AttemptPlan::fixture()
+    };
+    let mut log = KernelLog::open_at_end()?;
+    let (outcome, _) = timed_launch("react-v1-filter", &plan)?;
+    let evidence = evidence_of(outcome)?;
+    assert_eq!(evidence.exit.code(), Some(KILLED_BY_SIGSYS));
+    let text = stdout_text(&evidence)?;
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("thread-refusal started")),
+        "the payload must start its scenario, got {text:?}"
+    );
+    assert!(
+        !text
+            .lines()
+            .any(|line| line.starts_with("thread-refusal returned")),
+        "the payload must not return from unshare, got {text:?}"
+    );
+    let records = await_records(&mut log, 1, RECORD_WAIT)?;
+    assert_eq!(records.len(), 1, "one refusal, got {records:?}");
+    let record = records.first().ok_or("no record")?;
+    assert_eq!(
+        (record.exe.as_str(), record.sig, record.syscall),
+        (REACT_V1_FILTER_CHECK.payload, SIGSYS, UNSHARE),
+        "the payload's unshare is the refusal"
+    );
+    assert_no_attempt_groups()
+}
+
+/// Decision 0058 rule 19 for `react-v1` (slice R03bcbb): with one byte appended to a file of the
+/// root's `react` package, the attempt is refused before it starts.
+#[test]
+#[ignore = "runs only in the Linux enforcement job"]
+fn job_react_v1_refuses_a_modified_root() -> Result<(), Box<dyn Error>> {
+    let dir = ExecutionDir::new("react-v1-modified")?;
+    let outcome = launch_with(&react_v1_plan(), input_of("template")?, dir.path());
+    match outcome {
+        Err(refusal) => assert_eq!(
+            refusal.failure,
+            AttemptFailure::Refused(AdmissionRefusal::ToolRootMismatch)
+        ),
+        Ok(evidence) => {
+            return Err(
+                format!("the attempt must be refused, it exited {:?}", evidence.exit).into(),
+            );
+        }
+    }
+    assert_no_attempt_groups()
 }

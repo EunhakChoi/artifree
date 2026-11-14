@@ -273,6 +273,8 @@ fn job_syscall_table_matches_the_kernel_headers() -> io::Result<()> {
         .copied()
         .chain([QUERY_ONLY, CLONE, SOCKET, SETSOCKOPT])
         .chain(DANGEROUS)
+        .chain(super::REACT_V1_MEASURED)
+        .chain(super::REACT_V1_UNMEASURED)
         .collect();
     let mut mismatches: Vec<String> = Vec::new();
     for (name, number) in expected {
