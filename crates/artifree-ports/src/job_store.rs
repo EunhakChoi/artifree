@@ -500,10 +500,13 @@ pub trait JobStore {
     /// the job is scheduled again; otherwise it ends as failed. A cancel that
     /// was requested ends the job as cancelled. Returns the job as it is now.
     /// For a `run_profile` job, [`JobStoreError::AttemptUnsettled`] while its
-    /// attempt is not settled.
+    /// attempt is not settled. A build failure
+    /// ([`JobFailure::is_build_failure`]) is recorded by
+    /// [`crate::build_store::BuildStore::fail_build`] only.
     ///
     /// # Errors
     ///
+    /// [`JobStoreError::InvalidRequest`] for a build failure,
     /// [`JobStoreError::LeaseLost`], [`JobStoreError::AttemptUnsettled`], or
     /// [`JobStoreError::Unavailable`].
     fn fail_job(

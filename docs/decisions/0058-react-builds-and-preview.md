@@ -282,11 +282,18 @@ diagnostics) are implemented, R03cb to R03f are not**. Roadmap: R03.
 > - The bound of eight removes builds oldest first by publication time,
 >   then by revision. It skips the latest build of each profile and the one
 >   being published.
-> - `fail_build` takes only rule 18's three failures. `build_failed` takes
->   1 to 20 diagnostics and the other two take none. "Only the newest failed
->   job keeps diagnostics" is enforced in the transition every failure
->   shares: when a `run_profile` job fails, by any path, the diagnostics of
->   the artifact's other `run_profile` jobs of that profile are deleted.
+> - Only `fail_build` records rule 18's three failures; `fail_job` refuses
+>   them. `build_failed` takes up to 20 diagnostics and the other two take
+>   none. `fail_build` makes the attempt checks of publication (0057 rules 7
+>   and 12) without a binding, so a revoked attempt, a requested cancel
+>   included, stores no diagnostics.
+> - "The newest failed job" is the newest by enqueue order, the order of
+>   rule 16. When a `run_profile` job fails, by any path, the diagnostics of
+>   the artifact's jobs of that profile enqueued before it are deleted, in
+>   the transition every failure shares. A job enqueued before one that has
+>   failed already keeps none. A failure of an older revision's job enqueued
+>   later still deletes the head job's diagnostics, as rule 13 says; R03cc's
+>   head status then reports `failed` without diagnostics.
 > - The store's build and diagnostic reads return nothing for an artifact
 >   in the trash or purged, and give the rows back after a recovery. That
 >   is the store side of "Trash keeps them and serves none". Who may read a

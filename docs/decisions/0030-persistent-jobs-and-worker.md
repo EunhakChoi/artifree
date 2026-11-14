@@ -37,7 +37,7 @@ Nothing below is an observation of the original product.
 >
 > - `build_failed`, `limit_exceeded` and `output_rejected` join the stored
 >   failures and are never retried.
-> - A `build_failed` job keeps 1 to 20 diagnostics in `job_diagnostics`, each
+> - A `build_failed` job keeps up to 20 diagnostics in `job_diagnostics`, each
 >   a message of at most 512 bytes, with or without a package path, a line
 >   and a column. A message can name source text, so these rows are the one
 >   place a job holds text from a file.

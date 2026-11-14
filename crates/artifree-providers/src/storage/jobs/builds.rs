@@ -9,9 +9,10 @@
 use artifree_domain::SourceRevision;
 use artifree_domain::identity::{ArtifactId, UnixMillis};
 use artifree_domain::job::{
-    BuildDiagnostic, JobFailure, JobId, JobState, MAX_DIAGNOSTICS, ProfileName, SourceLocation,
+    AttemptIdentity, BuildDiagnostic, JobFailure, JobId, JobState, MAX_DIAGNOSTICS, ProfileName,
+    SourceLocation,
 };
-use artifree_domain::package::FilePackage;
+use artifree_domain::package::{FilePackage, PackagePath};
 use artifree_ports::artifact_store::StoreError;
 use artifree_ports::build_store::{
     BuildPublication, BuildRecord, BuildStore, MAX_BUILDS_PER_ARTIFACT, Publication,
@@ -91,26 +92,29 @@ fn stored_build(
         .transpose()
 }
 
-/// The failures a build ends with (decision 0058 rule 18).
-fn is_build_failure(failure: JobFailure) -> bool {
-    matches!(
-        failure,
-        JobFailure::BuildFailed | JobFailure::LimitExceeded | JobFailure::OutputRejected
-    )
+/// A build's files with their digests and counts, computed before the write
+/// transaction so that hashing up to 25 MiB does not hold the write lock.
+struct Hashed<'a> {
+    files: Vec<(&'a PackagePath, [u8; 32], &'a [u8])>,
+    counts: ProfileCounts,
 }
 
-/// The counts a published build gives its job: its files and their bytes.
-fn counts_of(files: &FilePackage) -> Result<ProfileCounts, StoreError> {
-    let bytes = files
-        .files()
-        .try_fold(0u64, |total, (_, content)| {
-            u64::try_from(content.len()).map(|size| total.saturating_add(size))
+impl<'a> Hashed<'a> {
+    fn of(package: &'a FilePackage) -> Result<Self, StoreError> {
+        let mut bytes = 0u64;
+        let mut files = Vec::with_capacity(package.len());
+        for (path, content) in package.files() {
+            bytes = bytes.saturating_add(u64::try_from(content.len()).map_err(corrupt)?);
+            files.push((path, Sha256::digest(content).into(), content));
+        }
+        Ok(Self {
+            counts: ProfileCounts {
+                files: u64::try_from(files.len()).map_err(corrupt)?,
+                bytes,
+            },
+            files,
         })
-        .map_err(corrupt)?;
-    Ok(ProfileCounts {
-        files: u64::try_from(files.len()).map_err(corrupt)?,
-        bytes,
-    })
+    }
 }
 
 /// Ends the job as succeeded and publishes its output (decision 0058 rules 10
@@ -121,14 +125,14 @@ fn counts_of(files: &FilePackage) -> Result<ProfileCounts, StoreError> {
 fn publish(
     transaction: &Transaction<'_>,
     publication: BuildPublication<'_>,
+    hashed: &Hashed<'_>,
 ) -> Result<Result<(JobRecord, Publication), JobStoreError>, JobStoreError> {
-    let counts = counts_of(publication.files)?;
     let job = match attempts::complete(
         transaction,
         publication.lease,
         publication.attempt,
         publication.binding,
-        counts,
+        hashed.counts,
         publication.now,
     )? {
         Ok(job) => job,
@@ -141,7 +145,7 @@ fn publish(
     if let Some(existing) = stored_build(transaction, &job.artifact, job.revision, &profile)? {
         return Ok(Ok((job, Publication::AlreadyBuilt(existing))));
     }
-    insert_build(transaction, &job, &profile, publication)?;
+    insert_build(transaction, &job, &profile, publication, hashed)?;
     prune(transaction, &job.artifact, job.revision, &profile)?;
     let record = stored_build(transaction, &job.artifact, job.revision, &profile)?
         .ok_or_else(|| corrupt("a build vanished inside its transaction"))?;
@@ -153,9 +157,10 @@ fn insert_build(
     job: &JobRecord,
     profile: &ProfileName,
     publication: BuildPublication<'_>,
+    hashed: &Hashed<'_>,
 ) -> Result<(), StoreError> {
     let revision = sql_revision(job.revision)?;
-    let counts = counts_of(publication.files)?;
+    let counts = hashed.counts;
     transaction
         .execute(
             "INSERT INTO builds (artifact_id, revision, profile, job_id, tool_digest, file_count,
@@ -182,8 +187,7 @@ fn insert_build(
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )
         .map_err(unavailable)?;
-    for (path, content) in publication.files.files() {
-        let digest: [u8; 32] = Sha256::digest(content).into();
+    for (path, digest, content) in &hashed.files {
         blob.execute(params![digest.as_slice(), content])
             .map_err(unavailable)?;
         file.execute(params![
@@ -258,6 +262,31 @@ fn prune(
     Ok(())
 }
 
+/// Ends a `run_profile` job as failed with a build failure and keeps its
+/// diagnostics when it is the newest failed job (decision 0058 rules 13 and
+/// 18). A failure out of those rules is refused before anything is read. The
+/// outer error is a storage failure or that refusal, which roll back; the
+/// inner one is a refusal of [`attempts::ending`], which the caller commits so
+/// that a revocation stored by rule 7 persists.
+fn fail_build(
+    transaction: &Transaction<'_>,
+    lease: &Lease,
+    attempt: &AttemptIdentity,
+    failure: JobFailure,
+    diagnostics: &[BuildDiagnostic],
+    now: UnixMillis,
+) -> Result<Result<JobRecord, JobStoreError>, JobStoreError> {
+    check_build_failure(transaction, lease, failure, diagnostics)?;
+    if let Err(refusal) = attempts::ending(transaction, lease, attempt, None, now)? {
+        return Ok(Err(refusal));
+    }
+    let record = fail(transaction, lease, failure, Retry::Never, now)?;
+    if record.state == JobState::Failed && !newer_failure(transaction, &lease.job)? {
+        insert_diagnostics(transaction, &lease.job, diagnostics)?;
+    }
+    Ok(Ok(record))
+}
+
 /// Refuses a build failure that [`BuildStore::fail_build`] does not take,
 /// before anything is written (decision 0058 rules 13 and 18).
 fn check_build_failure(
@@ -266,19 +295,21 @@ fn check_build_failure(
     failure: JobFailure,
     diagnostics: &[BuildDiagnostic],
 ) -> Result<(), JobStoreError> {
-    if !is_build_failure(failure) {
+    if !failure.is_build_failure() {
         return Err(JobStoreError::InvalidRequest(
             "a build ends with build_failed, limit_exceeded or output_rejected",
         ));
     }
     let expected = if failure == JobFailure::BuildFailed {
-        1..=MAX_DIAGNOSTICS
+        // A non-zero exit whose messages split into none is still
+        // `build_failed` (rule 18); rule 13 bounds the count from above only.
+        0..=MAX_DIAGNOSTICS
     } else {
         0..=0
     };
     if !expected.contains(&diagnostics.len()) {
         return Err(JobStoreError::InvalidRequest(
-            "build_failed keeps 1 to 20 diagnostics and other failures keep none",
+            "build_failed keeps at most 20 diagnostics and other failures keep none",
         ));
     }
     held(transaction, lease)?;
@@ -317,9 +348,12 @@ fn insert_diagnostics(
     Ok(())
 }
 
-/// Deletes the diagnostics of every other `run_profile` job of `job`'s
-/// artifact and profile, as `job` fails: only the newest failed job keeps any
-/// (decision 0058 rule 13). For a `verify_revision` job it deletes nothing.
+/// Deletes the diagnostics of the `run_profile` jobs of `job`'s artifact and
+/// profile that were enqueued before it, as `job` fails: only the newest
+/// failed job keeps any (decision 0058 rule 13). "Newest" is enqueue order,
+/// the order of rule 16's head status, so a job enqueued earlier that fails
+/// later, after a retry, does not delete a newer job's diagnostics. For a
+/// `verify_revision` job it deletes nothing.
 pub(super) fn keep_newest_diagnostics(
     transaction: &Transaction<'_>,
     job: &JobId,
@@ -329,11 +363,27 @@ pub(super) fn keep_newest_diagnostics(
             "DELETE FROM job_diagnostics WHERE job_id IN
                  (SELECT o.id FROM jobs o JOIN jobs j ON j.id = ?1
                   WHERE o.artifact_id = j.artifact_id AND o.kind = 'run_profile'
-                    AND o.profile = j.profile AND o.id <> j.id)",
+                    AND o.profile = j.profile AND (o.created_at, o.id) < (j.created_at, j.id))",
             [job.as_str()],
         )
         .map_err(unavailable)?;
     Ok(())
+}
+
+/// Whether a `run_profile` job of `job`'s artifact and profile that was
+/// enqueued after it has failed already, so that `job` is not the newest
+/// failed job and keeps no diagnostics (decision 0058 rule 13).
+fn newer_failure(connection: &Connection, job: &JobId) -> Result<bool, StoreError> {
+    connection
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM jobs o JOIN jobs j ON j.id = ?1
+                 WHERE o.artifact_id = j.artifact_id AND o.kind = 'run_profile'
+                   AND o.profile = j.profile AND o.state = 'failed'
+                   AND (o.created_at, o.id) > (j.created_at, j.id))",
+            [job.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)
 }
 
 fn read_diagnostics(
@@ -416,25 +466,21 @@ impl BuildStore for SqliteStore {
     ) -> Result<(JobRecord, Publication), JobStoreError> {
         // As for `complete_profile_job`: a refusal commits what it wrote (a
         // stored revocation); only a failure of storage rolls back.
-        self.write(|transaction| publish(transaction, publication))
+        let hashed = Hashed::of(publication.files)?;
+        self.write(|transaction| publish(transaction, publication, &hashed))
             .and_then(|answer| answer)
     }
 
     fn fail_build(
         &self,
         lease: &Lease,
+        attempt: &AttemptIdentity,
         failure: JobFailure,
         diagnostics: &[BuildDiagnostic],
         now: UnixMillis,
     ) -> Result<JobRecord, JobStoreError> {
-        self.write(|transaction| {
-            check_build_failure(transaction, lease, failure, diagnostics)?;
-            let record = fail(transaction, lease, failure, Retry::Never, now)?;
-            if record.state == JobState::Failed {
-                insert_diagnostics(transaction, &lease.job, diagnostics)?;
-            }
-            Ok(record)
-        })
+        self.write(|transaction| fail_build(transaction, lease, attempt, failure, diagnostics, now))
+            .and_then(|answer| answer)
     }
 
     fn build(

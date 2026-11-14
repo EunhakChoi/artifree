@@ -13,7 +13,8 @@ use artifree_domain::SourceRevision;
 use artifree_domain::assets::{AssetMediaType, AssetVersion};
 use artifree_domain::identity::{ActorId, UnixMillis};
 use artifree_domain::job::{
-    AttemptIdentity, BuildDiagnostic, JobFailure, JobState, ProfileName, SourceLocation, WorkerId,
+    AttemptIdentity, BuildDiagnostic, JobFailure, JobState, ProfileName, Revocation,
+    SourceLocation, StopReason, WorkerId,
 };
 use artifree_domain::package::{FilePackage, MAX_FILE_BYTES, PackagePath};
 use artifree_ports::artifact_store::{
@@ -25,7 +26,7 @@ use artifree_ports::build_store::{
 };
 use artifree_ports::job_store::{
     ClaimedJob, ExecutionClaim, JobClaim, JobRecord, JobStore, JobStoreError, NewProfileJob,
-    ProfileBinding,
+    ProfileBinding, Retry,
 };
 use artifree_providers::backup::{backup, restore};
 use artifree_providers::storage::SqliteStore;
@@ -448,17 +449,25 @@ fn only_the_newest_failed_job_keeps_diagnostics() -> TestResult {
         diagnostic(Some("src/App.tsx"), "Could not resolve \"./missing\""),
         diagnostic(None, "the build was stopped by the system call filter"),
     ];
-    let failed = fixture
-        .store
-        .fail_build(&first.lease, JobFailure::BuildFailed, &kept, at(200))?;
+    let failed = fixture.store.fail_build(
+        &first.lease,
+        &attempt_id(1),
+        JobFailure::BuildFailed,
+        &kept,
+        at(200),
+    )?;
     assert_eq!(failed.state, JobState::Failed);
     assert_eq!(failed.failure, Some(JobFailure::BuildFailed));
     assert_eq!(fixture.store.diagnostics(&first.job.id)?, kept);
 
     let second = fixture.settled(1, 2, 300)?;
-    fixture
-        .store
-        .fail_build(&second.lease, JobFailure::LimitExceeded, &[], at(400))?;
+    fixture.store.fail_build(
+        &second.lease,
+        &attempt_id(2),
+        JobFailure::LimitExceeded,
+        &[],
+        at(400),
+    )?;
 
     assert_eq!(
         fixture.store.diagnostics(&first.job.id)?,
@@ -480,11 +489,6 @@ fn a_build_failure_out_of_its_rules_is_refused() -> TestResult {
     for (failure, diagnostics, what) in [
         (
             JobFailure::BuildFailed,
-            &[][..],
-            "build_failed without a diagnostic",
-        ),
-        (
-            JobFailure::BuildFailed,
             &too_many[..],
             "build_failed with 21 diagnostics",
         ),
@@ -499,9 +503,13 @@ fn a_build_failure_out_of_its_rules_is_refused() -> TestResult {
             "a failure that is not a build's",
         ),
     ] {
-        let refused = fixture
-            .store
-            .fail_build(&claimed.lease, failure, diagnostics, at(200));
+        let refused = fixture.store.fail_build(
+            &claimed.lease,
+            &attempt_id(1),
+            failure,
+            diagnostics,
+            at(200),
+        );
         assert!(
             matches!(refused, Err(JobStoreError::InvalidRequest(_))),
             "{what}: {refused:?}"
@@ -517,6 +525,116 @@ fn a_build_failure_out_of_its_rules_is_refused() -> TestResult {
     Ok(())
 }
 
+/// Rules 13 and 18: a non-zero exit whose messages split into none is still
+/// `build_failed`, with no diagnostics.
+#[test]
+fn build_failed_may_keep_no_diagnostics() -> TestResult {
+    let fixture = Fixture::new()?;
+    let claimed = fixture.settled(1, 1, 100)?;
+
+    let failed = fixture.store.fail_build(
+        &claimed.lease,
+        &attempt_id(1),
+        JobFailure::BuildFailed,
+        &[],
+        at(200),
+    )?;
+
+    assert_eq!(failed.failure, Some(JobFailure::BuildFailed));
+    assert_eq!(fixture.store.diagnostics(&claimed.job.id)?, Vec::new());
+    Ok(())
+}
+
+/// Rule 13: "newest" is enqueue order. A job enqueued earlier that fails after
+/// a newer job failed keeps no diagnostics and deletes none of the newer
+/// job's.
+#[test]
+fn an_older_job_failing_later_keeps_the_newer_jobs_diagnostics() -> TestResult {
+    let fixture = Fixture::new()?;
+    let older = fixture.settled(1, 1, 100)?;
+    let newer = fixture.settled(1, 2, 110)?;
+    let kept = [diagnostic(Some("src/App.tsx"), "the newer failure")];
+    fixture.store.fail_build(
+        &newer.lease,
+        &attempt_id(2),
+        JobFailure::BuildFailed,
+        &kept,
+        at(200),
+    )?;
+
+    let late = fixture.store.fail_build(
+        &older.lease,
+        &attempt_id(1),
+        JobFailure::BuildFailed,
+        &[diagnostic(None, "the older failure")],
+        at(300),
+    )?;
+
+    assert_eq!(late.state, JobState::Failed);
+    assert_eq!(fixture.store.diagnostics(&newer.job.id)?, kept);
+    assert_eq!(fixture.store.diagnostics(&older.job.id)?, Vec::new());
+    Ok(())
+}
+
+/// Rules 13 and 18: a build failure is recorded through `fail_build` only, so
+/// `fail_job` cannot end a job as `build_failed` without diagnostics.
+#[test]
+fn fail_job_refuses_a_build_failure() -> TestResult {
+    let fixture = Fixture::new()?;
+    let claimed = fixture.settled(1, 1, 100)?;
+    for failure in [
+        JobFailure::BuildFailed,
+        JobFailure::LimitExceeded,
+        JobFailure::OutputRejected,
+    ] {
+        let refused = fixture
+            .store
+            .fail_job(&claimed.lease, failure, Retry::Never, at(200));
+        assert!(
+            matches!(refused, Err(JobStoreError::InvalidRequest(_))),
+            "{failure:?}: {refused:?}"
+        );
+    }
+    let state: String = Connection::open(database_in(&fixture.data()))?.query_row(
+        "SELECT state FROM jobs WHERE id = ?1",
+        [claimed.job.id.as_str()],
+        |row| row.get(0),
+    )?;
+    assert_eq!(state, "running");
+    Ok(())
+}
+
+/// 0057 rule 7 through rule 13: a revoked attempt, here by a requested cancel,
+/// stores no diagnostics and the revocation is kept.
+#[test]
+fn a_revoked_attempt_stores_no_diagnostics() -> TestResult {
+    let fixture = Fixture::new()?;
+    let claimed = fixture.settled(1, 1, 100)?;
+    Connection::open(database_in(&fixture.data()))?.execute(
+        "UPDATE jobs SET cancel_requested = 1 WHERE id = ?1",
+        [claimed.job.id.as_str()],
+    )?;
+
+    let refused = fixture.store.fail_build(
+        &claimed.lease,
+        &attempt_id(1),
+        JobFailure::BuildFailed,
+        &[diagnostic(Some("src/App.tsx"), "names source text")],
+        at(200),
+    );
+
+    assert_eq!(refused, Err(JobStoreError::Revoked(StopReason::Cancel)));
+    assert_eq!(fixture.count("SELECT count(*) FROM job_diagnostics")?, 0);
+    assert_eq!(
+        fixture
+            .store
+            .attempt_row(&attempt_id(1))?
+            .and_then(|row| row.revoked),
+        Some(Revocation::Cancel)
+    );
+    Ok(())
+}
+
 /// Rule 12: the trash keeps an artifact's builds and diagnostics and serves
 /// none of them; recovery serves them again.
 #[test]
@@ -525,9 +643,13 @@ fn the_trash_keeps_builds_and_diagnostics_and_serves_none() -> TestResult {
     let build = fixture.built(1, 1, 100)?;
     let failing = fixture.settled(1, 2, 200)?;
     let kept = [diagnostic(None, "message")];
-    fixture
-        .store
-        .fail_build(&failing.lease, JobFailure::BuildFailed, &kept, at(300))?;
+    fixture.store.fail_build(
+        &failing.lease,
+        &attempt_id(2),
+        JobFailure::BuildFailed,
+        &kept,
+        at(300),
+    )?;
 
     fixture.trash(1, true)?;
     assert_eq!(fixture.build(1)?, None);
@@ -556,6 +678,7 @@ fn a_purge_deletes_builds_diagnostics_and_their_content() -> TestResult {
     let failing = fixture.settled(1, 2, 200)?;
     fixture.store.fail_build(
         &failing.lease,
+        &attempt_id(2),
         JobFailure::BuildFailed,
         &[diagnostic(Some("src/App.tsx"), "names source text")],
         at(300),

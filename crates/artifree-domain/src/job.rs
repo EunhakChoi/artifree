@@ -405,6 +405,17 @@ impl JobFailure {
     pub fn is_retryable(self) -> bool {
         matches!(self, Self::StorageUnavailable)
     }
+
+    /// Whether this failure ends a build (decision 0058 rule 18). Only the
+    /// build store records one, so that a `build_failed` job always keeps its
+    /// diagnostics.
+    #[must_use]
+    pub fn is_build_failure(self) -> bool {
+        matches!(
+            self,
+            Self::BuildFailed | Self::LimitExceeded | Self::OutputRejected
+        )
+    }
 }
 
 impl FromStr for JobFailure {

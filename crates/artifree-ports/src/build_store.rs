@@ -93,22 +93,27 @@ pub trait BuildStore {
     ) -> Result<(JobRecord, Publication), JobStoreError>;
 
     /// Ends a `run_profile` job as failed without a retry (decision 0058 rule
-    /// 18). A `build_failed` job keeps `diagnostics` in their order; any other
-    /// failure takes none. A job whose cancel was requested ends cancelled
-    /// instead and keeps none. Either way the diagnostics of the artifact's
-    /// other `run_profile` jobs of the profile are deleted when the job fails
-    /// (rule 13).
+    /// 18), after the checks of `JobStore::complete_profile_job` on its
+    /// attempt (without a binding): a rule 7 reason, such as a requested
+    /// cancel, refuses it and stores that revocation. A `build_failed` job
+    /// keeps `diagnostics` in their order; the other failures take none. Only
+    /// the newest failed `run_profile` job of the artifact and profile, by
+    /// enqueue order, keeps any (rule 13): the failure deletes those of the
+    /// jobs enqueued before it, and a job enqueued before one that failed
+    /// already keeps none.
     ///
     /// # Errors
     ///
     /// [`JobStoreError::InvalidRequest`] for a job that is not `run_profile`,
-    /// a failure that is not one of rule 18's, `build_failed` without 1 to
+    /// a failure that is not one of rule 18's, `build_failed` with more than
     /// [`artifree_domain::job::MAX_DIAGNOSTICS`] diagnostics, or diagnostics
-    /// with another failure; [`JobStoreError::LeaseLost`],
+    /// with another failure; [`JobStoreError::NotFound`] for an attempt of
+    /// another job, [`JobStoreError::Revoked`], [`JobStoreError::LeaseLost`],
     /// [`JobStoreError::AttemptUnsettled`], or [`JobStoreError::Unavailable`].
     fn fail_build(
         &self,
         lease: &Lease,
+        attempt: &AttemptIdentity,
         failure: JobFailure,
         diagnostics: &[BuildDiagnostic],
         now: UnixMillis,

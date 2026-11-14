@@ -1087,6 +1087,13 @@ impl JobStore for SqliteStore {
         retry: Retry,
         now: UnixMillis,
     ) -> Result<JobRecord, JobStoreError> {
+        // A build failure is recorded by `BuildStore::fail_build` only, which
+        // checks its diagnostics and its attempt (decision 0058 rules 13, 18).
+        if failure.is_build_failure() {
+            return Err(JobStoreError::InvalidRequest(
+                "a build failure is recorded by fail_build",
+            ));
+        }
         self.write(|transaction| fail(transaction, lease, failure, retry, now))
     }
 
