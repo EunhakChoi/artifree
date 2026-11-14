@@ -18,7 +18,7 @@
 use artifree_domain::SourceRevision;
 use artifree_domain::identity::{ArtifactId, UnixMillis};
 use artifree_domain::job::{AttemptIdentity, BuildDiagnostic, JobFailure, JobId, ProfileName};
-use artifree_domain::package::FilePackage;
+use artifree_domain::package::{FilePackage, PackagePath};
 
 use crate::job_store::{JobRecord, JobStoreError, Lease, ProfileBinding};
 
@@ -54,6 +54,22 @@ pub enum Publication {
     /// A build for the artifact, revision and profile existed already. It is
     /// unchanged, and the files were not stored.
     AlreadyBuilt(BuildRecord),
+}
+
+/// What one read sees of a revision's builds and jobs for a profile, the
+/// inputs of the head status (decision 0058 rules 15 and 16).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildSnapshot {
+    /// The artifact's head revision.
+    pub head: SourceRevision,
+    /// The artifact's latest build for the profile: its build with the
+    /// highest revision, of any revision (rule 15).
+    pub latest: Option<BuildRecord>,
+    /// The newest `run_profile` job of the profile for the head revision, by
+    /// enqueue order, in any state.
+    pub newest_job: Option<JobRecord>,
+    /// The diagnostics that job keeps, in their order.
+    pub diagnostics: Vec<BuildDiagnostic>,
 }
 
 /// A request to publish the output of a `run_profile` attempt.
@@ -156,6 +172,20 @@ pub trait BuildStore {
         profile: &ProfileName,
     ) -> Result<Option<FilePackage>, JobStoreError>;
 
+    /// One file of one build, or `None` when the build does not hold it, there
+    /// is no such build, or the artifact is in the trash or purged.
+    ///
+    /// # Errors
+    ///
+    /// [`JobStoreError::Unavailable`].
+    fn build_file(
+        &self,
+        artifact: &ArtifactId,
+        revision: SourceRevision,
+        profile: &ProfileName,
+        path: &PackagePath,
+    ) -> Result<Option<Vec<u8>>, JobStoreError>;
+
     /// The diagnostics a job keeps, in their order: empty for a job that keeps
     /// none, and for a job of an artifact in the trash or purged.
     ///
@@ -163,4 +193,18 @@ pub trait BuildStore {
     ///
     /// [`JobStoreError::Unavailable`].
     fn diagnostics(&self, job: &JobId) -> Result<Vec<BuildDiagnostic>, JobStoreError>;
+
+    /// The head revision of the artifact, its latest build for `profile`, the
+    /// newest job of `profile` for the head and that job's diagnostics, read
+    /// in one snapshot so that they agree (decision 0058 rule 16). `None`
+    /// when the artifact is in the trash or purged.
+    ///
+    /// # Errors
+    ///
+    /// [`JobStoreError::Unavailable`].
+    fn build_snapshot(
+        &self,
+        artifact: &ArtifactId,
+        profile: &ProfileName,
+    ) -> Result<Option<BuildSnapshot>, JobStoreError>;
 }

@@ -5,8 +5,9 @@ Date: 2026-11-14. Status: **accepted; R03a (the package rules), R03ba
 versioned, packaged and protected tool root), R03bcba (the lock list, the
 packaged bundler and its measurement), R03bcbb (the `react-v1` profile in
 the build with `enforcement-fixture`), R03ca (the store of builds and
-diagnostics) and R03cb (the worker's composition, diagnostics and failures)
-are implemented, R03cc to R03f are not**. Roadmap: R03.
+diagnostics), R03cb (the worker's composition, diagnostics and failures)
+and R03cc (build tickets, the `/b/` route and the head status, below the
+wire) are implemented, R03cd to R03f are not**. Roadmap: R03.
 
 > **Note, 2026-11-14 (slices).** R03b is split into R03ba, R03bb and R03bc,
 > and rule 5 moves to R03f. A release build compiles no attempt, worker port,
@@ -366,6 +367,50 @@ are implemented, R03cc to R03f are not**. Roadmap: R03.
 >   resolver configuration and a missing script element end as above; and
 >   the `react-v1` check ends as `build_failed` at a filter kill and as
 >   `limit_exceeded` at the log bound.
+
+> **Note, 2026-11-15 (R03cc).** The preview half is implemented below the
+> wire. No API route, MCP tool or CLI command issues a build ticket or reads
+> the head status yet; R03d adds them.
+>
+> - The management preview operation takes a target: the revision's source,
+>   under `/p/`, or its build of a profile, under `/b/`. A revision without
+>   that build is refused at issue (`not found`), before a ticket exists. A
+>   build ticket lives in the same registry as a source ticket, under the
+>   same per-actor bound. Token revocation and actor revocation remove it as
+>   they remove a source ticket. Each file read checks access again, so the
+>   trash stops it, and a recovery serves it again, as it does a source
+>   ticket.
+> - `/b/{ticket}/` serves the build's `index.html`, and `/b/{ticket}/<path>`
+>   serves its other files, with the headers of `/p/`: the CSP sandbox, the
+>   media type of the path, `nosniff` and `no-store`. A build ticket serves
+>   nothing under `/p/` or `/r/`, and a source ticket serves nothing under
+>   `/b/`. One file is read per request, not the whole build.
+> - The head status is read from one store snapshot, so a revision
+>   committed meanwhile cannot make the latest build newer than the head. It
+>   holds the head revision, the latest build (rule 15), the newest `run_profile` job of the profile for the head
+>   revision by enqueue order, and that job's diagnostics. When the latest
+>   build is the head's, the status is built. Otherwise it is:
+>   - `pending` for a queued, retry-scheduled or running job;
+>   - `failed`, with the job's failure and diagnostics, for a failed job;
+>   - none when there is no job, or the job was cancelled or succeeded
+>     without a build.
+>     The diagnostics are empty when a later failure of the profile deleted
+>     them, as the R03ca note says.
+> - Only the newest job for the head sets the status, as rule 16 says: an
+>   older job for the head that is still running does not, even when the
+>   newest was cancelled.
+> - The read rule of 13: the status, and with it the diagnostics, is given
+>   only to a caller who may read the artifact and so its head revision, the
+>   job's. Every other caller, and every caller while the artifact is in the
+>   trash, gets `not found` for the status, a build preview and a build file.
+>   Diagnostics are read only through the status. R03d attaches them to the
+>   job reads under the same rule.
+> - The enforcement job's template case of part 17 issues a build preview
+>   of the published build through the operation. It checks that `/b/`
+>   serves each of the build's files, and its entry document, with the
+>   build's bytes, the media type of the path and the CSP sandbox. Only the
+>   `enforcement-fixture` build has a library call that issues one without a
+>   route.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),

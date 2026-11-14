@@ -15,13 +15,13 @@ use artifree_domain::job::{
 use artifree_domain::package::{FilePackage, PackagePath};
 use artifree_ports::artifact_store::StoreError;
 use artifree_ports::build_store::{
-    BuildPublication, BuildRecord, BuildStore, MAX_BUILDS_PER_ARTIFACT, Publication,
+    BuildPublication, BuildRecord, BuildSnapshot, BuildStore, MAX_BUILDS_PER_ARTIFACT, Publication,
 };
 use artifree_ports::job_store::{JobRecord, JobStoreError, Lease, ProfileCounts, Retry};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
-use super::{artifact_in_place, attempts, fail, held, profile_job};
+use super::{artifact_in_place, attempts, fail, held, profile_job, read_job};
 use crate::storage::{
     SqliteStore, corrupt, sql_revision, stored_path, stored_revision, unavailable,
 };
@@ -459,6 +459,75 @@ fn read_files(
         .map_err(|error| StoreError::Unavailable(format!("stored build is invalid: {error}")))
 }
 
+fn read_file(
+    connection: &Connection,
+    artifact: &ArtifactId,
+    revision: SourceRevision,
+    profile: &ProfileName,
+    path: &PackagePath,
+) -> Result<Option<Vec<u8>>, StoreError> {
+    connection
+        .query_row(
+            "SELECT b.content FROM build_files f
+             JOIN blobs b ON b.digest = f.digest
+             WHERE f.artifact_id = ?1 AND f.revision = ?2 AND f.profile = ?3 AND f.path = ?4",
+            params![
+                artifact.as_str(),
+                sql_revision(revision)?,
+                profile.as_str(),
+                path.as_str()
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(unavailable)
+}
+
+fn latest(
+    connection: &Connection,
+    artifact: &ArtifactId,
+    profile: &ProfileName,
+) -> Result<Option<BuildRecord>, StoreError> {
+    connection
+        .query_row(
+            &format!(
+                "SELECT {BUILD_COLUMNS} FROM builds WHERE artifact_id = ?1 AND profile = ?2
+                 ORDER BY revision DESC LIMIT 1"
+            ),
+            params![artifact.as_str(), profile.as_str()],
+            build_from_row,
+        )
+        .optional()
+        .map_err(unavailable)?
+        .map(RawBuild::into_record)
+        .transpose()
+}
+
+/// The newest `run_profile` job of `profile` for the revision, by enqueue
+/// order: the order of rule 16 and of [`keep_newest_diagnostics`].
+fn newest_job(
+    connection: &Connection,
+    artifact: &ArtifactId,
+    revision: SourceRevision,
+    profile: &ProfileName,
+) -> Result<Option<JobRecord>, StoreError> {
+    let id: Option<String> = connection
+        .query_row(
+            "SELECT id FROM jobs
+             WHERE artifact_id = ?1 AND revision = ?2 AND kind = 'run_profile' AND profile = ?3
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+            params![artifact.as_str(), sql_revision(revision)?, profile.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(unavailable)?;
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    let id: JobId = id.parse().map_err(corrupt)?;
+    read_job(connection, &id)
+}
+
 impl BuildStore for SqliteStore {
     fn publish_build(
         &self,
@@ -507,18 +576,7 @@ impl BuildStore for SqliteStore {
         if !artifact_in_place(&snapshot, artifact)? {
             return Ok(None);
         }
-        let raw = snapshot
-            .query_row(
-                &format!(
-                    "SELECT {BUILD_COLUMNS} FROM builds WHERE artifact_id = ?1 AND profile = ?2
-                     ORDER BY revision DESC LIMIT 1"
-                ),
-                params![artifact.as_str(), profile.as_str()],
-                build_from_row,
-            )
-            .optional()
-            .map_err(unavailable)?;
-        Ok(raw.map(RawBuild::into_record).transpose()?)
+        Ok(latest(&snapshot, artifact, profile)?)
     }
 
     fn build_files(
@@ -533,6 +591,52 @@ impl BuildStore for SqliteStore {
             return Ok(None);
         }
         Ok(read_files(&snapshot, artifact, revision, profile)?)
+    }
+
+    fn build_file(
+        &self,
+        artifact: &ArtifactId,
+        revision: SourceRevision,
+        profile: &ProfileName,
+        path: &PackagePath,
+    ) -> Result<Option<Vec<u8>>, JobStoreError> {
+        let mut connection = self.connect()?;
+        let snapshot = connection.transaction().map_err(unavailable)?;
+        if !artifact_in_place(&snapshot, artifact)? {
+            return Ok(None);
+        }
+        Ok(read_file(&snapshot, artifact, revision, profile, path)?)
+    }
+
+    fn build_snapshot(
+        &self,
+        artifact: &ArtifactId,
+        profile: &ProfileName,
+    ) -> Result<Option<BuildSnapshot>, JobStoreError> {
+        let mut connection = self.connect()?;
+        let snapshot = connection.transaction().map_err(unavailable)?;
+        if !artifact_in_place(&snapshot, artifact)? {
+            return Ok(None);
+        }
+        let head: i64 = snapshot
+            .query_row(
+                "SELECT current_revision FROM artifacts WHERE id = ?1",
+                [artifact.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(unavailable)?;
+        let head = stored_revision(head)?;
+        let newest_job = newest_job(&snapshot, artifact, head, profile)?;
+        let diagnostics = match &newest_job {
+            Some(job) => read_diagnostics(&snapshot, &job.id)?,
+            None => Vec::new(),
+        };
+        Ok(Some(BuildSnapshot {
+            head,
+            latest: latest(&snapshot, artifact, profile)?,
+            newest_job,
+            diagnostics,
+        }))
     }
 
     fn diagnostics(&self, job: &JobId) -> Result<Vec<BuildDiagnostic>, JobStoreError> {
