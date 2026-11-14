@@ -1736,6 +1736,14 @@ plan that need no payload on `ubuntu-24.04`, with shell commands and a trusted
    fixture's generated probe programs (the amendment of 2026-11-13); packaging a
    tool root for operators is R03's, when a real runtime exists. Until then no
    host is called supported outside the enforcement job.
+
+   > **Note, 2026-11-14 (0058, R03bca).** The fixed path
+   > `/opt/artifree/tools/v1` gives way to `/opt/artifree/tools/<version>`,
+   > named by the server's package version, and the root is assembled by
+   > the packaging script of 0058 rule 19. That script is also the one the
+   > job uses. The provider also checks the owner and modes of the root, its
+   > entries and its ancestors.
+
 7. **Three dependencies, for the system calls.** The bootstrap and the provider
    use `rustix` (resource limits, `prctl`, capabilities, descriptor handling,
    mounting, and with its `fs` feature the keeper, staging and collection of
