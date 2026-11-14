@@ -522,6 +522,7 @@ sudo "$PREPARE" fixture-back
 
 say "part 4: the attempt, its admission lock and the syscall table"
 run_direct "$lib_binary" syscall-table execution::policy::tests::job_syscall_table_matches_the_kernel_headers
+run_direct "$lib_binary" terminal-queries execution::policy::react_v1_tests::job_terminal_queries_match_the_kernel_headers
 run_unit "$lib_binary" attempt execution::attempt::tests::job_fixture_attempt_runs_in_its_group_and_exits -p Delegate=yes
 run_unit "$lib_binary" false-ready execution::attempt::tests::job_false_ready_is_never_released -p Delegate=yes
 run_unit "$lib_binary" stalled-start execution::attempt::tests::job_stalled_start_is_killed_at_the_readiness_deadline -p Delegate=yes
@@ -802,6 +803,7 @@ for case in template bad-import; do
   cp -- "$OUT/attempt-report.txt" "$OUT/react-v1-$case.report.txt"
 done
 run_in_scenario "$lib_binary" bundler_tests thread-refusal react-v1-filter job_react_v1_kills_a_call_outside_its_filter
+sudo "$PREPARE" scenario exit
 sudo "$PREPARE" package-modify
 run_unit "$lib_binary" react-v1-modified execution::attempt::bundler_tests::job_react_v1_refuses_a_modified_root -p Delegate=yes
 sudo "$PREPARE" package-restore

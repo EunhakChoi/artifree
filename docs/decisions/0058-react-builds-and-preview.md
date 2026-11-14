@@ -180,13 +180,16 @@ not**. Roadmap: R03.
 > **Note, 2026-11-14 (R03bcbb).** The test build and the build with
 > `enforcement-fixture` know `react-v1`: the root's bundler with the argv and
 > environment of the measurement, under the filter `ReactV1`. Its refusal is
-> the fixture's. Its allowlist is the fixture's with twelve calls added, none
-> of them restricted by its arguments. The first nine are the measured ones
-> of the artifact `bundler-calls.txt` of the first passing run: `ioctl`,
-> `nanosleep`, `getpid`, `getcwd`, `epoll_ctl`, `tgkill`, `epoll_pwait`,
-> `eventfd2` and `epoll_create1`. The other three are the vDSO's
-> `gettimeofday`, `time` and `getcpu`, listed as unmeasured; the fixture
-> already allows `clock_gettime`. Keeping the fixture's allowlist under the
+> the fixture's. Its allowlist is the fixture's with twelve calls added. The
+> first nine are the measured ones of the artifact `bundler-calls.txt` of the
+> first passing run: `ioctl`, `nanosleep`, `getpid`, `getcwd`, `epoll_ctl`,
+> `tgkill`, `epoll_pwait`, `eventfd2` and `epoll_create1`. The other three are
+> the vDSO's `gettimeofday`, `time` and `getcpu`, listed as unmeasured; the
+> fixture already allows `clock_gettime`. The measurement records a call but
+> not its arguments, and `ioctl` reaches the handler of every descriptor, so
+> it is allowed only for the two read-only terminal queries the bundler makes
+> before it prints (`TCGETS` and `TIOCGWINSZ`). The template run shows that
+> this is enough. Every other added call is allowed whatever its arguments. Keeping the fixture's allowlist under the
 > added calls follows from the measurement: it logged only calls outside
 > that list, so it says nothing about which of the fixture's calls the
 > bundler leaves unused. The esbuild option `--sourcemap` takes no `false`
@@ -198,13 +201,15 @@ not**. Roadmap: R03.
 >   and refused only for its missing `index.html`, which R03c's composition
 >   adds (rule 8). This proves rule 23's assumption for R03bcbb, so 0042 is
 >   not amended;
-> - a bad import exits 1 with the message that names it, within the log bound;
+> - a bad import exits 1 with the one message that names it;
 > - a call outside the filter is killed with exactly its record. The bundler
 >   cannot be made to make such a call, so an entry with no store name runs
 >   the fixture's payload under `react-v1`'s filter, and its thread calls
 >   `unshare`;
 > - a changed file of the `react` package refuses the `react-v1` attempt as a
->   modified root.
+>   modified root. Admission checks the whole root before any profile matters,
+>   so this shows the root check that `react-v1` runs behind, as part 5 does
+>   for the fixture.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),

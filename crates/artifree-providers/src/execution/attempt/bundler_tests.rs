@@ -20,10 +20,11 @@ use artifree_domain::package::{FilePackage, PackagePath};
 use super::super::AdmissionRefusal;
 use super::super::collection::{CollectionRefusal, PackageReason};
 use super::super::launcher::{EntryProgram, KILLED_BY_SIGSYS};
+use super::super::probe_group::PROBE_LIMITS;
 use super::super::profile::{MEASUREMENT, REACT_V1, REACT_V1_FILTER_CHECK};
 use super::super::staging::{InputListing, VerifiedInput};
-use super::kernel_log::{KernelLog, RECORD_WAIT, await_records};
-use super::resource_tests::{evidence_of, stdout_text, timed_launch};
+use super::mapping_tests::{UNSHARE, check_refused_by_kill};
+use super::resource_tests::evidence_of;
 use super::tests::{ExecutionDir, assert_no_attempt_groups};
 use super::{AttemptFailure, AttemptPlan, OutputRefusal, launch_with};
 
@@ -37,20 +38,6 @@ const STYLE: &[u8] = include_bytes!("bundler_template/app.css");
 const BAD_IMPORT: &[u8] = b"import pad from \"left-pad\";\nconsole.log(pad(\"x\", 3));\n";
 /// How many generated modules the larger input imports, below the package's 256 files.
 const LARGE_MODULES: usize = 200;
-/// The limits of decision 0042 rule 5 as the attempt group reads them back.
-const LIMITS: [(&str, &str); 5] = [
-    ("memory.max", "1073741824"),
-    ("memory.swap.max", "0"),
-    ("memory.oom.group", "1"),
-    ("cpu.max", "100000 100000"),
-    ("pids.max", "64"),
-];
-/// The log bound of decision 0042 rule 5: the payload's stderr is handed over within it.
-const LOG_BOUND: usize = 1 << 20;
-/// The system-call number of `unshare`, which the `thread-refusal` scenario calls from a thread.
-const UNSHARE: u64 = 272;
-/// The signal of a seccomp refusal, `SIGSYS`, as the kernel records it.
-const SIGSYS: u32 = 31;
 
 /// The input of one measured case.
 fn input_of(case: &str) -> Result<VerifiedInput, Box<dyn Error>> {
@@ -146,7 +133,7 @@ fn react_v1_plan() -> AttemptPlan {
 /// `ARTIFREE_REACT_CASE` under its own filter and the limits of 0042 rule 5. The template exits 0,
 /// and its output is collected within the output limits and is refused only
 /// for its missing `index.html`, which R03c's composition adds (rule 8). A bad import exits 1
-/// with the bounded message that names the import.
+/// with the one message that names the import.
 #[test]
 #[ignore = "runs only in the Linux enforcement job"]
 fn job_react_v1_builds_the_template_within_the_limits() -> Result<(), Box<dyn Error>> {
@@ -162,10 +149,9 @@ fn job_react_v1_builds_the_template_within_the_limits() -> Result<(), Box<dyn Er
         .iter()
         .map(|(control, value)| (*control, value.as_str()))
         .collect();
-    assert_eq!(limits, LIMITS, "the attempt group holds the limits of 0042");
-    assert!(
-        evidence.stderr.len() <= LOG_BOUND,
-        "stderr is within the log bound"
+    assert_eq!(
+        limits, PROBE_LIMITS,
+        "the attempt group holds the limits of 0042"
     );
     match case.as_str() {
         "template" => {
@@ -188,6 +174,11 @@ fn job_react_v1_builds_the_template_within_the_limits() -> Result<(), Box<dyn Er
                 stderr.contains("Could not resolve \"left-pad\""),
                 "the unknown import must be named; stderr: {stderr}"
             );
+            // The one message, within the profile's message bound (`--log-limit`).
+            assert!(
+                stderr.trim_end().ends_with("1 error"),
+                "stderr must end with its count; stderr: {stderr}"
+            );
             assert_eq!(
                 evidence.output.as_ref().err(),
                 Some(&OutputRefusal::NotCollected)
@@ -204,35 +195,20 @@ fn job_react_v1_builds_the_template_within_the_limits() -> Result<(), Box<dyn Er
 #[test]
 #[ignore = "runs only in the Linux enforcement job"]
 fn job_react_v1_kills_a_call_outside_its_filter() -> Result<(), Box<dyn Error>> {
+    // The server is the entry program, as for the measurement: the fixture program is built
+    // without the feature, so it knows neither test entry.
     let plan = AttemptPlan {
+        program: EntryProgram::Server,
         profile: &REACT_V1_FILTER_CHECK,
         ..AttemptPlan::fixture()
     };
-    let mut log = KernelLog::open_at_end()?;
-    let (outcome, _) = timed_launch("react-v1-filter", &plan)?;
-    let evidence = evidence_of(outcome)?;
-    assert_eq!(evidence.exit.code(), Some(KILLED_BY_SIGSYS));
-    let text = stdout_text(&evidence)?;
-    assert!(
-        text.lines()
-            .any(|line| line.starts_with("thread-refusal started")),
-        "the payload must start its scenario, got {text:?}"
-    );
-    assert!(
-        !text
-            .lines()
-            .any(|line| line.starts_with("thread-refusal returned")),
-        "the payload must not return from unshare, got {text:?}"
-    );
-    let records = await_records(&mut log, 1, RECORD_WAIT)?;
-    assert_eq!(records.len(), 1, "one refusal, got {records:?}");
-    let record = records.first().ok_or("no record")?;
-    assert_eq!(
-        (record.exe.as_str(), record.sig, record.syscall),
-        (REACT_V1_FILTER_CHECK.payload, SIGSYS, UNSHARE),
-        "the payload's unshare is the refusal"
-    );
-    assert_no_attempt_groups()
+    check_refused_by_kill(
+        "react-v1-filter",
+        &plan,
+        "thread-refusal started",
+        "thread-refusal returned",
+        UNSHARE,
+    )
 }
 
 /// Decision 0058 rule 19 for `react-v1` (slice R03bcbb): with one byte appended to a file of the

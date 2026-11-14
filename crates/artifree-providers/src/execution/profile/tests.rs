@@ -44,10 +44,11 @@ fn a_near_miss_finds_no_profile() {
 fn react_v1_is_found_by_its_exact_name_and_identity() {
     assert_eq!(by_name("react-v1"), Some(&REACT_V1));
     assert_eq!(by_identity("artifree-react-v1"), Some(&REACT_V1));
-    assert_eq!(REACT_V1.payload, "/tools/bin/esbuild");
-    assert_eq!(REACT_V1.filter, FilterSet::ReactV1);
+    // The profile runs what was measured, under the filter built from that measurement.
+    assert_eq!(REACT_V1.payload, MEASUREMENT.payload);
     assert_eq!(REACT_V1.arguments, MEASUREMENT.arguments);
     assert_eq!(REACT_V1.environment, MEASUREMENT.environment);
+    assert_eq!(REACT_V1.filter, FilterSet::ReactV1);
 }
 
 #[test]
@@ -78,14 +79,17 @@ fn every_filter_is_offered_once() {
 }
 
 #[test]
-fn names_and_identities_are_unique() {
+fn profile_names_are_set_and_unique_and_identities_are_unique() {
+    for (index, profile) in PROFILES.iter().enumerate() {
+        assert!(!profile.name.is_empty(), "a profile has a store name");
+        for other in PROFILES.iter().skip(index + 1) {
+            assert_ne!(profile.name, other.name);
+        }
+    }
     let entries: Vec<_> = PROFILES.iter().chain(TEST_ENTRIES).collect();
-    for (index, profile) in entries.iter().enumerate() {
+    for (index, entry) in entries.iter().enumerate() {
         for other in entries.iter().skip(index + 1) {
-            if !profile.name.is_empty() {
-                assert_ne!(profile.name, other.name);
-            }
-            assert_ne!(profile.inspection.identity(), other.inspection.identity());
+            assert_ne!(entry.inspection.identity(), other.inspection.identity());
         }
     }
 }

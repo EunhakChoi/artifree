@@ -336,7 +336,9 @@ pub(super) fn fixture_filters() -> Result<[BpfProgram; 2], PolicyError> {
 /// `epoll_pwait` and `eventfd2` wait for its descriptors, `nanosleep` backs its sleeps, and
 /// `getpid` with `tgkill` signal its own threads for preemption; the attempt's PID namespace keeps
 /// `tgkill` inside the attempt. `getcwd` resolves paths, and `ioctl` asks whether a descriptor is a
-/// terminal. The attempt's descriptors are pipes and files, so no terminal is reachable.
+/// terminal. The measurement saw only the call, not its request, so `react_v1_rules` allows
+/// `ioctl` only for the two read-only terminal queries the bundler makes (`TERMINAL_QUERIES`); the
+/// attempt's descriptors are pipes and files, so both fail with `ENOTTY`.
 #[cfg(all(target_arch = "x86_64", any(test, feature = "enforcement-fixture")))]
 pub(super) const REACT_V1_MEASURED: [(&str, i64); 9] = [
     ("ioctl", 16),
@@ -376,8 +378,23 @@ fn react_v1_filters() -> Result<[BpfProgram; 2], PolicyError> {
     }
 }
 
-/// The `react-v1` allowlist's rules: the fixture's, and an empty rule vector for each call of
-/// `REACT_V1_MEASURED` and `REACT_V1_UNMEASURED`, none of which the fixture restricts.
+/// The `ioctl` system call, the one added call that `react_v1_rules` restricts by its arguments.
+#[cfg(all(target_arch = "x86_64", any(test, feature = "enforcement-fixture")))]
+pub(super) const IOCTL: (&str, i64) = ("ioctl", 16);
+
+/// The argument index of `ioctl`'s request.
+#[cfg(all(target_arch = "x86_64", any(test, feature = "enforcement-fixture")))]
+const IOCTL_REQUEST_ARGUMENT: u8 = 1;
+
+/// The `ioctl` requests that `react-v1` allows: `TCGETS`, which reads a terminal's settings and
+/// fails with `ENOTTY` on any other descriptor, and `TIOCGWINSZ`, which reads its window size.
+/// The bundler asks both to decide how to print its messages; neither changes anything.
+#[cfg(all(target_arch = "x86_64", any(test, feature = "enforcement-fixture")))]
+pub(super) const TERMINAL_QUERIES: [u64; 2] = [0x5401, 0x5413];
+
+/// The `react-v1` allowlist's rules: the fixture's, a rule per request of `TERMINAL_QUERIES` for
+/// `ioctl`, and an empty rule vector for each other call of `REACT_V1_MEASURED` and
+/// `REACT_V1_UNMEASURED`, none of which the fixture restricts.
 ///
 /// # Errors
 /// Returns `PolicyError` when the compiler rejects a condition or a rule.
@@ -389,6 +406,13 @@ pub(super) fn react_v1_rules() -> Result<BTreeMap<i64, Vec<SeccompRule>>, Policy
     for (_, number) in REACT_V1_MEASURED.into_iter().chain(REACT_V1_UNMEASURED) {
         rules.insert(number, Vec::new());
     }
+    let mut queries = Vec::new();
+    for request in TERMINAL_QUERIES {
+        let condition = dword(IOCTL_REQUEST_ARGUMENT, SeccompCmpOp::Eq, request)?;
+        queries.push(SeccompRule::new(vec![condition]).map_err(|_| PolicyError)?);
+    }
+    let (_, ioctl_number) = IOCTL;
+    rules.insert(ioctl_number, queries);
     Ok(rules)
 }
 

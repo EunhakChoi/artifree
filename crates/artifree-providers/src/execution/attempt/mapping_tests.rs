@@ -40,7 +40,7 @@ const ENOSYS_EXIT: i32 = 38;
 /// The exit status of a probe whose `clone3` the kernel rejects with `EINVAL` (22).
 const EINVAL_EXIT: i32 = 22;
 /// The system-call number of `unshare`.
-const UNSHARE: u64 = 272;
+pub(super) const UNSHARE: u64 = 272;
 /// The system-call number of `prlimit64`, which both `setrlimit` and `prlimit` use.
 const PRLIMIT64: u64 = 302;
 /// The `Name` of the launcher's tasks, which the boundary check skips.
@@ -236,17 +236,19 @@ fn check_descriptor_report(text: &str, prefix: &str) -> Result<(), Box<dyn Error
     Ok(())
 }
 
-/// Runs one payload scenario that the filter must kill with `SIGSYS` on `syscall`. The output must
-/// begin the scenario and must not reach the line that the refusal prevents, and the kernel must
-/// hold exactly the payload's record for that call.
-fn check_refused_by_kill(
+/// Runs one payload scenario that the filter of `plan` must kill with `SIGSYS` on `syscall`. The
+/// plan's payload must be the fixture's. The output must begin the scenario and must not reach the
+/// line that the refusal prevents, and the kernel must hold exactly the payload's record for that
+/// call.
+pub(super) fn check_refused_by_kill(
     label: &str,
+    plan: &AttemptPlan,
     begun: &str,
     prevented: &str,
     syscall: u64,
 ) -> Result<(), Box<dyn Error>> {
     let mut log = KernelLog::open_at_end()?;
-    let (outcome, _) = timed_launch(label, &AttemptPlan::fixture())?;
+    let (outcome, _) = timed_launch(label, plan)?;
     let evidence = evidence_of(outcome)?;
     assert_eq!(
         evidence.exit.code(),
@@ -528,6 +530,7 @@ fn job_clone3_is_refused_with_enosys() -> Result<(), Box<dyn Error>> {
 fn job_a_thread_is_refused_with_its_record() -> Result<(), Box<dyn Error>> {
     check_refused_by_kill(
         "thread-refusal",
+        &AttemptPlan::fixture(),
         "thread-refusal started",
         "thread-refusal returned",
         UNSHARE,
@@ -541,6 +544,7 @@ fn job_a_thread_is_refused_with_its_record() -> Result<(), Box<dyn Error>> {
 fn job_a_descendants_limit_cannot_be_set() -> Result<(), Box<dyn Error>> {
     check_refused_by_kill(
         "descendant-refusal",
+        &AttemptPlan::fixture(),
         "descendant pid=",
         "descendant-refusal returned",
         PRLIMIT64,
@@ -554,6 +558,7 @@ fn job_a_descendants_limit_cannot_be_set() -> Result<(), Box<dyn Error>> {
 fn job_lowering_the_soft_limit_is_refused() -> Result<(), Box<dyn Error>> {
     check_refused_by_kill(
         "lower",
+        &AttemptPlan::fixture(),
         "lower before soft=256 hard=256",
         "lower set",
         PRLIMIT64,

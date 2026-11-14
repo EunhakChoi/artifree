@@ -10,10 +10,11 @@
 //! test-support program only (0056 rule 4); the probe programs are of use only under the launch.
 //! The launch (0056 rule 14, R02ab and R02ac) is compiled into this crate's tests and, on Linux,
 //! into a build with the `enforcement-fixture` feature (0057 rule 2). That build serves the
-//! fixture profile only, which `known_profiles` lists; a release build knows no profile and has
-//! no launch. The test payload runs the fixed resource and cleanup scenarios of R02ac and the
-//! syscall-mapping and descriptor scenarios of R02ad. Outside the tests, only the fixture profile
-//! of the feature build can start an attempt.
+//! fixture profile and, since R03bcbb, the `react-v1` profile (0058 rules 1 to 4), which
+//! `known_profiles` lists; a release build knows no profile and has no launch. The test payload
+//! runs the fixed resource and cleanup scenarios of R02ac and the syscall-mapping and descriptor
+//! scenarios of R02ad. Outside the tests, only the profiles of the feature build can start an
+//! attempt.
 //! Its input staging and output collection (R02af) and the routing check during an attempt
 //! (R02ag, `routing_unchanged`) are compiled into the same builds.
 //!
