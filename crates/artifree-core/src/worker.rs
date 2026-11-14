@@ -92,6 +92,11 @@ pub struct WorkerConfig {
     pub heartbeat_ms: u64,
     /// The backoff between attempts.
     pub retry: RetryPolicy,
+    /// The time from which this worker applies the claim deadline of decision
+    /// 0058 rule 20. A worker process sets it a readiness window after its
+    /// start, so that at a start or after a restore, when no execution worker
+    /// has marked itself seen yet, the first poll does not end the backlog.
+    pub deadline_from: UnixMillis,
 }
 
 impl WorkerConfig {
@@ -102,6 +107,7 @@ impl WorkerConfig {
             lease_ms,
             heartbeat_ms: (lease_ms / 3).max(1),
             retry: RetryPolicy::default(),
+            deadline_from: UnixMillis(i64::MIN),
         }
     }
 }
@@ -330,21 +336,22 @@ pub fn run_next_with<S: ArtifactStore + JobStore + BuildStore + ExecutionPresenc
 /// worker does this after asking for capacity and before its claim, so an
 /// execution worker given capacity has marked itself seen first and ends
 /// nothing, and the trusted worker, which always runs, ends them when no
-/// execution worker is ready. A worker without the build store, or a build
-/// without a build profile, ends nothing.
+/// execution worker is ready. A worker without the build store, or before
+/// [`WorkerConfig::deadline_from`], ends nothing.
 fn expire_unclaimed<S>(
     stores: &Stores<'_, S>,
     clock: &dyn Clock,
+    config: &WorkerConfig,
     profiles: Profiles<'_>,
     on_claim: &mut dyn FnMut(ClaimEvent<'_>),
 ) -> Result<(), JobStoreError> {
     let Some(builds) = stores.builds else {
         return Ok(());
     };
-    if profiles.builds.is_empty() {
+    let now = clock.now();
+    if now.0 < config.deadline_from.0 {
         return Ok(());
     }
-    let now = clock.now();
     let enqueued_by = UnixMillis(now.0.saturating_sub(CLAIM_DEADLINE_MS));
     for record in builds.expire_unclaimed(profiles.builds, enqueued_by, now)? {
         on_claim(ClaimEvent::Settled(&record));
@@ -375,7 +382,7 @@ fn run_claimed<S: ArtifactStore + JobStore>(
         }
         None => None,
     };
-    expire_unclaimed(stores, clock, profiles, on_claim)?;
+    expire_unclaimed(stores, clock, config, profiles, on_claim)?;
     let claim = store.claim_job(JobClaim {
         worker,
         now: clock.now(),

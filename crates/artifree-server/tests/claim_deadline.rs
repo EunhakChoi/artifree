@@ -166,6 +166,17 @@ impl Fixture {
         now: i64,
         execution: Option<&dyn Execution>,
     ) -> Result<Vec<JobId>, Box<dyn std::error::Error>> {
+        self.turn_configured(now, execution, &WorkerConfig::with_lease_ms(LEASE_MS))
+    }
+
+    /// One turn of a worker's claim loop at `now`, with `execution` as its
+    /// port and `config` as its configuration.
+    fn turn_configured(
+        &self,
+        now: i64,
+        execution: Option<&dyn Execution>,
+        config: &WorkerConfig,
+    ) -> Result<Vec<JobId>, Box<dyn std::error::Error>> {
         let known = [self.build.clone(), self.other.clone()];
         let builds = [self.build.clone()];
         let mut ended = Vec::new();
@@ -173,7 +184,7 @@ impl Fixture {
             &self.store,
             &FixedClock(UnixMillis(now)),
             &parsed::<WorkerId>("trusted-worker")?,
-            &WorkerConfig::with_lease_ms(LEASE_MS),
+            config,
             &Calm,
             Profiles {
                 known: &known,
@@ -347,6 +358,57 @@ fn a_ready_execution_worker_keeps_an_old_job_queued() -> TestResult {
         unavailable(),
         "no worker is ready any more"
     );
+    Ok(())
+}
+
+/// A worker row seen after now, by a clock that stepped back, counts as ready
+/// only within five minutes, as the readiness read counts it.
+#[test]
+fn a_worker_seen_after_now_is_ready_only_within_the_window() -> TestResult {
+    let fixture = Fixture::new()?;
+    let job = fixture.enqueue(&fixture.build.clone(), "ahead", ENQUEUED)?;
+    let now = ENQUEUED + CLAIM_DEADLINE_MS + 1;
+    fixture.store.mark_seen(
+        &parsed::<WorkerId>("execution-worker")?,
+        UnixMillis(now + READY_WINDOW_MS),
+    )?;
+
+    assert_eq!(fixture.turn(now)?, Vec::new());
+    assert_eq!(fixture.row(&job)?, queued(), "seen five minutes ahead");
+
+    assert_eq!(fixture.turn(now - 1)?, vec![job.clone()]);
+    assert_eq!(
+        fixture.row(&job)?,
+        unavailable(),
+        "seen more than five minutes ahead"
+    );
+    Ok(())
+}
+
+/// A worker applies the deadline only from its `deadline_from`, which a worker
+/// process sets a readiness window after its start, so that its first poll
+/// after a start or a restore does not end the backlog.
+#[test]
+fn the_deadline_waits_for_the_workers_grace() -> TestResult {
+    let fixture = Fixture::new()?;
+    let job = fixture.enqueue(&fixture.build.clone(), "grace", ENQUEUED)?;
+    let from = ENQUEUED + CLAIM_DEADLINE_MS + READY_WINDOW_MS;
+    let config = WorkerConfig {
+        deadline_from: UnixMillis(from),
+        ..WorkerConfig::with_lease_ms(LEASE_MS)
+    };
+
+    assert_eq!(
+        fixture.turn_configured(from - 1, None, &config)?,
+        Vec::new()
+    );
+    assert_eq!(fixture.row(&job)?, queued(), "within the grace");
+
+    assert_eq!(
+        fixture.turn_configured(from, None, &config)?,
+        vec![job.clone()]
+    );
+    assert_eq!(fixture.row(&job)?, unavailable(), "after the grace");
     Ok(())
 }
 

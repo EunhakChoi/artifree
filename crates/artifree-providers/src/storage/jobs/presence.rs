@@ -117,9 +117,8 @@ impl ExecutionPresence for SqliteStore {
     fn execution_ready(&self, now: UnixMillis) -> Result<bool, JobStoreError> {
         self.connect()?
             .query_row(
-                "SELECT EXISTS (SELECT 1 FROM execution_workers
-                     WHERE last_seen BETWEEN ?1 - ?2 AND ?1 + ?2)",
-                params![now.0, READY_WINDOW_MS],
+                concat!("SELECT ", a_worker_is_ready!()),
+                rusqlite::named_params! { ":now": now.0, ":window": READY_WINDOW_MS },
                 |row| row.get(0),
             )
             .map_err(|error| unavailable(error).into())

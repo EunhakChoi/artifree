@@ -34,6 +34,26 @@ use super::{
     SqliteStore, corrupt, key_used_elsewhere, random_bytes, record_job_change, unavailable,
 };
 
+/// The condition, on a job `j` joined with its artifact `a`, that the claim
+/// and the claim deadline share: the artifact is in place and its owning user
+/// is not disabled (decisions 0030 and 0036).
+macro_rules! in_place_and_enabled {
+    () => {
+        "a.purged_at IS NULL AND a.deleted_at IS NULL
+       AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id = j.actor AND u.disabled_at IS NOT NULL)"
+    };
+}
+
+/// The condition that an execution worker is ready (decision 0058 rule 20):
+/// a row seen within `:window` of `:now`, before or after it. The readiness
+/// read and the claim deadline share it.
+macro_rules! a_worker_is_ready {
+    () => {
+        "EXISTS (SELECT 1 FROM execution_workers
+           WHERE last_seen BETWEEN :now - :window AND :now + :window)"
+    };
+}
+
 mod attempts;
 mod builds;
 mod presence;
@@ -417,12 +437,14 @@ struct Due {
 /// An actor with no row in `users` is not disabled. A `run_profile` job with an
 /// attempt that is not `settled` is not due: an expired lease does not make it
 /// claimable (decision 0057, rule 10).
-const DUE: &str = "FROM jobs j JOIN artifacts a ON a.id = j.artifact_id
-     WHERE a.purged_at IS NULL AND a.deleted_at IS NULL
-       AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id = j.actor AND u.disabled_at IS NOT NULL)
+const DUE: &str = concat!(
+    "FROM jobs j JOIN artifacts a ON a.id = j.artifact_id WHERE ",
+    in_place_and_enabled!(),
+    "
        AND NOT EXISTS (SELECT 1 FROM execution_attempts e WHERE e.job_id = j.id AND e.state <> 'settled')
        AND ((j.state IN ('queued', 'retry_scheduled') AND j.run_after <= ?1)
-         OR (j.state = 'running' AND j.lease_expires_at <= ?1))";
+         OR (j.state = 'running' AND j.lease_expires_at <= ?1))"
+);
 
 /// The columns [`next_due`] reads for one due job: identifier, state, cancel
 /// request, attempts, maximum attempts, creation time and profile.
