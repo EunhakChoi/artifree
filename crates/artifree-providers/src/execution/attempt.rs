@@ -116,7 +116,6 @@ const FIXTURE_LEASE: Duration = Duration::from_secs(30);
 /// 2026-11-13, the guardian).
 const GUARDIAN_MARGIN: Duration = Duration::from_secs(2);
 /// The sleep step of a held pause.
-#[cfg(test)]
 const HOLD_STEP: Duration = Duration::from_secs(1);
 
 /// Set once this process quarantined the provider: a cleanup not observed, a routing change, a
@@ -173,9 +172,9 @@ pub(super) struct AttemptPlan {
     /// The faulty supervisor of 0042's acceptance: it sends `R` after every heartbeat whatever its
     /// answer, and never ends the group on it. `false` in `fixture()`.
     pub(super) renew_regardless: bool,
-    /// A test-only pause at one phase (0056, amendment of 2026-11-13, the guardian). `None` in
-    /// `fixture()`.
-    #[cfg(test)]
+    /// A test-only pause at one phase: set by the provider's tests and, in the
+    /// `enforcement-fixture` build, by the worker's adapter from its pause file (decision 0057,
+    /// R02bc). `None` in `fixture()`.
     pub(super) pause: Option<Pause>,
     /// Whether the store's checkpoint is asked once more after readiness and before the release,
     /// and the payload released only on its confirmation (decision 0042 rule 3: the generation
@@ -210,7 +209,6 @@ impl AttemptPlan {
             guardian: true,
             provider_deadline: true,
             renew_regardless: false,
-            #[cfg(test)]
             pause: None,
             checkpoint_at_release: false,
         }
@@ -226,7 +224,6 @@ fn always_confirms(_heartbeat: u32) -> Heartbeat {
 /// A test-only pause of the provider at one phase. At the phase the provider creates the empty
 /// file `<markers>/<word>` and then holds or stalls, as `mode` says (0056, amendment of
 /// 2026-11-13, the guardian).
-#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct Pause {
     /// The phase at which the pause takes place.
@@ -261,7 +258,6 @@ pub(super) enum Phase {
 
 impl Phase {
     /// The word that names this phase in its marker file.
-    #[cfg(test)]
     #[must_use]
     pub(super) fn word(self) -> &'static str {
         match self {
@@ -274,10 +270,26 @@ impl Phase {
             Self::Collecting => "collecting",
         }
     }
+
+    /// The phase named by `word`, as `word` writes it.
+    #[cfg(feature = "enforcement-fixture")]
+    #[must_use]
+    pub(super) fn from_word(word: &str) -> Option<Self> {
+        [
+            Self::Registered,
+            Self::Created,
+            Self::Guarded,
+            Self::Started,
+            Self::Ready,
+            Self::Running,
+            Self::Collecting,
+        ]
+        .into_iter()
+        .find(|phase| phase.word() == word)
+    }
 }
 
 /// What a paused provider does once its marker file exists.
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PauseMode {
     /// Waits, in a loop, until the process is killed.
@@ -811,17 +823,22 @@ fn fixture_input() -> Result<VerifiedInput, InputRefusal> {
 /// (decision 0057 rule 6). The record is written first and the `registered` pause follows; then
 /// `run_registered` stages the input, makes the group and ends it. `renew` answers the guardian's
 /// renewals, which are asked only at the store's checkpoint (decision 0057 rule 7). `run` binds the
-/// output manifest to the claimed run (rule 17). `held` is only borrowed, so the caller keeps the
-/// lock until it has settled the attempt (rule 10).
+/// output manifest to the claimed run (rule 17) and names the claim in the attempt's `v2` record
+/// (0042 rule 6); without it, as in the provider's own tests, the record is `v1`. `held` is only
+/// borrowed, so the caller keeps the lock until it has settled the attempt (rule 10).
 pub(super) fn launch_held(
     plan: &AttemptPlan,
     renew: &mut dyn FnMut(u32) -> Heartbeat,
     held: &Held,
     identity: Identity,
     input: VerifiedInput,
-    run: Option<BoundRun>,
+    run: Option<(BoundRun, registry::RecordRun)>,
     execution_dir: &Path,
 ) -> Launched {
+    let (bound, record_run) = match run {
+        Some((bound, record)) => (Some(bound), Some(record)),
+        None => (None, None),
+    };
     let roots = &admission::production_roots();
     let registry = match register(
         roots,
@@ -829,6 +846,7 @@ pub(super) fn launch_held(
         execution_dir,
         held.host.clone(),
         identity,
+        record_run,
     ) {
         Ok(registry) => registry,
         Err(failure) => {
@@ -856,7 +874,7 @@ pub(super) fn launch_held(
         renew,
         held,
         input,
-        run,
+        bound,
         execution_dir,
         &mut registered,
     );
@@ -1115,14 +1133,16 @@ fn reconcile_registry(
 
 /// Writes the record of a new attempt before the input is staged and the group made (0056,
 /// amendment of 2026-11-14): the attempt's identity as its claim recorded it, the host's identity,
-/// the delegated group relative to the cgroup mount and the group name of the identity. Any failure
-/// refuses as `NotStarted(RegistryNotWritten)` before any resource exists.
+/// the delegated group relative to the cgroup mount and the group name of the identity and, for a
+/// worker's claim, the database, job and fence (a `v2` record). Any failure refuses as
+/// `NotStarted(RegistryNotWritten)` before any resource exists.
 fn register(
     roots: &AdmissionRoots<'_>,
     delegated: &Path,
     execution_dir: &Path,
     host: HostIdentity,
     identity: Identity,
+    run: Option<registry::RecordRun>,
 ) -> Result<Registry, AttemptFailure> {
     let not_written = AttemptFailure::NotStarted(NotStartedReason::RegistryNotWritten);
     let parent = delegated
@@ -1138,6 +1158,7 @@ fn register(
         cgroupns: host.cgroupns,
         parent,
         group: identity.group_name(),
+        run,
     };
     let registry = Registry::open(execution_dir).map_err(|_| not_written)?;
     registry.write(&record).map_err(|_| not_written)?;
@@ -1818,23 +1839,25 @@ fn start_guardian(
 /// the phase is created first, so that a test can wait for it. Then the pause holds in a loop
 /// until the process is killed, or stalls for its duration and goes on. A marker that cannot be
 /// created is ignored: the waiting test then fails for want of it.
-#[cfg(test)]
 fn pause_at(plan: &AttemptPlan, phase: Phase) {
     let Some(pause) = plan.pause.as_ref().filter(|pause| pause.phase == phase) else {
         return;
     };
-    fs::File::create(pause.markers.join(phase.word())).ok();
-    match pause.mode {
+    pause_marked(&pause.markers, phase.word(), pause.mode);
+}
+
+/// Creates the empty marker file `<markers>/<word>`, then holds in a loop until the process is
+/// killed, or stalls for the mode's duration and returns. A marker that cannot be created is
+/// ignored: the waiting test then fails for want of it.
+pub(super) fn pause_marked(markers: &Path, word: &str, mode: PauseMode) {
+    fs::File::create(markers.join(word)).ok();
+    match mode {
         PauseMode::Hold => loop {
             thread::sleep(HOLD_STEP);
         },
         PauseMode::Stall(duration) => thread::sleep(duration),
     }
 }
-
-/// Outside the test build no plan pauses (the pause is a test-only step).
-#[cfg(not(test))]
-fn pause_at(_plan: &AttemptPlan, _phase: Phase) {}
 
 /// Asks `renew`, the store's checkpoint, for a heartbeat when one is due (see `heartbeat_due`) and
 /// applies its answer. A confirmation sends `R` to the guardian. An unavailable store sends

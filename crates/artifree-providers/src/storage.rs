@@ -717,10 +717,7 @@ impl ArtifactStore for SqliteStore {
         let mut connection = self.connect()?;
         // One read transaction: the page and the head come from one snapshot.
         let snapshot = connection.transaction().map_err(unavailable)?;
-        let feed: Vec<u8> = snapshot
-            .query_row("SELECT id FROM feed", [], |row| row.get(0))
-            .map_err(unavailable)?;
-        let feed = FeedId::from_random(feed.try_into().map_err(|_| corrupt("feed id length"))?);
+        let feed = read_feed_id(&snapshot)?;
         // The head of this actor's own feed, not of the table: a user must not
         // learn how many changes the other users made (decision 0036).
         let head: Option<i64> = snapshot
@@ -1638,6 +1635,17 @@ pub(crate) fn random_bytes() -> Result<[u8; 16], StoreError> {
     getrandom::fill(&mut bytes)
         .map_err(|error| StoreError::Unavailable(format!("no system randomness: {error}")))?;
     Ok(bytes)
+}
+
+/// The identity of the database's change feed (decision 0006), which a
+/// supported restore renews (decision 0027 rule 7).
+fn read_feed_id(connection: &Connection) -> Result<FeedId, StoreError> {
+    let feed: Vec<u8> = connection
+        .query_row("SELECT id FROM feed", [], |row| row.get(0))
+        .map_err(unavailable)?;
+    Ok(FeedId::from_random(
+        feed.try_into().map_err(|_| corrupt("feed id length"))?,
+    ))
 }
 
 #[expect(

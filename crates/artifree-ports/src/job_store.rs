@@ -18,6 +18,7 @@
 use std::fmt;
 
 use artifree_domain::SourceRevision;
+use artifree_domain::change::FeedId;
 use artifree_domain::identity::{ActorId, ArtifactId, StateGeneration, UnixMillis};
 use artifree_domain::job::{
     AttemptIdentity, AttemptState, CheckpointAnswer, JobFailure, JobId, JobKind, JobState,
@@ -574,6 +575,19 @@ pub trait JobStore {
         now: UnixMillis,
     ) -> Result<SettleOutcome, JobStoreError>;
 
+    /// Marks a `live` attempt whose cleanup its worker did not observe
+    /// `cleanup_pending` (decision 0057 rules 10 and 19): its record stays and
+    /// the provider is quarantined, so every worker of this store, on any
+    /// execution directory, sees a row it must not settle. It moves no job and
+    /// settles nothing. An attempt that is `cleanup_pending` or `settled`
+    /// already is left as it is.
+    ///
+    /// # Errors
+    ///
+    /// [`JobStoreError::NotFound`] when no attempt has this identity, or
+    /// [`JobStoreError::Unavailable`].
+    fn mark_cleanup_pending(&self, attempt: &AttemptIdentity) -> Result<(), JobStoreError>;
+
     /// Publication of a `run_profile` attempt (decision 0057 rule 12). The job
     /// succeeds with the two counts only when no rule 7 reason applies, the
     /// lease's fence is current, and the attempt is settled. The stored result
@@ -612,4 +626,13 @@ pub trait JobStore {
     ///
     /// [`JobStoreError::Unavailable`].
     fn unsettled_attempts(&self) -> Result<Vec<AttemptRow>, JobStoreError>;
+
+    /// The identity of this store's database: the random identity of its
+    /// change feed, which a restore renews (decisions 0006 and 0027 rule 7).
+    /// An attempt's registry record names it (decision 0042 rule 6).
+    ///
+    /// # Errors
+    ///
+    /// [`JobStoreError::Unavailable`].
+    fn database_identity(&self) -> Result<FeedId, JobStoreError>;
 }

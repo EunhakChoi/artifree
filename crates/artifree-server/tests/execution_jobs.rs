@@ -4,13 +4,14 @@
 //! success with its counts, cancel, lease loss, a trash that is never
 //! published, the renewals of R02ah against the store, a store that stops
 //! answering, a stalled worker, a busy lock that spends no attempt, and the
-//! delegated-group refusal at start.
+//! delegated-group refusal at start. Its `recovery_*` modules hold the
+//! recovery matrix of row R02bc.
 //!
 //! Every case is ignored. The enforcement job runs them, one per process, from
 //! `scripts/enforcement/run.sh` (decision 0056 rule 12). A case that starts a
-//! worker first moves its own process into a child group of its unit, so the
-//! worker is the only process of the unit when it starts (decision 0057 rule
-//! 22). Every wait has a deadline and observes a condition, never a fixed delay
+//! worker first moves its own process into a child group of its unit, and
+//! starts each worker as the only process of a new child group of the unit
+//! (decision 0057 rules 18 and 22). Every wait has a deadline and observes a condition, never a fixed delay
 //! standing in for one. A worker is killed and reaped when its guard is dropped.
 #![cfg(all(target_os = "linux", feature = "enforcement-fixture"))]
 
@@ -20,7 +21,7 @@ use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, channel};
@@ -209,19 +210,45 @@ fn payload_processes() -> io::Result<Vec<u32>> {
     Ok(found)
 }
 
-/// Moves this test process into a child group of its own unit and returns the unit. A worker
-/// started afterwards is then the only process of the unit.
+/// The child group of the unit that holds this test process.
+const HARNESS_GROUP: &str = "harness";
+
+/// Moves this test process into a child group of its own unit, enables the controllers of the
+/// unit's children, and returns the unit. A second call finds the process already moved and
+/// returns the same unit. The unit then holds no process of its own, so a worker started in a
+/// child group of it (`worker_group`) can enable controllers below its own group.
 fn enter_harness() -> Result<PathBuf, Box<dyn Error>> {
     let cgroup = fs::read_to_string("/proc/self/cgroup")?;
     let path = cgroup
         .lines()
         .find_map(|line| line.strip_prefix("0::"))
         .ok_or("this process has no cgroup v2 path")?;
-    let unit = Path::new(CGROUP_ROOT).join(path.trim_start_matches('/'));
-    let harness = unit.join("harness");
+    let own = Path::new(CGROUP_ROOT).join(path.trim_start_matches('/'));
+    if own.file_name().is_some_and(|name| name == HARNESS_GROUP) {
+        let unit = own.parent().ok_or("the harness group has no parent")?;
+        return Ok(unit.to_path_buf());
+    }
+    let harness = own.join(HARNESS_GROUP);
     fs::create_dir_all(&harness)?;
     fs::write(harness.join("cgroup.procs"), std::process::id().to_string())?;
-    Ok(unit)
+    fs::write(own.join("cgroup.subtree_control"), "+memory +pids +cpu")?;
+    Ok(own)
+}
+
+/// Makes a new, empty child group of `unit` for one worker, named `worker-<n>` with the lowest
+/// free `n`. Each worker of a case gets its own: a worker's admission enables controllers in its
+/// group, after which the kernel refuses any process directly in it, so a restarted worker
+/// cannot join the group of the worker it replaces.
+fn worker_group(unit: &Path) -> Result<PathBuf, Box<dyn Error>> {
+    for number in 1..=64_u32 {
+        let group = unit.join(format!("worker-{number}"));
+        match fs::create_dir(&group) {
+            Ok(()) => return Ok(group),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(format!("no free worker group in {}", unit.display()).into())
 }
 
 /// Reads `stream` line by line on a thread. The channel closes when the stream ends.
@@ -244,8 +271,8 @@ fn read_lines(stream: impl Read + Send + 'static) -> Receiver<String> {
 #[derive(Debug)]
 struct Worker {
     child: Child,
-    /// The unit whose child group the worker started in.
-    unit: PathBuf,
+    /// The worker's own child group of the unit, in which its attempt groups are made.
+    group: PathBuf,
     stdout_lines: Receiver<String>,
     stderr_lines: Receiver<String>,
     /// Every stdout line so far, one per line.
@@ -258,32 +285,7 @@ impl Worker {
     /// Starts `worker run` on `scratch`, with `extra` added, as the only process of a new child
     /// group of the unit.
     fn spawn(scratch: &Scratch, extra: &[&str]) -> Result<Self, Box<dyn Error>> {
-        let unit = enter_harness()?;
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg(ATTACH)
-            .arg("sh")
-            .arg(unit.join("cgroup.procs"))
-            .arg(BIN)
-            .args(["worker", "run", "--poll-ms", "50", "--data-dir"])
-            .arg(scratch.data())
-            .arg("--execution-dir")
-            .arg(scratch.execution())
-            .args(extra)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        let stdout = child.stdout.take().ok_or("the worker has no stdout")?;
-        let stderr = child.stderr.take().ok_or("the worker has no stderr")?;
-        Ok(Self {
-            child,
-            unit,
-            stdout_lines: read_lines(stdout),
-            stderr_lines: read_lines(stderr),
-            stdout: String::new(),
-            stderr: String::new(),
-        })
+        Self::spawn_in(&scratch.data(), &scratch.execution(), extra)
     }
 
     /// Moves every line the threads have read so far into `stdout` and `stderr`.
@@ -347,7 +349,7 @@ impl Worker {
     }
 
     /// Waits until the worker has started the attempt of its job: an attempt row is unsettled
-    /// and the attempt's group is in the unit. Returns the attempt and its group.
+    /// and the attempt's group is in the worker's group. Returns the attempt and its group.
     fn started_attempt(&self, store: &Store) -> Result<(AttemptIdentity, PathBuf), Box<dyn Error>> {
         let attempt = poll(within(DEADLINE), "an unsettled attempt row", || {
             Ok(store
@@ -356,7 +358,7 @@ impl Worker {
                 .first()
                 .map(|row| row.attempt))
         })?;
-        let group = self.unit.join(group_name(&attempt));
+        let group = self.group.join(group_name(&attempt));
         poll(within(DEADLINE), "the attempt group", || {
             Ok(group.is_dir().then_some(()))
         })?;
@@ -1045,3 +1047,18 @@ fn job_a_busy_lock_spends_no_attempt() -> TestResult {
     lock.unlock()?;
     Ok(())
 }
+
+// --- the recovery matrix of R02bc (decision 0057 rule 20) -------------------------
+
+#[path = "execution_jobs/recovery_disable.rs"]
+mod recovery_disable;
+#[path = "execution_jobs/recovery_kill.rs"]
+mod recovery_kill;
+#[path = "execution_jobs/recovery_races.rs"]
+mod recovery_races;
+#[path = "execution_jobs/recovery_restore.rs"]
+mod recovery_restore;
+#[path = "execution_jobs/recovery_support.rs"]
+mod recovery_support;
+#[path = "execution_jobs/recovery_workers.rs"]
+mod recovery_workers;

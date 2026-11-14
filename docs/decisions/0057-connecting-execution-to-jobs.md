@@ -1,7 +1,7 @@
 # 0057: Connecting the Linux provider to jobs
 
-Date: 2026-11-14. Status: **accepted as a plan; R02ba (the store) and R02bb
-(the worker) are implemented; R02bc is not**. Roadmap: R02b.
+Date: 2026-11-14. Status: **accepted; R02ba (the store), R02bb (the worker)
+and R02bc (the recovery matrix) are implemented**. Roadmap: R02b.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider, R02aa to R02ai),
@@ -78,6 +78,69 @@ bootstrap|stub|guardian` refuses with status 2 in a build without it.
 > The release-build cases run in the server-binary CI job with default
 > features, since `npm run check` builds with `--all-features`. The
 > enforcement job runs the worker's cases against the real binary and store.
+>
+> **Note, 2026-11-14 (R02bc).** The recovery matrix of rule 20's R02bc row
+> runs in the enforcement job against the real binary and store, in
+> `crates/artifree-server/tests/execution_jobs/recovery_*.rs`:
+>
+> - a supervisor SIGKILL at each phase (registered, created, guarded,
+>   started, ready, running, settled), then restart and cleanup before
+>   reclaim;
+> - a kill between the record's removal and settlement;
+> - a restored database beside a fresh execution directory, which settles
+>   nothing and quarantines;
+> - two workers on one database that never run an old and a new attempt
+>   together;
+> - purge racing a SIGTERM-ignoring descendant, with its tombstone;
+> - disable and re-enable around a heartbeat, a publication, a restart and a
+>   restore;
+> - trash and recovery at claim, heartbeat and publication;
+> - queued and retry jobs resuming after a restart;
+> - a stuck cleanup that keeps the quarantine.
+>
+> The two workers run one after the other, since each must be the only
+> process of its delegated group. The second starts on another execution
+> directory while the first one's attempt is unsettled.
+>
+> The row's guard mutations are proven where the guard lives: the reclaim
+> gate, the restore marking and the checkpoint's generation check by SQLite
+> tests on any host, and the settlement of record-less rows by a unit test of
+> the provider's selection.
+>
+> Choices this slice made:
+>
+> - **The registry's v2 record** (0056's amendment) is `artifree-attempt-v2`,
+>   then v1's six lines in their order, then `database=`, `job=` and
+>   `fence=`. The database identity is the change feed's identity, which a
+>   restore renews; it is not a new persisted value (0041). Writers write v2
+>   only. A reader takes a v1 record, written by an R02bb worker, and
+>   reconciles it by its six lines, as R02bb did. No reconciliation decision
+>   reads the three v2 lines: settlement is keyed by the random attempt
+>   identity (rule 10).
+> - **Two gaps the matrix showed are closed.**
+>   - A disable and re-enable before any checkpoint was forgotten when the
+>     worker died or the database was restored, and the job then ran again
+>     under the new generation. Now a claim of a `run_profile` job whose
+>     newest attempt pinned another generation ends the job `cancelled`, as
+>     0042 rule 6 asks ("after cleanup it is cancelled ... Recovery does not
+>     adopt a newer generation for an old attempt").
+>   - A launch whose cleanup was not observed left its row `live`, and rules
+>     10 and 19 say it stays `cleanup_pending`. Now the worker marks it so,
+>     and a worker of the same database on another execution directory is
+>     quarantined by it as well.
+> - **The kill points.** The worker built with the feature reads a pause line
+>   from a `pause` file in its execution directory and writes a marker for
+>   each phase it pauses at, so that a case kills the worker at a known
+>   phase. The feature is never in a release build (rule 2). The `settled`
+>   pause is taken only when the launch observed its cleanup.
+> - **Purge keeps an earlier revocation.** A purge of a trashed artifact
+>   keeps `trash` as the tombstone's revocation, as R02ba's purge already
+>   did.
+>
+> Rule 22's R02bc assumption holds: a worker killed between a store
+> transition and the provider's cleanup leaves only states that rules 10 and
+> 19 settle, or a quarantine. Per rule 21, R02 is implemented for the fixture
+> profile only.
 
 ## Context
 

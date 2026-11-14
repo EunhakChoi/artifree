@@ -167,6 +167,30 @@ pub(super) fn insert(
     Ok(())
 }
 
+/// Whether the actor's current generation differs from the one the job's newest
+/// attempt pinned (decision 0042 rule 6; decision 0057 rules 5 and 9). A job with
+/// no attempt answers `false`. A NULL pin with a users row now present, or the
+/// reverse, is a different generation (rule 5).
+pub(super) fn generation_changed(
+    transaction: &Transaction<'_>,
+    job: &JobId,
+) -> Result<bool, StoreError> {
+    let pins: Option<(Option<i64>, Option<i64>)> = transaction
+        .query_row(
+            "SELECT e.actor_generation, u.state_generation
+             FROM execution_attempts e
+             JOIN jobs j ON j.id = e.job_id
+             LEFT JOIN users u ON u.id = j.actor
+             WHERE e.job_id = ?1
+             ORDER BY e.fence DESC LIMIT 1",
+            [job.as_str()],
+            |raw| Ok((raw.get(0)?, raw.get(1)?)),
+        )
+        .optional()
+        .map_err(unavailable)?;
+    Ok(pins.is_some_and(|(pinned, current)| pinned != current))
+}
+
 /// Whether the job has an attempt that is not settled yet. The due set of a
 /// `run_profile` job excludes such a job (decision 0057 rule 10).
 pub(super) fn unsettled(connection: &Connection, job: &JobId) -> Result<bool, StoreError> {
@@ -440,6 +464,24 @@ pub(super) fn settle(
         move_job(transaction, &row.job, revocation, now)?;
     }
     Ok(SettleOutcome::Settled(written(transaction, &row.job)?))
+}
+
+/// Marks a `live` attempt `cleanup_pending` when its worker did not observe its
+/// cleanup (decision 0057 rules 10 and 19). Other states are left as they are.
+pub(super) fn mark_cleanup_pending(
+    transaction: &Transaction<'_>,
+    attempt: &AttemptIdentity,
+) -> Result<(), JobStoreError> {
+    if read_attempt(transaction, attempt)?.is_none() {
+        return Err(JobStoreError::NotFound);
+    }
+    transaction
+        .execute(
+            "UPDATE execution_attempts SET state = 'cleanup_pending' WHERE attempt = ?1 AND state = 'live'",
+            params![attempt.hex()],
+        )
+        .map_err(unavailable)?;
+    Ok(())
 }
 
 /// Ends a `run_profile` job as succeeded with its two counts (decision 0057

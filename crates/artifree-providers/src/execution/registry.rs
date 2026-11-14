@@ -10,10 +10,13 @@
 //! Nothing in the product removes the quarantine file; the operator removes it after settling the
 //! host.
 //!
-//! The database identity and the job's identity and fence of 0042 rule 6 are R02b's; they would
-//! come as further lines of a `v2` record.
-//!
-//! The module is compiled only into the test build (0056 rule 16), like the launch that uses it.
+//! A `v2` record, which the worker writes (decision 0057, R02bc), adds `database=`, `job=` and
+//! `fence=` after the six lines of `v1`: the database is its change feed's identity, and the job
+//! and fence are those of the claim (0042 rule 6). A `v1` record, which R02bb's worker and the
+//! provider's own tests write, is still read and reconciled by its six lines: no reconciliation
+//! decision reads the three later lines. The module is compiled into the test build and the
+//! `enforcement-fixture` feature (0056 rule 16; decision 0057 rule 2), like the launch that uses
+//! it.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -24,6 +27,8 @@ use std::str::Split;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use artifree_domain::change::FeedId;
+use artifree_domain::job::JobId;
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, ResolveFlags};
 use rustix::io::Errno;
 
@@ -34,8 +39,10 @@ use super::staging::{INPUT_DIR, remove_tree};
 pub(super) const ATTEMPTS_DIR: &str = "attempts";
 /// The persisted quarantine file, inside the execution directory.
 pub(super) const QUARANTINE_FILE: &str = "quarantine";
-/// The first line of every record.
-pub(super) const RECORD_TAG: &str = "artifree-attempt-v1";
+/// The first line of a `v1` record: the six lines of R02bb.
+pub(super) const RECORD_TAG_V1: &str = "artifree-attempt-v1";
+/// The first line of a `v2` record: the six lines of `v1`, then `database=`, `job=` and `fence=`.
+pub(super) const RECORD_TAG_V2: &str = "artifree-attempt-v2";
 /// The first line of the persisted quarantine file.
 pub(super) const QUARANTINE_TAG: &str = "artifree-quarantine-v1";
 /// The largest record, in bytes; a longer file is refused before it is parsed.
@@ -232,6 +239,18 @@ fn invalid_data(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
+/// The claim that a `v2` record names (decision 0042 rule 6): the database the claim was made
+/// in, the job and the job's fencing token at the claim.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct RecordRun {
+    /// The database's identity: its change feed's identity (decision 0027 rule 7).
+    pub(super) database: FeedId,
+    /// The claimed job.
+    pub(super) job: JobId,
+    /// The job's fencing token at the claim.
+    pub(super) fence: u64,
+}
+
 /// One attempt's record: what the attempt made and where, as the registry holds it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct Record {
@@ -247,14 +266,31 @@ pub(super) struct Record {
     pub(super) parent: String,
     /// The attempt group's name, which must be the identity's group name.
     pub(super) group: String,
+    /// The claim the record names: `Some` in a `v2` record, which the worker writes; `None` in a
+    /// `v1` record, which R02bb's worker and the provider's own tests write.
+    pub(super) run: Option<RecordRun>,
 }
 
 impl Record {
-    /// The record's exact bytes: the tag line, then the six fields, one per line, in order.
+    /// The record's exact bytes: the tag line, then the six fields, one per line, in order. A
+    /// record with a claim is a `v2` record, which adds `database=`, `job=` and `fence=` after
+    /// them, one per line, in order. A record without one is the `v1` text of R02bb.
     #[must_use]
     pub(super) fn render(&self) -> String {
+        let (tag, run) = match &self.run {
+            Some(run) => (
+                RECORD_TAG_V2,
+                format!(
+                    "database={}\njob={}\nfence={}\n",
+                    run.database,
+                    run.job.as_str(),
+                    run.fence
+                ),
+            ),
+            None => (RECORD_TAG_V1, String::new()),
+        };
         format!(
-            "{RECORD_TAG}\nidentity={}\nmachine={}\nboot={}\ncgroupns={}\nparent={}\ngroup={}\n",
+            "{tag}\nidentity={}\nmachine={}\nboot={}\ncgroupns={}\nparent={}\ngroup={}\n{run}",
             self.identity.hex(),
             self.machine,
             self.boot,
@@ -277,15 +313,26 @@ impl Record {
         let text = std::str::from_utf8(bytes).map_err(|_| RecordRefusal::NotText)?;
         let body = text.strip_suffix('\n').ok_or(RecordRefusal::Layout)?;
         let mut lines = body.split('\n');
-        if lines.next() != Some(RECORD_TAG) {
-            return Err(RecordRefusal::Layout);
-        }
+        let v2 = match lines.next() {
+            Some(RECORD_TAG_V1) => false,
+            Some(RECORD_TAG_V2) => true,
+            _ => return Err(RecordRefusal::Layout),
+        };
         let identity_text = field(&mut lines, "identity")?;
         let machine = field(&mut lines, "machine")?;
         let boot = field(&mut lines, "boot")?;
         let cgroupns = field(&mut lines, "cgroupns")?;
         let parent = field(&mut lines, "parent")?;
         let group = field(&mut lines, "group")?;
+        let run_text = if v2 {
+            Some((
+                field(&mut lines, "database")?,
+                field(&mut lines, "job")?,
+                field(&mut lines, "fence")?,
+            ))
+        } else {
+            None
+        };
         if lines.next().is_some() {
             return Err(RecordRefusal::Layout);
         }
@@ -305,6 +352,9 @@ impl Record {
         if group != identity.group_name() {
             return Err(RecordRefusal::ForeignGroup);
         }
+        let run = run_text
+            .map(|(database, job, fence)| parse_run(database, job, fence))
+            .transpose()?;
         Ok(Self {
             identity,
             machine: machine.to_owned(),
@@ -312,6 +362,7 @@ impl Record {
             cgroupns: cgroupns.to_owned(),
             parent: parent.to_owned(),
             group: group.to_owned(),
+            run,
         })
     }
 }
@@ -325,6 +376,27 @@ fn field<'a>(lines: &mut Split<'a, char>, key: &str) -> Result<&'a str, RecordRe
         .ok_or(RecordRefusal::Layout)
 }
 
+/// The three claim lines of a `v2` record, checked in order.
+fn parse_run(database: &str, job: &str, fence: &str) -> Result<RecordRun, RecordRefusal> {
+    let database = Identity::parse_hex(database)
+        .map(|identity| FeedId::from_random(identity.0))
+        .ok_or(RecordRefusal::DatabaseField)?;
+    let job: JobId = job.parse().map_err(|_| RecordRefusal::JobField)?;
+    let fence = parse_fence(fence).ok_or(RecordRefusal::FenceField)?;
+    Ok(RecordRun {
+        database,
+        job,
+        fence,
+    })
+}
+
+/// A canonical decimal fencing token: digits only, no sign or leading zero, at most `i64::MAX`,
+/// since the attempt row stores it as an `SQLite` integer.
+fn parse_fence(text: &str) -> Option<u64> {
+    let value: u64 = text.parse().ok()?;
+    (value.to_string() == text && i64::try_from(value).is_ok()).then_some(value)
+}
+
 /// Why a file is not a valid record (decision 0056, the attempt registry).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RecordRefusal {
@@ -332,8 +404,8 @@ pub(super) enum RecordRefusal {
     TooLong,
     /// Not UTF-8 text.
     NotText,
-    /// Not the tag line and the six fields in order, each ending in a newline, with nothing
-    /// after them: an unknown, missing, repeated or reordered line.
+    /// Not a known tag line (`v1` or `v2`) followed by that version's fields in order, each ending
+    /// in a newline, with nothing after them: an unknown, missing, repeated or reordered line.
     Layout,
     /// The identity is not 32 lowercase hexadecimal digits.
     IdentityField,
@@ -347,6 +419,12 @@ pub(super) enum RecordRefusal {
     ParentField,
     /// The group is not the name of the record's own identity.
     ForeignGroup,
+    /// The database identity is not 32 lowercase hexadecimal digits.
+    DatabaseField,
+    /// The job is not `job_` and 32 lowercase hexadecimal digits.
+    JobField,
+    /// The fence is not a canonical decimal number of at most `i64::MAX`.
+    FenceField,
 }
 
 /// What reconciliation does with a valid record, judged against the host.
@@ -889,3 +967,5 @@ fn settle_vanished(parent: &OwnedFd, name: &str) -> Result<ReconcileOutcome, Reg
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod v2_tests;

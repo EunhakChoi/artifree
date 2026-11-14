@@ -55,6 +55,7 @@ fn setup(root: &Scratch) -> Result<(PathBuf, PathBuf, Registered), Box<dyn Error
         cgroupns: "cgroup:[4026531835]".to_owned(),
         parent: "system.slice/x.service".to_owned(),
         group: identity.group_name(),
+        run: None,
     })?;
     let registered = Registered {
         registry,

@@ -17,7 +17,6 @@
 
 use artifree_domain::AppDataVersion;
 use artifree_domain::SourceRevision;
-use artifree_domain::change::FeedId;
 use artifree_domain::data::DataSpace;
 use artifree_domain::identity::{ActorId, ArtifactId, StateGeneration};
 use artifree_ports::artifact_store::{Delivery, RequestIdentity, StoreError};
@@ -68,10 +67,7 @@ fn binding(connection: &Connection, actor: &ActorId) -> Result<OutboxBinding, Da
     let generation = generation.ok_or(DataStoreError::OutboxBindingChanged)?;
     let generation =
         crate::users::stored_generation(generation).map_err(DataStoreError::Unavailable)?;
-    let feed: Vec<u8> = connection
-        .query_row("SELECT id FROM feed", [], |row| row.get(0))
-        .map_err(unavailable)?;
-    let epoch = FeedId::from_random(feed.try_into().map_err(|_| corrupt("feed id length"))?);
+    let epoch = super::read_feed_id(connection)?;
     Ok(OutboxBinding {
         actor: actor.clone(),
         generation,

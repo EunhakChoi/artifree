@@ -493,6 +493,7 @@ fn record_for(identity: Identity, host: &HostIdentity, parent: &str, group: &str
         cgroupns: host.cgroupns.clone(),
         parent: parent.to_owned(),
         group: group.to_owned(),
+        run: None,
     }
 }
 

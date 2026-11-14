@@ -24,9 +24,9 @@ use std::time::Duration;
 
 use artifree_core::jobs::Clock;
 use artifree_core::worker::{self, ClaimEvent, Pace, Profiles, Step, WorkerConfig};
-use artifree_domain::job::WorkerId;
+use artifree_domain::job::{AttemptIdentity, WorkerId};
 use artifree_ports::execution::Execution;
-use artifree_ports::job_store::{JobRecord, JobStoreError};
+use artifree_ports::job_store::{JobRecord, JobStore, JobStoreError};
 use artifree_providers::storage::{DATABASE_FILE, SqliteStore};
 
 /// How often a sleeping worker looks at the shutdown flag.
@@ -139,21 +139,7 @@ pub fn run(
     shutdown: &AtomicBool,
     on_event: &mut dyn FnMut(&WorkerEvent<'_>),
 ) -> Result<Stopped, String> {
-    let database = options.data_dir.join(DATABASE_FILE);
-    // A worker never creates a database: an empty file would be taken for a
-    // new one by the store, so it is refused here, unopened and unchanged.
-    let initialized =
-        std::fs::metadata(&database).is_ok_and(|meta| meta.is_file() && meta.len() > 0);
-    if !initialized {
-        return Err(format!(
-            "there is no initialized database in {}; start the server once with this data directory",
-            options.data_dir.display()
-        ));
-    }
-    let store = SqliteStore::open(&database).map_err(|error| error.to_string())?;
-    let mut random = [0_u8; 4];
-    getrandom::fill(&mut random).map_err(|error| format!("no system randomness: {error}"))?;
-    let worker = WorkerId::from_random(random);
+    let (store, worker) = open_store(&options.data_dir)?;
     let lease_ms = u64::try_from(options.lease.as_millis()).unwrap_or(u64::MAX);
     let config = WorkerConfig::with_lease_ms(lease_ms);
     let pace = ProcessPace {
@@ -171,10 +157,13 @@ pub fn run(
     // The last refusal passed on, so that a refusal that lasts, such as a
     // quarantine, is reported once and not at every poll.
     let mut last_refusal: Option<&'static str> = None;
+    // Attempts whose `cleanup_pending` mark failed, written again at each turn.
+    let mut unmarked: Vec<AttemptIdentity> = Vec::new();
     loop {
         if shutdown.load(Ordering::Acquire) {
             return Ok(Stopped::Signal);
         }
+        mark_again(&store, &mut unmarked, on_event);
         // Whether this call reported a refusal; a call without one (capacity held,
         // busy, or no port asked) ends a run of identical refusals.
         let mut refused_now = false;
@@ -226,8 +215,13 @@ pub fn run(
                 failures = 0;
                 on_event(&WorkerEvent::LeaseLost(&job));
             }
-            Ok(Step::Unsettled(_)) => {
+            Ok(Step::Unsettled {
+                attempt, marked, ..
+            }) => {
                 failures = 0;
+                if !marked {
+                    unmarked.push(attempt);
+                }
             }
             Err(error) => {
                 failures += 1;
@@ -243,6 +237,42 @@ pub fn run(
             }
         }
     }
+}
+
+/// Opens the database of `data_dir`, which must exist already, and draws this worker's name.
+fn open_store(data_dir: &Path) -> Result<(SqliteStore, WorkerId), String> {
+    let database = data_dir.join(DATABASE_FILE);
+    // A worker never creates a database: an empty file would be taken for a
+    // new one by the store, so it is refused here, unopened and unchanged.
+    let initialized =
+        std::fs::metadata(&database).is_ok_and(|meta| meta.is_file() && meta.len() > 0);
+    if !initialized {
+        return Err(format!(
+            "there is no initialized database in {}; start the server once with this data directory",
+            data_dir.display()
+        ));
+    }
+    let store = SqliteStore::open(&database).map_err(|error| error.to_string())?;
+    let mut random = [0_u8; 4];
+    getrandom::fill(&mut random).map_err(|error| format!("no system randomness: {error}"))?;
+    Ok((store, WorkerId::from_random(random)))
+}
+
+/// Writes the `cleanup_pending` mark of each attempt in `unmarked` again and keeps the ones that
+/// still fail, so that the row a quarantine keeps is seen by every worker of the store (decision
+/// 0057 rules 10 and 19). Each failure is passed on as a warning.
+fn mark_again(
+    store: &SqliteStore,
+    unmarked: &mut Vec<AttemptIdentity>,
+    on_event: &mut dyn FnMut(&WorkerEvent<'_>),
+) {
+    unmarked.retain(|attempt| match store.mark_cleanup_pending(attempt) {
+        Ok(()) => false,
+        Err(error) => {
+            on_event(&WorkerEvent::Warning(&error));
+            true
+        }
+    });
 }
 
 /// Sleeps for `total` in slices; `false` when `shutdown` was set meanwhile.

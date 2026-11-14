@@ -16,6 +16,7 @@
 //! `revision_files` rows of its pinned revision.
 
 use artifree_domain::SourceRevision;
+use artifree_domain::change::FeedId;
 use artifree_domain::identity::{ArtifactId, UnixMillis};
 use artifree_domain::job::{
     AttemptIdentity, CheckpointAnswer, Finding, JobFailure, JobId, JobKind, JobState,
@@ -568,6 +569,15 @@ fn claim(transaction: &Transaction<'_>, claim: JobClaim<'_>) -> Result<Claim, Jo
                 continue;
             }
             Some(profile) => {
+                // A job whose earlier attempt pinned another generation is not run again under
+                // the new one: its attempts are settled (the DUE gate), so it ends cancelled
+                // and needs a new keyed request (decision 0042 rule 6; decision 0057 rule 9).
+                if due.attempts > 0 && attempts::generation_changed(transaction, &due.id)? {
+                    end(transaction, &due.id, JobState::Cancelled, None, claim.now)?;
+                    record_job_change(transaction, &due.id)?;
+                    settled.push(written(transaction, &due.id)?);
+                    continue;
+                }
                 // A known profile with no execution directory in this worker:
                 // the job stays queued and the claim goes on.
                 let Some(execution) = claim.execution.as_ref() else {
@@ -1097,6 +1107,10 @@ impl JobStore for SqliteStore {
         self.write(|transaction| attempts::settle(transaction, attempt, now))
     }
 
+    fn mark_cleanup_pending(&self, attempt: &AttemptIdentity) -> Result<(), JobStoreError> {
+        self.write(|transaction| attempts::mark_cleanup_pending(transaction, attempt))
+    }
+
     fn complete_profile_job(
         &self,
         lease: &Lease,
@@ -1123,5 +1137,12 @@ impl JobStore for SqliteStore {
         let mut connection = self.connect()?;
         let snapshot = connection.transaction().map_err(unavailable)?;
         Ok(attempts::unsettled_rows(&snapshot)?)
+    }
+
+    // Decisions 0041 and 0043: the existing change-feed identity is the database
+    // identity, and a supported restore renews it (decision 0027, rule 7).
+    fn database_identity(&self) -> Result<FeedId, JobStoreError> {
+        let connection = self.connect()?;
+        Ok(super::read_feed_id(&connection)?)
     }
 }

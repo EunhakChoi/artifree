@@ -9,6 +9,7 @@
 use std::fmt;
 
 use artifree_domain::SourceRevision;
+use artifree_domain::change::FeedId;
 use artifree_domain::identity::{ActorId, ArtifactId, StateGeneration};
 use artifree_domain::job::{AttemptIdentity, CheckpointAnswer, JobId, ProfileName, StopReason};
 use artifree_domain::package::FilePackage;
@@ -140,6 +141,9 @@ pub struct ProfileRun<'a> {
     pub profile: &'a ProfileName,
     /// The lease length, in milliseconds, that the claim was made with.
     pub lease_ms: u64,
+    /// The identity of the database the claim was made in, which the
+    /// attempt's registry record names (decision 0042 rule 6).
+    pub database: FeedId,
 }
 
 /// The pinned input of a run: the files of the pinned revision as the store

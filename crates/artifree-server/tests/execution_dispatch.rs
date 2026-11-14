@@ -959,7 +959,7 @@ fn a_launch_that_failed_fails_the_job_as_internal() -> TestResult {
 }
 
 #[test]
-fn an_unobserved_cleanup_writes_nothing() -> TestResult {
+fn an_unobserved_cleanup_marks_the_attempt_cleanup_pending_and_nothing_else() -> TestResult {
     let world = World::new()?;
     let log = Arc::new(Log::default());
     let job = world.enqueue_fixture("unobserved-key")?;
@@ -972,8 +972,12 @@ fn an_unobserved_cleanup_writes_nothing() -> TestResult {
 
     assert_eq!(
         step,
-        Step::Unsettled(job.clone()),
-        "the run reports that its attempt is unsettled"
+        Step::Unsettled {
+            job: job.clone(),
+            attempt: held_attempt(),
+            marked: true,
+        },
+        "the run reports that its attempt is unsettled and marked"
     );
     assert_eq!(
         job_row(&world.database, &job)?,
@@ -987,8 +991,8 @@ fn an_unobserved_cleanup_writes_nothing() -> TestResult {
     );
     assert_eq!(
         world.attempt(&held_attempt())?.state,
-        AttemptState::Live,
-        "the core wrote nothing to the attempt"
+        AttemptState::CleanupPending,
+        "an attempt whose cleanup was not observed becomes cleanup_pending (0057 rules 10 and 19)"
     );
     assert_eq!(
         unsettled_attempts(&world)?,
@@ -1206,6 +1210,47 @@ fn the_input_is_the_pinned_revision_not_the_head() -> TestResult {
             ("style.css".to_owned(), STYLE.as_bytes().to_vec()),
         ],
         "the bytes the launch received are revision 1's, not the head's"
+    );
+    Ok(())
+}
+
+/// A `cleanup_pending` mark that the store refuses is reported, so that the worker loop can write
+/// it again; the attempt stays `live` and nothing else is written (decision 0057 rules 10 and 19).
+#[test]
+fn a_failed_cleanup_pending_mark_is_reported_for_a_retry() -> TestResult {
+    let world = World::new()?;
+    let log = Arc::new(Log::default());
+    let job = world.enqueue_fixture("unmarked-key")?;
+    Connection::open(&world.database)?.execute_batch(
+        "CREATE TRIGGER refuse_mark BEFORE UPDATE OF state ON execution_attempts
+         WHEN NEW.state = 'cleanup_pending'
+         BEGIN SELECT RAISE(ABORT, 'the mark is refused'); END;",
+    )?;
+    let execution = FakeExecution {
+        shared: world.shared(&log),
+        scene: scene(Answer::Held, Launch::NoCleanup),
+    };
+
+    let step = run_once(&world, Some(&execution), &log)?;
+
+    assert_eq!(
+        step,
+        Step::Unsettled {
+            job: job.clone(),
+            attempt: held_attempt(),
+            marked: false,
+        },
+        "a refused mark is reported as not marked"
+    );
+    assert_eq!(
+        world.attempt(&held_attempt())?.state,
+        AttemptState::Live,
+        "the refused mark leaves the attempt live"
+    );
+    assert_eq!(
+        job_row(&world.database, &job)?,
+        ("running".to_owned(), 1),
+        "the job stays running with its claim counted"
     );
     Ok(())
 }
