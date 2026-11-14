@@ -804,6 +804,7 @@ for case in template bad-import; do
 done
 run_in_scenario "$lib_binary" bundler_tests thread-refusal react-v1-filter job_react_v1_kills_a_call_outside_its_filter
 sudo "$PREPARE" scenario exit
+run_unit "$lib_binary" react-v1-resolver execution::attempt::bundler_tests::job_react_v1_refuses_resolver_configuration -p Delegate=yes
 sudo "$PREPARE" package-modify
 run_unit "$lib_binary" react-v1-modified execution::attempt::bundler_tests::job_react_v1_refuses_a_modified_root -p Delegate=yes
 sudo "$PREPARE" package-restore

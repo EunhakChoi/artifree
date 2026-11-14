@@ -22,6 +22,7 @@ use super::super::collection::{CollectionRefusal, PackageReason};
 use super::super::launcher::{EntryProgram, KILLED_BY_SIGSYS};
 use super::super::probe_group::PROBE_LIMITS;
 use super::super::profile::{MEASUREMENT, REACT_V1, REACT_V1_FILTER_CHECK};
+use super::super::staging::InputRefusal;
 use super::super::staging::{InputListing, VerifiedInput};
 use super::mapping_tests::{UNSHARE, check_refused_by_kill};
 use super::resource_tests::evidence_of;
@@ -48,6 +49,20 @@ fn input_of(case: &str) -> Result<VerifiedInput, Box<dyn Error>> {
     match case {
         "template" => files.push(("src/main.tsx".parse()?, MAIN.to_vec())),
         "bad-import" => files.push(("src/main.tsx".parse()?, BAD_IMPORT.to_vec())),
+        // The bad import, mapped to a module of the revision by a path mapping that the bundler
+        // would read from `tsconfig.json`.
+        "path-mapping" => {
+            files.push(("src/main.tsx".parse()?, BAD_IMPORT.to_vec()));
+            files.push((
+                "src/pad.ts".parse()?,
+                b"export default (text: string, width: number) => text.padStart(width);\n".to_vec(),
+            ));
+            files.push((
+                "tsconfig.json".parse()?,
+                b"{ \"compilerOptions\": { \"paths\": { \"left-pad\": [\"./src/pad.ts\"] } } }\n"
+                    .to_vec(),
+            ));
+        }
         "large" => {
             let mut main = String::from(
                 "import { createRoot } from \"react-dom/client\";\nimport \"./app.css\";\n",
@@ -227,6 +242,31 @@ fn job_react_v1_refuses_a_modified_root() -> Result<(), Box<dyn Error>> {
             return Err(
                 format!("the attempt must be refused, it exited {:?}", evidence.exit).into(),
             );
+        }
+    }
+    assert_no_attempt_groups()
+}
+
+/// Decision 0058 rule 2 (slice R03bcbb): an input that would change how the bundler resolves an
+/// import is refused before it is staged. The bad import is mapped to a module of the revision by
+/// `tsconfig.json`, which the bundler would otherwise read and then build the import.
+#[test]
+#[ignore = "runs only in the Linux enforcement job"]
+fn job_react_v1_refuses_resolver_configuration() -> Result<(), Box<dyn Error>> {
+    let dir = ExecutionDir::new("react-v1-resolver")?;
+    let outcome = launch_with(&react_v1_plan(), input_of("path-mapping")?, dir.path());
+    match outcome {
+        Err(refusal) => assert_eq!(
+            refusal.failure,
+            AttemptFailure::Input(InputRefusal::ResolverFile)
+        ),
+        Ok(evidence) => {
+            return Err(format!(
+                "the attempt must be refused, it exited {:?}; stderr: {}",
+                evidence.exit,
+                String::from_utf8_lossy(&evidence.stderr)
+            )
+            .into());
         }
     }
     assert_no_attempt_groups()

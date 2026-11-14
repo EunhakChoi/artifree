@@ -70,7 +70,7 @@ use super::guardian::{self, GuardianReason};
 use super::lock::{AdmissionLock, LockRefusal};
 use super::policy::FilterSet;
 use super::probe_group::{self, ProbeGroup};
-use super::profile::{self, ExecutionProfile, FIXTURE_EXECUTION};
+use super::profile::{self, ExecutionProfile, FIXTURE_EXECUTION, InputRule};
 use super::readiness::{self, GroupObservation};
 use super::registry::{self, HostIdentity, Identity, QuarantineReason, Reconciled, Registry};
 use super::report::HostReport;
@@ -983,6 +983,16 @@ fn filter_digest(
     })
 }
 
+/// Refuses an input that `profile` does not take: a profile that resolves its imports only
+/// through the tool root refuses one that would change that (decision 0058 rule 2). Checked
+/// before anything is staged.
+fn check_input(profile: &ExecutionProfile, input: &VerifiedInput) -> Result<(), InputRefusal> {
+    if profile.input == InputRule::FixedResolution && input.holds_resolver_file() {
+        return Err(InputRefusal::ResolverFile);
+    }
+    Ok(())
+}
+
 /// Runs one attempt after its record is written (0056 rule 5, as reworded by the amendment of
 /// 2026-11-14): the staging of the input, the attempt group named by the record's identity, its
 /// phase, the cleanup and the final verdict. The group is always ended and removed, or the attempt
@@ -1006,8 +1016,8 @@ fn run_registered(
     let roots = &admission::production_roots();
     let filter = filter_digest(plan, held, execution_dir, registered)?;
     // Staged under the admission lock, after the record and before any group exists (0056,
-    // amendment of 2026-11-13).
-    let staged = match input.stage(execution_dir) {
+    // amendment of 2026-11-13), once the profile has taken the input.
+    let staged = match check_input(plan.profile, &input).and_then(|()| input.stage(execution_dir)) {
         Ok(staged) => staged,
         Err(failure) => {
             release_ungrouped(registered, &held.delegated, execution_dir);

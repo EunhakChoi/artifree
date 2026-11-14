@@ -194,14 +194,26 @@ not**. Roadmap: R03.
 > that list, so it says nothing about which of the fixture's calls the
 > bundler leaves unused. The esbuild option `--sourcemap` takes no `false`
 > value, so the argv leaves it out; esbuild writes no source map unless asked,
-> which is rule 1's "no source maps". The enforcement job (part 16) shows:
+> which is rule 1's "no source maps". The bundler also reads resolver
+> configuration from the files above each module it imports. A
+> `tsconfig.json` or `jsconfig.json` can map an import to a module of the
+> revision, a `package.json` can remap it through its `browser` or `imports`
+> field, and a `node_modules` directory can shadow `NODE_PATH`. Each of
+> them would let a revision import a module that rule 2 refuses. So
+> `react-v1` refuses an input that holds a file of those names or any file
+> under a `node_modules` directory, at any depth and in any ASCII case. The
+> refusal comes before anything is staged, and the attempt then ends as an
+> input refusal. The worker reports it as unavailable until R03c gives builds
+> their own failures (rule 18). The enforcement job (part 16) shows:
 >
 > - the template builds and exits 0 in an attempt group that reads back the
 >   limits of 0042 rule 5. Its output is collected within the output limits
 >   and refused only for its missing `index.html`, which R03c's composition
 >   adds (rule 8). This proves rule 23's assumption for R03bcbb, so 0042 is
 >   not amended;
-> - a bad import exits 1 with the one message that names it;
+> - a bad import exits 1 with the one message that names it, and the same
+>   import mapped to a module of the revision by `tsconfig.json` is refused
+>   before it is staged;
 > - a call outside the filter is killed with exactly its record. The bundler
 >   cannot be made to make such a call, so an entry with no store name runs
 >   the fixture's payload under `react-v1`'s filter, and its thread calls

@@ -29,6 +29,20 @@ pub(super) struct ExecutionProfile {
     pub(super) environment: &'static [(&'static str, &'static str)],
     /// The system call filter the bootstrap installs.
     pub(super) filter: FilterSet,
+    /// What the profile requires of its input beyond the package rules.
+    pub(super) input: InputRule,
+}
+
+/// What a profile requires of its input before it is staged.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum InputRule {
+    /// Any verified package.
+    Any,
+    /// No file that would change how the bundler resolves an import (decision 0058 rule 2): the
+    /// pinned packages of the tool root are the only ones a build can import. Only the profiles of
+    /// the test build and the `enforcement-fixture` build use it.
+    #[cfg(any(test, feature = "enforcement-fixture"))]
+    FixedResolution,
 }
 
 /// The name of the fixture execution profile (decision 0057 rule 2).
@@ -46,6 +60,7 @@ pub(super) const FIXTURE_EXECUTION: ExecutionProfile = ExecutionProfile {
     arguments: &[],
     environment: &[],
     filter: FilterSet::Fixture,
+    input: InputRule::Any,
 };
 
 /// The name of the React profile (decision 0058 rule 1).
@@ -70,6 +85,7 @@ pub(super) const REACT_V1: ExecutionProfile = ExecutionProfile {
     arguments: BUNDLER_ARGUMENTS,
     environment: BUNDLER_ENVIRONMENT,
     filter: FilterSet::ReactV1,
+    input: InputRule::FixedResolution,
 };
 
 /// Every profile, in no particular order. Names and identities are unique.
@@ -95,6 +111,7 @@ pub(super) const MEASUREMENT: ExecutionProfile = ExecutionProfile {
     arguments: BUNDLER_ARGUMENTS,
     environment: BUNDLER_ENVIRONMENT,
     filter: FilterSet::Measure,
+    input: InputRule::FixedResolution,
 };
 
 /// The `react-v1` filter check (slice R03bcbb): the fixture's payload under `react-v1`'s filter,
@@ -112,6 +129,7 @@ pub(super) const REACT_V1_FILTER_CHECK: ExecutionProfile = ExecutionProfile {
     arguments: &[],
     environment: &[],
     filter: FilterSet::ReactV1,
+    input: InputRule::Any,
 };
 
 /// The entries that are no profile: no job can name them.
