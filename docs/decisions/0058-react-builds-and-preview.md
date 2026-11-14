@@ -64,7 +64,7 @@ R03f are not**. Roadmap: R03.
 > **Note, 2026-11-14 (R03bca).** `scripts/tools/package-root.sh SERVER`
 > assembles `/opt/artifree/tools/<version>` from the version that
 > `SERVER --version` names. It installs the pinned launcher and its licence,
-> the stripped server as the bootstrap, their libraries and licences, and
+> the stripped server as the bootstrap with its libraries and licences, and
 > the manifest, and then loads the profile `artifree-launcher-<version>`.
 > It refuses a root that exists. `prepare.sh` sources it, checks that the
 > job's server names the workspace version, and adds the fixture, the
@@ -73,6 +73,21 @@ R03f are not**. Roadmap: R03.
 > Admission checks the root's ancestors after the launcher and the fixture,
 > and checks every entry during the manifest walk; a failure of either
 > refuses as `ToolRootUnprotected`.
+
+> **Note, 2026-11-14 (launcher libraries).** Rule 19 said the script
+> packages "the libraries they load", meaning the launcher and the
+> bootstrap. That fits only the bootstrap. The launcher runs on the host,
+> outside the sandbox, and the host's loader resolves its libraries from the
+> host's `/lib`. Copies in the root would be listed in the manifest but never
+> loaded. Loading them would mean starting the launcher through the root's
+> loader, and then the AppArmor profile, which attaches by the launcher's
+> path, would no longer apply. So the root holds the libraries that run
+> inside the sandbox: the bootstrap's, and those of every program the
+> sandbox runs. The launcher's libraries are the host's, kept current by the
+> host's package updates, like the kernel it relies on. The launcher binary
+> itself stays pinned in the root. A later statically linked launcher may
+> bring its libraries into the root; that would be a new decision. Rule 19 is
+> reworded to match.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),
@@ -296,7 +311,8 @@ stands.
     version, download URL, SHA-256 and licence. The script assembles the
     whole root the provider admits, as `scripts/enforcement/prepare.sh` does
     for the fixture: the pinned launcher and its licence, the server binary
-    as the bootstrap, the libraries they load, the bundler, the packages,
+    as the bootstrap, the libraries that run inside the sandbox (the
+    launcher runs on the host and loads the host's), the bundler, the packages,
     the licences and the manifest, with the owner and modes the provider
     checks, and the AppArmor launcher profile the supported host needs for
     unprivileged user namespaces. The root's path carries a version that the
