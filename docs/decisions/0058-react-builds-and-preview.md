@@ -7,8 +7,8 @@ packaged bundler and its measurement), R03bcbb (the `react-v1` profile in
 the build with `enforcement-fixture`), R03ca (the store of builds and
 diagnostics), R03cb (the worker's composition, diagnostics and failures),
 R03cc (build tickets, the `/b/` route and the head status, below the
-wire) and R03cda (the execution readiness, schema 16) are implemented,
-R03cdb to R03f are not**. Roadmap: R03.
+wire), R03cda (the execution readiness, schema 16) and R03cdb (the
+claim deadline) are implemented, R03d to R03f are not**. Roadmap: R03.
 
 > **Note, 2026-11-14 (slices).** R03b is split into R03ba, R03bb and R03bc,
 > and rule 5 moves to R03f. A release build compiles no attempt, worker port,
@@ -518,6 +518,30 @@ R03cdb to R03f are not**. Roadmap: R03.
 >   cannot be read reports `ready: false`, since no build can start then,
 >   and keeps the server's worker status. The web and the CLI do not show
 >   the readiness yet.
+
+> **Note, 2026-11-15 (R03cdb).** The deadline is implemented as the split
+> note describes it.
+>
+> - `BuildStore::expire_unclaimed` ends, in one write transaction, each
+>   queued `run_profile` job of the given build profiles that:
+>   - was enqueued ten minutes or more before now (`CLAIM_DEADLINE_MS`);
+>   - has no attempt row;
+>   - has its artifact in place;
+>   - belongs to an enabled actor;
+>     and only while no `execution_workers` row is within the readiness
+>     window of now.
+> - A read decides first whether any job qualifies, so an idle poll takes
+>   no write lock.
+> - Each end is recorded through the job-change recording, which keeps
+>   `run_profile` out of the change feed until R03d. The worker reports
+>   each end as a settled claim event.
+> - Every worker's loop calls it after asking for capacity and before the
+>   claim. An execution worker given capacity has therefore marked itself
+>   seen first and ends nothing; it claims the old job instead.
+> - A worker without the build store, or a build that knows no build
+>   profile (a release build until R03f), ends nothing.
+> - A running job always has an attempt row, so the queued-state
+>   condition and the attempt condition guard it twice.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),
