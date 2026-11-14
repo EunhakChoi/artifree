@@ -195,6 +195,8 @@ in the Rust core.
 | `GET /v1/artifacts/{id}/jobs`                                                      | One artifact's jobs, newest first, pages                |
 | `GET /v1/jobs`                                                                     | The actor's jobs, newest first, pages                   |
 | `GET /v1/jobs/{id}`                                                                | One job: state, attempts, result or failure             |
+| `GET /v1/artifacts/{id}/builds/{profile}`                                          | Latest build and the head revision's build status       |
+| `POST /v1/artifacts/{id}/revisions/{n}/builds/{profile}/previews`                  | Short-lived link to a revision's build                  |
 | `POST /v1/jobs/{id}/cancel`                                                        | Stop a job (`Idempotency-Key`); not a rollback          |
 | `GET /v1/artifacts/{id}/data`                                                      | Read your application data at a `?path=`                |
 | `PUT /v1/artifacts/{id}/data`                                                      | Replace a value (`Idempotency-Key`, base version)       |

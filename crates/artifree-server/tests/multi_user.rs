@@ -111,6 +111,13 @@ impl Harness {
                 concurrent: 64,
             },
             change_streams: changes::DEFAULT_STREAMS_PER_ACTOR,
+            // The build routes answer `profile_unknown` before anything else on a
+            // build that cannot build `react-v1`; this server can, in every build.
+            build_profiles: vec![
+                "react-v1"
+                    .parse()
+                    .unwrap_or_else(|error| panic!("the profile is invalid: {error}")),
+            ],
             ..Settings::default()
         };
         adjust(&mut settings);
@@ -488,6 +495,7 @@ impl Ids {
             ("agent_secret", self.agent_secret.clone()),
             ("sha", self.sha.clone()),
             ("path", "notes.txt".to_owned()),
+            ("profile", "react-v1".to_owned()),
             ("participant", self.participant.to_string()),
             ("epoch", self.epoch.to_string()),
         ]
@@ -791,6 +799,11 @@ enum Holder {
     /// Closing is idempotent: the holder gets a success, and anyone else the
     /// same success, which closes nothing of the holder's.
     Closes,
+    /// The holder's revision has no build, since no worker runs here: the
+    /// holder is told the build is missing (`404`), as anyone is for names
+    /// nobody holds. The answer to a holder with a build is proven in
+    /// `build_status_api.rs`.
+    Unbuilt,
 }
 
 /// What a caller of the isolation table holds.
@@ -838,7 +851,7 @@ const ROOM_ROUTE: &str = "/v1/runtime-sessions/{session}/artifacts/{artifact}/ro
     reason = "A table of every route reads best as one list."
 )]
 fn http_cases() -> Vec<Case> {
-    use Holder::{Closes, Purges, Reaches, Succeeds};
+    use Holder::{Closes, Purges, Reaches, Succeeds, Unbuilt};
     vec![
         case("show", "GET", "/v1/artifacts/{artifact}", None, Succeeds),
         case(
@@ -930,6 +943,20 @@ fn http_cases() -> Vec<Case> {
             "preview",
             "POST",
             "/v1/artifacts/{artifact}/revisions/2/previews",
+            None,
+            Succeeds,
+        ),
+        case(
+            "build preview",
+            "POST",
+            "/v1/artifacts/{artifact}/revisions/2/builds/{profile}/previews",
+            None,
+            Unbuilt,
+        ),
+        case(
+            "build status",
+            "GET",
+            "/v1/artifacts/{artifact}/builds/{profile}",
             None,
             Succeeds,
         ),
@@ -1508,6 +1535,15 @@ async fn the_holder_is_not_refused(harness: &Harness, alice: &Person, ids: &Ids)
                 reply.status,
                 reply.text
             ),
+            Holder::Unbuilt => assert_eq!(
+                reply.status,
+                StatusCode::NOT_FOUND,
+                "alice: {} ({} {}): {}",
+                case.name,
+                case.method,
+                case.route,
+                reply.text
+            ),
         }
     }
     Ok(())
@@ -1854,17 +1890,6 @@ fn tool_cases(ids: &Ids) -> Vec<(&'static str, Value)> {
             json!({ "artifact_id": artifact, "asset_id": ids.asset,
                     "base_asset_version": 1, "idempotency_key": "tool-asset-00002" }),
         ),
-        ("list_jobs", json!({ "artifact_id": artifact })),
-        ("get_job", json!({ "job_id": ids.job })),
-        (
-            "enqueue_job",
-            json!({ "artifact_id": artifact, "revision": 1, "kind": "verify_revision",
-                    "idempotency_key": "tool-job-00001" }),
-        ),
-        (
-            "cancel_job",
-            json!({ "job_id": ids.job, "idempotency_key": "tool-cancel-0001" }),
-        ),
         (
             "set_data",
             json!({ "artifact_id": artifact, "path": "notes", "base_data_version": 1,
@@ -1915,6 +1940,32 @@ fn tool_cases(ids: &Ids) -> Vec<(&'static str, Value)> {
             "acknowledge_handoff",
             json!({ "session_id": ids.agent, "session_secret": ids.agent_secret,
                     "delivery_id": ids.handoff }),
+        ),
+    ]
+    .into_iter()
+    .chain(job_tool_cases(ids))
+    .collect()
+}
+
+/// The tools of jobs and builds, with their arguments for the names `ids`
+/// holds.
+fn job_tool_cases(ids: &Ids) -> Vec<(&'static str, Value)> {
+    let artifact = &ids.artifact;
+    vec![
+        ("list_jobs", json!({ "artifact_id": artifact })),
+        ("get_job", json!({ "job_id": ids.job })),
+        (
+            "enqueue_job",
+            json!({ "artifact_id": artifact, "revision": 1, "kind": "verify_revision",
+                    "idempotency_key": "tool-job-00001" }),
+        ),
+        (
+            "cancel_job",
+            json!({ "job_id": ids.job, "idempotency_key": "tool-cancel-0001" }),
+        ),
+        (
+            "get_build_status",
+            json!({ "artifact_id": artifact, "profile": "react-v1" }),
         ),
     ]
 }

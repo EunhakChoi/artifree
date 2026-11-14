@@ -8,8 +8,9 @@ the build with `enforcement-fixture`), R03ca (the store of builds and
 diagnostics), R03cb (the worker's composition, diagnostics and failures),
 R03cc (build tickets, the `/b/` route and the head status, below the
 wire), R03cda (the execution readiness, schema 16), R03cdb (the
-claim deadline) and R03da (the public kind, contract 0.30.0) are
-implemented, R03db, R03e and R03f are not**.
+claim deadline), R03da (the public kind, contract 0.30.0) and R03db
+(build tickets and the head status on the wire, contract 0.31.0) are
+implemented, R03e and R03f are not**.
 Roadmap: R03.
 
 > **Note, 2026-11-14 (slices).** R03b is split into R03ba, R03bb and R03bc,
@@ -671,6 +672,36 @@ Roadmap: R03.
 >   the page, so a build that fails meanwhile can empty an older job's
 >   diagnostics in that answer, as rule 13 empties them for every later
 >   read.
+
+> **Note, 2026-11-15 (R03db).** Build tickets and the head status are on
+> the wire as the R03d split note describes them, with these choices.
+>
+> - One check decides which profiles a request may name, for the enqueue
+>   of a build, a build preview and the head status alike
+>   (`artifree_core::jobs::require_build_profile`): `react-v1`, where the
+>   server's build profiles hold it. It runs before anything is read, so a
+>   profile that is not a build profile answers `profile_unknown` whatever
+>   the artifact is, and the name is not quoted back. An artifact that
+>   cannot be read is then `not_found`, as is a revision without that
+>   build, at issue.
+> - `BuildStatus` is one closed object: `profile`, `head_revision`,
+>   `latest_build_revision` when there is a latest build, `status`, and
+>   `job_id`, `failure` and `diagnostics` only where the split note puts
+>   them. The client refuses any other combination, and a latest build
+>   newer than the head, as an invalid response.
+> - MCP's `create_preview` takes `profile`; without it the tool previews
+>   the revision's files as before. `get_build_status` is a read tool.
+> - The CLI's `artifact preview --build <profile>` previews the current
+>   revision's build unless `--revision` names another, as the source
+>   preview does; a current revision without a build is `not_found`, and
+>   `artifact build-status` names the latest build to preview instead.
+> - The isolation tables cover both routes and the tool: another user
+>   gets the answer for an artifact nobody holds. The holder's build
+>   preview there is `not_found`, since no worker publishes a build in
+>   that test; the holder's build preview is proven with a published
+>   build in `build_status_api.rs` and through MCP.
+> - The web request gate still knows only the source preview route; the
+>   web's build action, status and diagnostics are R03e.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),

@@ -6,8 +6,9 @@
 //! serving when access ends because every file read checks it again. The
 //! head status gives a failed job's diagnostics, which can name source text,
 //! only to a caller who may read the head revision, which is the job's
-//! (rule 13). The job reads show a failed job's diagnostics (slice R03da);
-//! the build preview and the head status reach the wire in slice R03db.
+//! (rule 13). The job reads show a failed job's diagnostics (slice R03da),
+//! and the API, MCP and the CLI issue build previews and read the head
+//! status (slice R03db).
 
 use artifree_domain::SourceRevision;
 use artifree_domain::identity::{ActorId, ArtifactId};
