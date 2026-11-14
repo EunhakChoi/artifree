@@ -9,13 +9,10 @@ use std::time::Duration;
 use artifree_domain::job::{AttemptState, JobId, JobState, Revocation};
 
 use super::recovery_support::{
-    keeps_attempts, pause_launch, record_path, restored_copy, wait_marker,
+    QUARANTINE_FILE, keeps_attempts, pause_launch, record_path, restored_copy, wait_marker,
 };
 use super::{DEADLINE, LEASE_3, Scratch, Store, TestResult, Worker, poll, within};
 
-/// The persisted quarantine file of an execution directory. Its lines are the tag, then
-/// `reason=<word>`.
-const QUARANTINE_FILE: &str = "quarantine";
 /// The stderr line of a worker that refuses its work because the execution is quarantined.
 const REFUSAL: &str = "execution unavailable: operator action is required";
 /// The child group that makes the attempt group's removal fail once the group is seen empty.

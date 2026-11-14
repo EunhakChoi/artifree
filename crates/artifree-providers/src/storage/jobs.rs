@@ -1143,10 +1143,6 @@ impl JobStore for SqliteStore {
     // identity, and a supported restore renews it (decision 0027, rule 7).
     fn database_identity(&self) -> Result<FeedId, JobStoreError> {
         let connection = self.connect()?;
-        let feed: Vec<u8> = connection
-            .query_row("SELECT id FROM feed", [], |row| row.get(0))
-            .map_err(unavailable)?;
-        let bytes: [u8; 16] = feed.try_into().map_err(|_| corrupt("feed id length"))?;
-        Ok(FeedId::from_random(bytes))
+        Ok(super::read_feed_id(&connection)?)
     }
 }

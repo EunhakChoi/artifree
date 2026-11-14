@@ -16,12 +16,29 @@ use artifree_domain::MetadataRevision;
 use artifree_domain::identity::{ArtifactId, RequestKey};
 use artifree_domain::job::{AttemptIdentity, JobId};
 use artifree_ports::job_store::{AttemptRow, JobStore};
+use artifree_ports::user_store::UserStore;
 use artifree_providers::backup::{backup, restore};
+use artifree_providers::tokens::SqliteTokenStore;
 
 use super::{
     ATTACH, BIN, DEADLINE, STEP, Scratch, Store, TestResult, Worker, enter_harness, owner, parsed,
     payload_processes, poll, private_dir, read_lines, within, worker_group,
 };
+
+/// The persisted quarantine file of an execution directory (0056, amendment of 2026-11-14). Its
+/// lines are the tag, then `reason=<word>`.
+pub(super) const QUARANTINE_FILE: &str = "quarantine";
+/// The time that a disable records. Only whether the owner is disabled matters to the store.
+const DISABLED_AT: &str = "2026-11-14T00:00:00Z";
+
+/// Disables the case's owner when `disabled` is true and enables it again when it is false,
+/// through the token store's user port. Each change raises the owner's state generation
+/// (decision 0042 rule 6).
+pub(super) fn set_disabled(store: &Store, disabled: bool) -> TestResult {
+    SqliteTokenStore::open(&store.path)?
+        .set_disabled(&owner()?, disabled.then_some(DISABLED_AT))?;
+    Ok(())
+}
 
 /// The file in the execution directory that carries the worker's pause line: `<phase> hold`, or
 /// `<phase> stall <ms>`.
@@ -47,8 +64,8 @@ impl Scratch {
 
 impl Worker {
     /// Starts `worker run` on the data directory `data` and the execution directory `execution`,
-    /// with `extra` added, as the only process of a new child group of the unit. It is
-    /// `Worker::spawn` for directories that are not the case's own.
+    /// with `extra` added, as the only process of a new child group of the unit. `Worker::spawn`
+    /// calls it with the case's own directories.
     pub(super) fn spawn_in(
         data: &Path,
         execution: &Path,

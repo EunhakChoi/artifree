@@ -145,10 +145,20 @@ pub enum Step {
     Released(JobRecord),
     /// The worker lost the lease and wrote nothing.
     LeaseLost(JobId),
-    /// A `run_profile` attempt ended without an observed cleanup: nothing was
-    /// written, the attempt stays unsettled, and the provider is quarantined
-    /// (decision 0057 rules 10 and 19).
-    Unsettled(JobId),
+    /// A `run_profile` attempt ended without an observed cleanup: the attempt
+    /// stays unsettled, the provider is quarantined, and the attempt was marked
+    /// `cleanup_pending` (decision 0057 rules 10 and 19). When `marked` is
+    /// false that write failed, and the caller writes it again with
+    /// [`JobStore::mark_cleanup_pending`] until it succeeds, so that every
+    /// worker of the store sees the row.
+    Unsettled {
+        /// The job of the attempt, which stays `running`.
+        job: JobId,
+        /// The attempt whose cleanup was not observed.
+        attempt: AttemptIdentity,
+        /// Whether the attempt was marked `cleanup_pending`.
+        marked: bool,
+    },
 }
 
 /// How the verification of a claimed job ended.
@@ -457,8 +467,15 @@ fn run_profile<S: ArtifactStore + JobStore>(
         Err(failure) => return settle_and_fail(claim, capacity, failure),
     };
     // The record of the attempt names the database the claim was made in
-    // (decision 0042 rule 6).
-    let database = claim.store.database_identity()?;
+    // (decision 0042 rule 6). Without it no record can be written, so the attempt
+    // is settled and the job failed, as a failed input read is.
+    let database = match claim.store.database_identity() {
+        Ok(database) => database,
+        Err(JobStoreError::Unavailable(_)) => {
+            return settle_and_fail(claim, capacity, JobFailure::StorageUnavailable);
+        }
+        Err(_) => return settle_and_fail(claim, capacity, JobFailure::Internal),
+    };
     let run = ProfileRun {
         job: &claim.job.id,
         fence: claim.lease.fence,
@@ -487,9 +504,13 @@ fn run_profile<S: ArtifactStore + JobStore>(
         // The record stays and the provider is quarantined; the row becomes
         // `cleanup_pending`, which no worker settles (decision 0057 rules 10 and
         // 19). Nothing else is written, and the capacity, with its lock, is
-        // dropped here.
-        claim.store.mark_cleanup_pending(&attempt)?;
-        return Ok(Step::Unsettled(claim.lease.job.clone()));
+        // dropped here. A failed mark is reported, for the caller to write again.
+        let marked = claim.store.mark_cleanup_pending(&attempt).is_ok();
+        return Ok(Step::Unsettled {
+            job: claim.lease.job.clone(),
+            attempt,
+            marked,
+        });
     }
     let settled = settle_record(claim.store, claim.clock, &attempt)?;
     drop(capacity);

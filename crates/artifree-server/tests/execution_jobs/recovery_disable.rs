@@ -8,19 +8,16 @@ use std::error::Error;
 
 use artifree_domain::identity::StateGeneration;
 use artifree_domain::job::{AttemptState, JobId, JobState, Revocation};
-use artifree_providers::tokens::SqliteTokenStore;
 
 use super::recovery_support::{
-    attempt_rows, clear_pause, pause_launch, restored_copy, wait_marker,
+    attempt_rows, clear_pause, pause_launch, restored_copy, set_disabled, wait_marker,
 };
 use super::{
-    DEADLINE, LEASE_3, OWNER, Scratch, Store, TestResult, Worker, cancel_and_settle, owner, within,
+    DEADLINE, LEASE_3, OWNER, Scratch, Store, TestResult, Worker, cancel_and_settle, within,
 };
 
 /// The environment variable that names the across case of one job test: `restart` or `restore`.
 const ACROSS: &str = "ARTIFREE_ACROSS";
-/// The time that a disable records. Only whether the owner is disabled matters to the store.
-const DISABLED_AT: &str = "2026-11-14T00:00:00Z";
 /// The pause that stalls an attempt at collecting for four seconds, which is long enough for a
 /// disable and an enable, and short of the thirty-second default lease.
 const COLLECTING_STALL: &str = "collecting stall 4000";
@@ -45,16 +42,6 @@ fn across_case(name: &str) -> Result<Across, Box<dyn Error>> {
         "restore" => Across::Restore,
         other => return Err(format!("{ACROSS} names no across case: {other}").into()),
     })
-}
-
-/// Disables the owner when `disabled` is true and enables it when it is false. The token store
-/// makes each change, and each change raises the owner's state generation (0042 rule 6).
-fn set_disabled(store: &Store, disabled: bool) -> TestResult {
-    use artifree_ports::user_store::UserStore;
-
-    let at: Option<&str> = disabled.then_some(DISABLED_AT);
-    SqliteTokenStore::open(&store.path)?.set_disabled(&owner()?, at)?;
-    Ok(())
 }
 
 /// The owner's state generation as the store holds it now.

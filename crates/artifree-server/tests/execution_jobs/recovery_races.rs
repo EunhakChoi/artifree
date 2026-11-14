@@ -24,11 +24,9 @@ use artifree_domain::SourceRevision;
 use artifree_domain::identity::{ArtifactId, RequestKey, Title, UnixMillis};
 use artifree_domain::job::{AttemptState, JobId, JobState, ProfileName, Revocation};
 use artifree_domain::package::{FilePackage, PackagePath};
-use artifree_ports::user_store::UserStore;
-use artifree_providers::tokens::SqliteTokenStore;
 
 use super::recovery_support::{
-    attempt_rows, clear_pause, pause_launch, restored_copy, set_trashed, wait_marker,
+    attempt_rows, clear_pause, pause_launch, restored_copy, set_disabled, set_trashed, wait_marker,
     wait_no_payload,
 };
 use super::{
@@ -44,8 +42,6 @@ const HOLD_FILE: &str = "hold";
 const PURGE_RETURN: Duration = Duration::from_secs(5);
 /// How long the publication case holds the collected output, past the trash and the recovery.
 const COLLECT_STALL: Duration = Duration::from_secs(4);
-/// The time that a disable records. The store keeps it as given.
-const DISABLED_AT: &str = "2026-11-04T00:00:00Z";
 
 /// The point of an attempt's life at which its artifact is trashed and recovered at once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,14 +129,6 @@ fn enqueue_on(store: &Store, artifact: &ArtifactId, name: &str) -> Result<JobId,
         SystemClock.now(),
     )?;
     Ok(receipt.job.id)
-}
-
-/// Disables the case's user, or enables it again, through the token store's user port. A change
-/// of state raises the actor's generation (decision 0036).
-fn set_disabled(store: &Store, disabled: bool) -> TestResult {
-    SqliteTokenStore::open(&store.path)?
-        .set_disabled(&owner()?, disabled.then_some(DISABLED_AT))?;
-    Ok(())
 }
 
 /// Checks that the one attempt of `job` is an unsettled tombstone: `cleanup_pending`, revoked as

@@ -21,7 +21,7 @@ use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, channel};
@@ -285,32 +285,7 @@ impl Worker {
     /// Starts `worker run` on `scratch`, with `extra` added, as the only process of a new child
     /// group of the unit.
     fn spawn(scratch: &Scratch, extra: &[&str]) -> Result<Self, Box<dyn Error>> {
-        let group = worker_group(&enter_harness()?)?;
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg(ATTACH)
-            .arg("sh")
-            .arg(group.join("cgroup.procs"))
-            .arg(BIN)
-            .args(["worker", "run", "--poll-ms", "50", "--data-dir"])
-            .arg(scratch.data())
-            .arg("--execution-dir")
-            .arg(scratch.execution())
-            .args(extra)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        let stdout = child.stdout.take().ok_or("the worker has no stdout")?;
-        let stderr = child.stderr.take().ok_or("the worker has no stderr")?;
-        Ok(Self {
-            child,
-            group,
-            stdout_lines: read_lines(stdout),
-            stderr_lines: read_lines(stderr),
-            stdout: String::new(),
-            stderr: String::new(),
-        })
+        Self::spawn_in(&scratch.data(), &scratch.execution(), extra)
     }
 
     /// Moves every line the threads have read so far into `stdout` and `stderr`.

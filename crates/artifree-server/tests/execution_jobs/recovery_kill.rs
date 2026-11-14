@@ -11,7 +11,8 @@ use artifree_domain::job::{AttemptState, JobId, JobState};
 use artifree_ports::job_store::{AttemptRow, JobStore};
 
 use super::recovery_support::{
-    attempt_rows, clear_pause, pause_launch, record_path, wait_marker, wait_no_payload,
+    QUARANTINE_FILE, attempt_rows, clear_pause, pause_launch, record_path, wait_marker,
+    wait_no_payload,
 };
 use super::{
     LEASE_3, Scratch, Store, TestResult, Worker, group_name, payload_processes, runs_the_payload,
@@ -35,8 +36,6 @@ const KILL_PHASES: [&str; 7] = [
 /// The start of the operator's text on stderr, which a worker prints when it refuses to claim
 /// because the execution directory is quarantined (decision 0057 rule 19).
 const OPERATOR_TEXT: &str = "operator action is required";
-/// The quarantine file of an execution directory (0056, amendment of 2026-11-14).
-const QUARANTINE_FILE: &str = "quarantine";
 
 /// The phase that the first case pauses at, named by `ARTIFREE_KILL_PHASE`. A name that is not
 /// one of `KILL_PHASES` is an error, so that a case never runs without its phase.
