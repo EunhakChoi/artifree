@@ -33,11 +33,12 @@ fn fresh(
         .map_err(|error| unavailable(error).into())
 }
 
-/// Deletes the rows last seen more than an hour before `now`.
+/// Deletes the rows last seen more than an hour before `now`, or more than an
+/// hour after it (a clock that stepped back).
 fn prune(transaction: &Transaction<'_>, now: UnixMillis) -> Result<(), JobStoreError> {
     transaction
         .execute(
-            "DELETE FROM execution_workers WHERE last_seen < ?1 - ?2",
+            "DELETE FROM execution_workers WHERE last_seen < ?1 - ?2 OR last_seen > ?1 + ?2",
             params![now.0, SEEN_PRUNE_MS],
         )
         .map_err(unavailable)?;
@@ -89,6 +90,19 @@ impl ExecutionPresence for SqliteStore {
     }
 
     fn forget_worker(&self, worker: &WorkerId) -> Result<(), JobStoreError> {
+        // A refused worker polls again and again; without a row it takes no
+        // write lock.
+        let present: bool = self
+            .connect()?
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM execution_workers WHERE worker = ?1)",
+                [worker.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(unavailable)?;
+        if !present {
+            return Ok(());
+        }
         self.write(|transaction| {
             transaction
                 .execute(
@@ -103,7 +117,8 @@ impl ExecutionPresence for SqliteStore {
     fn execution_ready(&self, now: UnixMillis) -> Result<bool, JobStoreError> {
         self.connect()?
             .query_row(
-                "SELECT EXISTS (SELECT 1 FROM execution_workers WHERE last_seen >= ?1 - ?2)",
+                "SELECT EXISTS (SELECT 1 FROM execution_workers
+                     WHERE last_seen BETWEEN ?1 - ?2 AND ?1 + ?2)",
                 params![now.0, READY_WINDOW_MS],
                 |row| row.get(0),
             )

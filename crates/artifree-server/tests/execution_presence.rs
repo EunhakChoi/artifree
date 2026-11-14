@@ -87,7 +87,8 @@ fn row(worker: &str, at: i64) -> (String, i64) {
 }
 
 /// Rule 20: a worker is ready from the time it was seen until five minutes
-/// after it, and a row seen later than now counts too.
+/// after it. A row up to five minutes later than now (a clock that stepped
+/// back) counts too, and one further ahead does not.
 #[test]
 fn a_worker_is_ready_for_five_minutes_after_it_was_seen() -> TestResult {
     let dir = TempDir::new()?;
@@ -97,6 +98,8 @@ fn a_worker_is_ready_for_five_minutes_after_it_was_seen() -> TestResult {
 
     store.mark_seen(&worker, UnixMillis(SEEN))?;
     for (at, ready) in [
+        (SEEN - READY_WINDOW_MS - 1, false),
+        (SEEN - READY_WINDOW_MS, true),
         (SEEN - 1, true),
         (SEEN, true),
         (SEEN + READY_WINDOW_MS, true),
@@ -156,6 +159,12 @@ fn a_write_prunes_rows_older_than_an_hour() -> TestResult {
         "an hour old is kept"
     );
 
+    // A row more than an hour ahead of now, left by a clock that stepped back,
+    // is pruned as well.
+    Connection::open(dir.database())?.execute(
+        "INSERT INTO execution_workers (worker, last_seen) VALUES ('execution-d', ?1)",
+        [SEEN + 3 * SEEN_PRUNE_MS],
+    )?;
     // `execution-b`'s row is stale, so this writes, and the write prunes.
     let pruning = SEEN + SEEN_PRUNE_MS + 1;
     store.mark_seen(&parsed("execution-b")?, UnixMillis(pruning))?;
@@ -275,6 +284,22 @@ fn a_lease_renewal_keeps_the_workers_row_fresh() -> TestResult {
     claimed.renew(later)?;
     assert_eq!(rows(&claimed.dir)?, [row("execution-a", later)]);
     assert!(claimed.store.execution_ready(UnixMillis(later))?);
+
+    // A checkpoint that tells the guardian to stop still marks the worker
+    // seen: it is alive and cleaning up.
+    Connection::open(claimed.dir.database())?.execute(
+        "UPDATE jobs SET cancel_requested = 1 WHERE id = ?1",
+        [claimed.lease.job.as_str()],
+    )?;
+    let stopping = later + 2 * READY_WINDOW_MS;
+    let answer = claimed.store.checkpoint_attempt(
+        &claimed.lease,
+        &claimed.attempt,
+        UnixMillis(stopping),
+        LEASE_MS,
+    )?;
+    assert!(matches!(answer, CheckpointAnswer::Stop(_)), "{answer:?}");
+    assert_eq!(rows(&claimed.dir)?, [row("execution-a", stopping)]);
     Ok(())
 }
 

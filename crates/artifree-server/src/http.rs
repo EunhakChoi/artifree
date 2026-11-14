@@ -1666,8 +1666,8 @@ async fn show_job(
 async fn show_background(
     State(state): State<AppState>,
     Authenticated(_): Authenticated,
-) -> Result<Json<BackgroundStatus>, ApiError> {
-    Ok(Json(operations::background(&state).await?))
+) -> Json<BackgroundStatus> {
+    Json(operations::background(&state).await)
 }
 
 /// Asks to stop a job. The body must be `{}`.

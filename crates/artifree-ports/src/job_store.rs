@@ -656,20 +656,24 @@ pub const SEEN_PRUNE_MS: i64 = 60 * 60 * 1000;
 /// 20, slice R03cda). The rows hold a worker identity and a time, nothing else.
 ///
 /// A worker is ready when its row was last seen within [`READY_WINDOW_MS`]
-/// before now, or later than now. A renewal of a running `run_profile` job's
-/// lease also marks its worker seen, in the renewal's transaction.
+/// of now, before or after it (a row later than now follows a clock that
+/// stepped back). Each checkpoint of a running `run_profile` job's attempt
+/// also marks its worker seen, in the checkpoint's transaction. Only a worker
+/// that can run a build writes a row.
 pub trait ExecutionPresence {
     /// Marks `worker` seen at `now`, when its row is missing, was last seen
     /// [`SEEN_REWRITE_MS`] or more before `now`, or was last seen later than
     /// `now`. The write also deletes every row last seen more than
-    /// [`SEEN_PRUNE_MS`] before `now`. A fresh row is left without a write.
+    /// [`SEEN_PRUNE_MS`] before or after `now`. A fresh row is left without a
+    /// write.
     ///
     /// # Errors
     ///
     /// [`JobStoreError::Unavailable`].
     fn mark_seen(&self, worker: &WorkerId, now: UnixMillis) -> Result<(), JobStoreError>;
 
-    /// Deletes the row of `worker`, which can no longer run anything.
+    /// Deletes the row of `worker`, which can no longer run anything. Without
+    /// a row it writes nothing.
     ///
     /// # Errors
     ///

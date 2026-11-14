@@ -1570,16 +1570,20 @@ pub(crate) async fn enqueue_job(
 
 /// What `GET /v1/background` reports: the server's own worker (decision 0055,
 /// rule 5) and whether an execution worker is ready (decision 0058 rule 20),
-/// read from the database that the execution workers share.
-pub(crate) async fn background(state: &AppState) -> Result<BackgroundStatus, ApiError> {
+/// read from the database that the execution workers share. A store that
+/// cannot be read reports no worker ready, since no build can start then, and
+/// keeps the server's own worker status, which an operator needs most while
+/// storage fails.
+pub(crate) async fn background(state: &AppState) -> BackgroundStatus {
     let now = state.clock().now();
     let ready = state
         .run(move |artifacts| artifacts.execution_ready(now))
-        .await?;
-    Ok(BackgroundStatus {
+        .await
+        .unwrap_or(false);
+    BackgroundStatus {
         worker: state.settings().worker_status.current(),
         execution: ExecutionStatus { ready },
-    })
+    }
 }
 
 pub(crate) async fn show_job(

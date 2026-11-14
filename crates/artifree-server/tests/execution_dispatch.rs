@@ -809,7 +809,7 @@ fn presence_rows(database: &Path) -> Result<Vec<(String, i64)>, Box<dyn Error>> 
 /// A worker given capacity marks itself seen, even when nothing is due.
 #[test]
 fn held_capacity_marks_the_worker_seen() -> TestResult {
-    let world = World::new()?;
+    let world = World::with(&package(INDEX_V1)?, "fixture", true)?;
     let log = Arc::new(Log::default());
     let execution = FakeExecution {
         shared: world.shared(&log),
@@ -824,10 +824,26 @@ fn held_capacity_marks_the_worker_seen() -> TestResult {
     Ok(())
 }
 
+/// A build that knows no build profile cannot run a build, so a worker of it
+/// keeps no row even while it holds capacity.
+#[test]
+fn a_worker_without_a_build_profile_keeps_no_row() -> TestResult {
+    let world = World::new()?;
+    let log = Arc::new(Log::default());
+    let execution = FakeExecution {
+        shared: world.shared(&log),
+        scene: scene(Answer::Held, Launch::Succeeds),
+    };
+    assert_eq!(run_once(&world, Some(&execution), &log)?, Step::Idle);
+    assert_eq!(capacity_asks(&log.snapshot()?), 1, "capacity was held");
+    assert_eq!(presence_rows(&world.database)?, []);
+    Ok(())
+}
+
 /// A worker refused capacity forgets its row, so it stops counting as ready.
 #[test]
 fn refused_capacity_forgets_the_workers_row() -> TestResult {
-    let world = World::new()?;
+    let world = World::with(&package(INDEX_V1)?, "fixture", true)?;
     let log = Arc::new(Log::default());
     world.store.mark_seen(&world.worker, NOW)?;
     let execution = FakeExecution {
@@ -844,7 +860,7 @@ fn refused_capacity_forgets_the_workers_row() -> TestResult {
 /// an execution port writes nothing either.
 #[test]
 fn a_busy_lock_and_a_trusted_worker_write_no_row() -> TestResult {
-    let world = World::new()?;
+    let world = World::with(&package(INDEX_V1)?, "fixture", true)?;
     let log = Arc::new(Log::default());
     let old = NOW.0 - 2 * SEEN_REWRITE_MS;
     world.store.mark_seen(&world.worker, UnixMillis(old))?;

@@ -443,5 +443,20 @@ async fn execution_ready_follows_the_last_time_a_worker_was_seen() -> TestResult
         assert_eq!(reply.status, StatusCode::OK, "{}", reply.json);
         assert_eq!(ready(&reply), json!(expected), "at {at}");
     }
+
+    // A store that cannot be read reports no worker ready, and still the
+    // server's own worker.
+    clock.0.store(SEEN, Ordering::SeqCst);
+    let database = harness.directory.join("db.sqlite3");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", database.display()));
+    }
+    std::fs::create_dir(&database)?;
+    let broken = harness.background(Some(OWNER)).await;
+    std::fs::remove_dir(&database)?;
+    let broken = broken?;
+    assert_eq!(broken.status, StatusCode::OK, "{}", broken.json);
+    assert_eq!(ready(&broken), json!(false), "an unreadable store");
+    assert_eq!(broken.json["worker"]["mode"], "none");
     Ok(())
 }

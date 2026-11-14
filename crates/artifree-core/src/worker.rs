@@ -336,10 +336,11 @@ fn run_claimed<S: ArtifactStore + JobStore>(
     let store = stores.store;
     let mut held = match profiles.execution {
         Some(execution) => {
+            // Only a worker that can run a build counts as ready (decision
+            // 0058 rule 20): a build that knows no build profile keeps no row.
             let presence = Presence {
-                store: stores.presence,
+                store: stores.presence.filter(|_| !profiles.builds.is_empty()),
                 worker,
-                now: clock.now(),
             };
             take_capacity(store, clock, execution, presence, on_claim)?
         }
@@ -403,7 +404,6 @@ fn run_claimed<S: ArtifactStore + JobStore>(
 struct Presence<'a> {
     store: Option<&'a dyn ExecutionPresence>,
     worker: &'a WorkerId,
-    now: UnixMillis,
 }
 
 /// Asks the execution port for capacity before a claim. When it holds capacity,
@@ -423,15 +423,19 @@ fn take_capacity<S: JobStore>(
         Capacity::Held(capacity) => capacity,
         Capacity::Busy => return Ok(None),
         Capacity::Refused(detail) => {
+            // The refusal is reported before the row is touched, so a failed
+            // write cannot hide the operator's text.
+            on_claim(ClaimEvent::Refused(detail));
             if let Some(rows) = presence.store {
                 rows.forget_worker(presence.worker)?;
             }
-            on_claim(ClaimEvent::Refused(detail));
             return Ok(None);
         }
     };
+    // The time is read once capacity is held, after the reconciliation the
+    // port ran, so the row is not dated earlier than the worker was seen.
     if let Some(rows) = presence.store {
-        rows.mark_seen(presence.worker, presence.now)?;
+        rows.mark_seen(presence.worker, clock.now())?;
     }
     for attempt in capacity.reconciled() {
         match store.settle_attempt(attempt, clock.now()) {

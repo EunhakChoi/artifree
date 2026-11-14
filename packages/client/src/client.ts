@@ -1197,8 +1197,11 @@ export class ArtifreeClient {
   /**
    * The server's own worker (decision 0055): whether the server starts one,
    * whether it runs now, its restarts, its last exit and the dropped output
-   * lines. Any token the server accepts may read it. It is not in the change
-   * feed: read it when jobs are shown and again when a job stays `queued`.
+   * lines; and `execution.ready`, whether an execution worker that can run
+   * builds was seen within five minutes (decision 0058 rule 20), false also
+   * when the server cannot read its store. Any token the server accepts may
+   * read it. It is not in the change feed: read it when jobs are shown and
+   * again when a job stays `queued`.
    */
   async getBackground(options: ReadOptions = {}): Promise<BackgroundStatus> {
     return this.json('GET', '/v1/background', parseBackground, {

@@ -5,7 +5,7 @@ Date: 2026-11-14. Status: **accepted; R03a (the package rules), R03ba
 versioned, packaged and protected tool root), R03bcba (the lock list, the
 packaged bundler and its measurement), R03bcbb (the `react-v1` profile in
 the build with `enforcement-fixture`), R03ca (the store of builds and
-diagnostics), R03cb (the worker's composition, diagnostics and failures)
+diagnostics), R03cb (the worker's composition, diagnostics and failures),
 R03cc (build tickets, the `/b/` route and the head status, below the
 wire) and R03cda (the execution readiness, schema 16) are implemented,
 R03cdb to R03f are not**. Roadmap: R03.
@@ -495,21 +495,29 @@ R03cdb to R03f are not**. Roadmap: R03.
 >   - `execution_ready`.
 >     Only `run_next_with`, the worker that can hold an execution port, is
 >     given it.
-> - The worker calls them around capacity:
->   - it marks itself seen once capacity is held, before reconciliation
->     and the claim;
->   - it forgets its row at a refusal;
+> - The worker calls them around capacity, and only when its build knows a
+>   build profile, since only such a worker can run a build:
+>   - it marks itself seen once capacity is held, at the time read then,
+>     before reconciliation and the claim;
+>   - at a refusal it reports the refusal, then forgets its row (a read
+>     first, so a refused worker without a row takes no write lock);
 >   - it writes nothing when the lock is busy or it has no port.
-> - A lease renewal of a running `run_profile` job (the checkpoint) marks
->   the worker the job row names, in the renewal's transaction, under the
->   same one-minute rule.
+> - Every checkpoint of a running `run_profile` job's attempt, a stopping
+>   one included, marks the worker the job row names, in the checkpoint's
+>   transaction, under the same one-minute rule. A long cleanup therefore
+>   keeps its worker ready.
+> - A row up to five minutes later than now counts as ready, and the
+>   pruning deletes rows more than an hour before or after now, so a clock
+>   that stepped back is bounded. A worker that restarts under a new
+>   identity leaves its old row, which stops counting within five minutes.
 > - The restore that expires leases also empties the table in the same
 >   transaction.
 > - `GET /v1/background` reads the readiness at the server's clock and adds
 >   `execution: { ready }` (contract 0.29.0). The field is required, and the
->   TypeScript client refuses a body without a boolean `ready`. A store
->   failure answers 503 (`unavailable`) instead of a status without the
->   readiness. The web and the CLI do not show it yet.
+>   TypeScript client refuses a body without a boolean `ready`. A store that
+>   cannot be read reports `ready: false`, since no build can start then,
+>   and keeps the server's worker status. The web and the CLI do not show
+>   the readiness yet.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),
