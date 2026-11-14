@@ -3,9 +3,9 @@
 Date: 2026-11-14. Status: **accepted; R03a (the package rules), R03ba
 (the profile table), R03bb (the provider's verdicts), R03bca (the
 versioned, packaged and protected tool root), R03bcba (the lock list, the
-packaged bundler and its measurement) and R03bcbb (the `react-v1` profile in
-the build with `enforcement-fixture`) are implemented, R03ca to R03f are
-not**. Roadmap: R03.
+packaged bundler and its measurement), R03bcbb (the `react-v1` profile in
+the build with `enforcement-fixture`) and R03ca (the store of builds and
+diagnostics) are implemented, R03cb to R03f are not**. Roadmap: R03.
 
 > **Note, 2026-11-14 (slices).** R03b is split into R03ba, R03bb and R03bc,
 > and rule 5 moves to R03f. A release build compiles no attempt, worker port,
@@ -266,6 +266,42 @@ not**. Roadmap: R03.
 > Rule 22 already covers R03cd, which changes the trusted worker's loop, so
 > R03cd passes the enforcement job too. Rule 23 and the slice table are
 > reworded to match.
+
+> **Note, 2026-11-15 (R03ca).** The store half is implemented, and no worker
+> calls it yet. It is a port of its own, `BuildStore`, beside `JobStore`, so
+> the worker's port and its fakes are unchanged until R03cb.
+>
+> - Schema 15 is rule 9 as written. `job_diagnostics` holds a path, a line
+>   and a column together or none of them: a fixed diagnostic (a filter
+>   kill, resolver configuration) points at no file.
+> - `publish_build` makes the checks of `complete_profile_job` (0057 rule
+>   12), with the output's file and byte counts as the job's result, in the
+>   transaction that stores the build. A refusal stores no file. An existing
+>   build for the artifact, revision and profile is kept and returned
+>   (rule 10).
+> - The bound of eight removes builds oldest first by publication time,
+>   then by revision. It skips the latest build of each profile and the one
+>   being published.
+> - Only `fail_build` records rule 18's three failures; `fail_job` refuses
+>   them. `build_failed` takes up to 20 diagnostics and the other two take
+>   none. `fail_build` makes the attempt checks of publication (0057 rules 7
+>   and 12) without a binding, so a revoked attempt, a requested cancel
+>   included, stores no diagnostics.
+> - "The newest failed job" is the newest by enqueue order, the order of
+>   rule 16. When a `run_profile` job fails, by any path, the diagnostics of
+>   the artifact's jobs of that profile enqueued before it are deleted, in
+>   the transition every failure shares. A job enqueued before one that has
+>   failed already keeps none. A failure of an older revision's job enqueued
+>   later still deletes the head job's diagnostics, as rule 13 says; R03cc's
+>   head status then reports `failed` without diagnostics.
+> - The store's build and diagnostic reads return nothing for an artifact
+>   in the trash or purged, and give the rows back after a recovery. That
+>   is the store side of "Trash keeps them and serves none". Who may read a
+>   job's diagnostics is R03cc's read rule.
+> - Rule 23's assumption holds on the development host. A publication of
+>   25 MiB (six files, the package limit) took about 0.6 s in a debug build
+>   and 0.14 s in a release build, under a load average below 2, against
+>   the worker's default lease of 30 s. The test asserts half the lease.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),

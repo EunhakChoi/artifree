@@ -319,6 +319,25 @@ pub fn historical_database(path: &Path, version: i64) -> Result<(), rusqlite::Er
     connection.pragma_update(None, "user_version", version)
 }
 
+/// The version 14 build of the fixture: the version 10 database with the frozen
+/// steps 11 to 14 applied, and no row beyond the version 10 ones.
+pub fn version_14_database(path: &Path) -> Result<(), rusqlite::Error> {
+    historical_database(path, 10)?;
+    let connection = Connection::open(path)?;
+    // Step 14 rebuilds `jobs`, which other tables refer to; the version 14
+    // build ran it with foreign keys off (decision 0057 rule 14).
+    connection.pragma_update(None, "foreign_keys", false)?;
+    for step in [
+        history::STEP_11,
+        history::STEP_12,
+        history::STEP_13,
+        history::STEP_14,
+    ] {
+        connection.execute_batch(step)?;
+    }
+    connection.pragma_update(None, "user_version", 14)
+}
+
 /// Adds `fixture` data checks used after any path to the current schema.
 pub fn expected_artifact_name(version: i64) -> &'static str {
     if version >= 3 { "Renamed" } else { "Old" }

@@ -290,12 +290,13 @@ pub(super) fn copy_space(
         .map_err(unavailable)?;
     Ok(())
 }
-/// Deletes a blob only if neither source history nor any asset association needs it.
+/// Deletes a blob only if no source history, asset association or build needs it.
 fn remove_blob(transaction: &Transaction<'_>, digest: &[u8]) -> Result<(), StoreError> {
     transaction
         .execute(
             "DELETE FROM blobs WHERE digest = ?1 AND NOT EXISTS (SELECT 1 FROM revision_files WHERE
-             digest = ?1) AND NOT EXISTS (SELECT 1 FROM assets WHERE digest = ?1)",
+             digest = ?1) AND NOT EXISTS (SELECT 1 FROM assets WHERE digest = ?1)
+             AND NOT EXISTS (SELECT 1 FROM build_files WHERE digest = ?1)",
             [digest],
         )
         .map_err(unavailable)?;

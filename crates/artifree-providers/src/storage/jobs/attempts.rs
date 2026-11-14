@@ -484,6 +484,40 @@ pub(super) fn mark_cleanup_pending(
     Ok(())
 }
 
+/// Whether the attempt may end its job now (decision 0057 rule 12): it belongs
+/// to the lease's job, the binding (when one is given) names the attempt's
+/// tools, no rule 7 reason applies, and it is settled. The outer error is a
+/// storage failure; the inner one is a refusal, which the caller commits so
+/// that a revocation stored by rule 7 persists.
+pub(super) fn ending(
+    transaction: &Transaction<'_>,
+    lease: &Lease,
+    attempt: &AttemptIdentity,
+    binding: Option<ProfileBinding<'_>>,
+    now: UnixMillis,
+) -> Result<Result<(), JobStoreError>, JobStoreError> {
+    let Some(row) = read_attempt(transaction, attempt)?.filter(|row| row.job == lease.job) else {
+        return Ok(Err(JobStoreError::NotFound));
+    };
+    if binding.is_some_and(|binding| {
+        *binding.profile != row.profile || binding.tool_digest != row.tool_digest
+    }) {
+        return Ok(Err(JobStoreError::InvalidRequest(
+            "the manifest binding names other tools than the attempt",
+        )));
+    }
+    if let Some(reason) = assess(transaction, lease, &row, now)? {
+        return Ok(Err(match reason {
+            StopReason::Fence => JobStoreError::LeaseLost,
+            other => JobStoreError::Revoked(other),
+        }));
+    }
+    if row.state != AttemptState::Settled {
+        return Ok(Err(JobStoreError::AttemptUnsettled));
+    }
+    Ok(Ok(()))
+}
+
 /// Ends a `run_profile` job as succeeded with its two counts (decision 0057
 /// rule 12), when the binding names the profile and tool digest of the attempt
 /// row; a binding of other tools is refused before anything is written. The outer error is a storage failure, which rolls the transaction
@@ -497,22 +531,8 @@ pub(super) fn complete(
     counts: ProfileCounts,
     now: UnixMillis,
 ) -> Result<Result<JobRecord, JobStoreError>, JobStoreError> {
-    let Some(row) = read_attempt(transaction, attempt)?.filter(|row| row.job == lease.job) else {
-        return Ok(Err(JobStoreError::NotFound));
-    };
-    if *binding.profile != row.profile || binding.tool_digest != row.tool_digest {
-        return Ok(Err(JobStoreError::InvalidRequest(
-            "the manifest binding names other tools than the attempt",
-        )));
-    }
-    if let Some(reason) = assess(transaction, lease, &row, now)? {
-        return Ok(Err(match reason {
-            StopReason::Fence => JobStoreError::LeaseLost,
-            other => JobStoreError::Revoked(other),
-        }));
-    }
-    if row.state != AttemptState::Settled {
-        return Ok(Err(JobStoreError::AttemptUnsettled));
+    if let Err(refusal) = ending(transaction, lease, attempt, Some(binding), now)? {
+        return Ok(Err(refusal));
     }
     let count = |value: u64| i64::try_from(value).map_err(corrupt);
     transaction

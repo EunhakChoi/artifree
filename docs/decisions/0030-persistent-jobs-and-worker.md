@@ -31,6 +31,21 @@ Nothing below is an observation of the original product.
 > the artifact's jobs, asks for a verification of the revision shown, cancels
 > a job, and follows `job_changed`. A list of all jobs across artifacts and
 > the jobs of an artifact in the trash are still not shown.
+>
+> **Amended 2026-11-15 by [0058](0058-react-builds-and-preview.md), slice
+> R03ca.** Decisions 9 and 11, for `run_profile` jobs only:
+>
+> - `build_failed`, `limit_exceeded` and `output_rejected` join the stored
+>   failures and are never retried.
+> - A `build_failed` job keeps up to 20 diagnostics in `job_diagnostics`, each
+>   a message of at most 512 bytes, with or without a package path, a line
+>   and a column. A message can name source text, so these rows are the one
+>   place a job holds text from a file.
+> - Only the newest failed `run_profile` job of an artifact and profile keeps
+>   them, and a purge deletes them.
+>
+> No worker writes them before R03cb. `verify_revision` results are
+> unchanged.
 
 ## Context
 

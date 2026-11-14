@@ -856,7 +856,7 @@ fn an_orphaned_job_request_already_in_a_version_13_file_does_not_block_the_upgra
     // The orphan was there before any step ran, so no step broke it: the
     // upgrade passes and keeps the row, as it would with foreign keys on.
     let _store = SqliteStore::open(&path)?;
-    assert_eq!(user_version(&path)?, 14);
+    assert_eq!(user_version(&path)?, SCHEMA_VERSION);
     let orphans: i64 = Connection::open(&path)?.query_row(
         "SELECT count(*) FROM job_requests WHERE request_key = 'test-key-orphan'",
         [],

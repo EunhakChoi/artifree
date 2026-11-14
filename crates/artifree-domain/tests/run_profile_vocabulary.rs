@@ -184,6 +184,17 @@ fn run_profile_words_round_trip() {
         "execution_unavailable",
         JobFailure::as_str,
     );
+    assert_word(JobFailure::BuildFailed, "build_failed", JobFailure::as_str);
+    assert_word(
+        JobFailure::LimitExceeded,
+        "limit_exceeded",
+        JobFailure::as_str,
+    );
+    assert_word(
+        JobFailure::OutputRejected,
+        "output_rejected",
+        JobFailure::as_str,
+    );
     for (revocation, word) in REVOCATIONS {
         assert_word(revocation, word, Revocation::as_str);
     }
@@ -212,6 +223,16 @@ fn execution_unavailable_is_not_retryable() {
         !JobFailure::ExecutionUnavailable.is_retryable(),
         "an unknown profile cannot succeed on another attempt"
     );
+    for failure in [
+        JobFailure::BuildFailed,
+        JobFailure::LimitExceeded,
+        JobFailure::OutputRejected,
+    ] {
+        assert!(
+            !failure.is_retryable(),
+            "a build that failed fails the same way again (decision 0058 rule 18)"
+        );
+    }
     assert!(
         JobFailure::StorageUnavailable.is_retryable(),
         "storage failures stay retryable, so the retry check is not constant"

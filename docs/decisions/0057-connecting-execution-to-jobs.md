@@ -151,6 +151,14 @@ bootstrap|stub|guardian` refuses with status 2 in a build without it.
 > 19 settle, or a quarantine. Per rule 21, R02 is implemented for the fixture
 > profile only.
 
+> **Note, 2026-11-15 (0058, R03ca).** Rule 12 ("counts only") is amended for
+> a profile that publishes a build: 0058's `publish_build` makes rule 12's
+> checks in the transaction that stores the build. The job's stored result
+> is still the two counts, and they are the build's file and byte counts.
+> The build's files are stored as rows of `builds`, `build_files` and
+> `blobs`, never in the job (0058 rules 9 to 12). `complete_profile_job` is
+> unchanged for `fixture`.
+
 ## Context
 
 R02a ends with a provider that launches the repository's fixture under every

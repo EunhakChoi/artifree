@@ -2029,7 +2029,12 @@ fn job_dto(record: &JobRecord) -> Result<WireJob, ApiError> {
         Some(JobFailure::LeaseExpired) => Some(WireFailure::LeaseExpired),
         Some(JobFailure::Internal) => Some(WireFailure::Internal),
         // Only a run_profile job ends this way, and no read returns one.
-        Some(JobFailure::ExecutionUnavailable) => {
+        Some(
+            JobFailure::ExecutionUnavailable
+            | JobFailure::BuildFailed
+            | JobFailure::LimitExceeded
+            | JobFailure::OutputRejected,
+        ) => {
             return Err(ApiError::not_found("job not found"));
         }
     };
