@@ -71,6 +71,13 @@ const WORDS = {
   previewNotice:
     'Showing the build of revision 1, the latest build. Revision 2, the newest, has a build pending.',
   previewMissing: 'Revision 1 has no build.',
+  typeOption: 'React app (react, release 1)',
+  typeBadge: 'Type react, release 1',
+  catalogReading: 'Reading the built-in types…',
+  catalogFailed:
+    'The built-in types could not be read (Catalog unavailable.); one index.html can still be created.',
+  catalogFailedKept:
+    'The built-in types could not be read (Catalog unavailable.); reopen the dialog to retry, or choose one index.html.',
 };
 
 /** The build profile the tab asks for (decision 0058, rule 14). */
@@ -97,6 +104,8 @@ const RUNNERS = {
   'preview-build-unknown': checkPreviewBuildUnknown,
   'preview-build-notice': checkPreviewBuildNotice,
   'preview-build-missing': checkPreviewBuildMissing,
+  'type-create': checkTypeCreate,
+  'type-catalog-failed': checkTypeCatalogFailed,
   contract: checkContract,
 };
 
@@ -636,6 +645,291 @@ async function checkBuildQueued(world) {
     // counts against no other check's open jobs.
     if (queued !== undefined)
       await api(world.server, 'POST', `/v1/jobs/${queued.id}/cancel`, {});
+  }
+}
+
+/**
+ * The web workspace creates a react artifact from its type (decision 0059
+ * rule 14, T01b): the dialog offers the type the server lists, hides the
+ * index.html field for it, and creates revision 1 from the starter with no
+ * files sent. The artifact's page shows its type. On the x86_64 Linux release
+ * build "Build revision 1" queues a real react-v1 build, which waits since no
+ * smoke host runs an execution worker; the build preview is then shown with
+ * the status, the ticket and the build page intercepted, as the other build
+ * preview cases do.
+ */
+async function checkTypeCreate(world) {
+  const title = `Typed app ${randomUUID().slice(0, 8)}`;
+  const context = await world.browser.newContext();
+  let queued;
+  try {
+    const tab = await context.newPage();
+    tab.setDefaultTimeout(WAIT_MS);
+    // No artifact id yet: this case expects no refusal of any artifact's
+    // requests, and one it did not provoke still lands in log.unexpected.
+    const log = watch(tab, world.origin, '', world.server.content_origin);
+    const creates = [];
+    tab.on('request', (request) => {
+      if (
+        request.method() === 'POST' &&
+        new URL(request.url()).pathname === '/v1/artifacts'
+      )
+        creates.push(request.postDataJSON());
+    });
+    await tab.goto(world.origin);
+    const workspace = tab.locator('#artifacts');
+    await workspace.getByLabel('Access token').fill(world.server.token);
+    await workspace.getByRole('button', { name: 'Connect' }).click();
+    await workspace.getByRole('button', { name: 'New artifact' }).click();
+    const dialog = tab.getByRole('dialog', { name: 'New artifact' });
+    await dialog.getByLabel('Title').fill(title);
+    const start = dialog.getByLabel('Start from');
+    await expect(
+      start.getByRole('option', { name: WORDS.typeOption }),
+    ).toBeAttached({ timeout: WAIT_MS });
+    await start.selectOption({ label: WORDS.typeOption });
+    await expect(dialog.getByLabel('index.html')).toHaveCount(0);
+    await expect(dialog).toContainText(
+      'Every revision must keep index.html, src/main.tsx.',
+    );
+    // The title enabled Create, whose opacity eases in; the contrast check
+    // waits for it to settle.
+    const create = dialog.getByRole('button', { name: 'Create' });
+    await expect(create).toBeEnabled();
+    await expect(create).toHaveCSS('opacity', '1');
+    await world.checkAccessibility('type-create-dialog', tab);
+    await create.click();
+    await expect(dialog).toBeHidden({ timeout: WAIT_MS });
+    assert.deepEqual(
+      creates,
+      [{ title, type: 'react' }],
+      'The dialog sent the type and no files.',
+    );
+    await expect(
+      workspace.getByRole('heading', { name: title, exact: true }),
+    ).toBeVisible({ timeout: WAIT_MS });
+    await expect(
+      workspace.getByText(WORDS.typeBadge, { exact: true }),
+    ).toBeVisible();
+
+    const listed = await api(
+      world.server,
+      'GET',
+      `/v1/artifacts?q=${encodeURIComponent(title)}`,
+    );
+    assert.equal(listed.artifacts.length, 1, 'One artifact was created.');
+    const [artifact] = listed.artifacts;
+    assert.deepEqual(artifact.type, { id: 'react', release: 1 });
+    const revision = await api(
+      world.server,
+      'GET',
+      `/v1/artifacts/${artifact.id}/revisions/1`,
+    );
+    assert.deepEqual(
+      revision.files.map((file) => file.path),
+      ['index.html', 'src/app.css', 'src/main.tsx'],
+      'Revision 1 is the starter.',
+    );
+
+    const tabs = workspace.getByRole('tablist', { name: 'Artifact views' });
+    if (process.platform === 'linux' && process.arch === 'x64') {
+      await tabs.getByRole('tab', { name: 'Jobs', exact: true }).click();
+      const jobsPanel = workspace.getByRole('tabpanel', {
+        name: 'Jobs',
+        exact: true,
+      });
+      await jobsPanel
+        .getByRole('button', { name: 'Build revision 1', exact: true })
+        .click();
+      await expect(
+        jobRow(jobsPanel, 'Build 1').getByText('Queued', { exact: true }),
+      ).toBeVisible({ timeout: WAIT_MS });
+      [queued] = await jobsOf(world.server, artifact.id);
+      assert.equal(queued?.profile, PROFILE, 'A react-v1 build was queued.');
+    } else {
+      process.stderr.write(
+        `jobs: type-create queues no build on ${process.platform}-${process.arch}\n`,
+      );
+    }
+
+    // No smoke host runs an execution worker, so the built state and its page
+    // are given in the browser.
+    const state = {
+      status: {
+        profile: PROFILE,
+        head_revision: 1,
+        status: 'built',
+        latest_build_revision: 1,
+      },
+      tickets: [1],
+      asked: [],
+    };
+    await interceptBuildPreview(tab, world.server, artifact.id, state);
+    await tabs.getByRole('tab', { name: 'Preview', exact: true }).click();
+    const panel = workspace.getByRole('tabpanel', {
+      name: 'Preview',
+      exact: true,
+    });
+    await showBuild(panel);
+    await expect(
+      panel
+        .frameLocator('iframe[title^="Build preview of"]')
+        .getByText('The intercepted build'),
+    ).toBeVisible({ timeout: WAIT_MS });
+    assert.deepEqual(state.asked, [1], 'The tickets asked for.');
+    // The artifact opens on its source preview, whose index.html loads
+    // ./app.js, a file only the build has. Chromium logs that 404 from the
+    // content origin, which counts as the preview's own message; Firefox
+    // reports it as a blocked cross-origin read logged by the workspace page,
+    // so it is set apart here too, and only for that file of the source preview.
+    const sourcePreview = `${world.server.content_origin}/p/`;
+    log.unexpected = log.unexpected.filter(
+      (text) =>
+        !(
+          text.includes('Cross-Origin Request Blocked') &&
+          text.includes(sourcePreview) &&
+          text.includes('/app.js.')
+        ),
+    );
+    assertCalm(log, world.browser, { refused: [], cuts: 0 });
+  } finally {
+    await context.close();
+    // A failed cancel is reported, not thrown, so it cannot hide the error
+    // that ended the check.
+    if (queued !== undefined)
+      await api(world.server, 'POST', `/v1/jobs/${queued.id}/cancel`, {}).catch(
+        (error) =>
+          process.stderr.write(
+            `jobs: type-create could not cancel ${queued.id}: ${String(error)}\n`,
+          ),
+      );
+  }
+}
+
+/**
+ * The dialog when the catalog cannot be read (decision 0059 rule 14, T01b):
+ * one index.html can still be created and no type is offered; the next opening
+ * reads the catalog again; a type chosen earlier stays chosen, with Create
+ * held, while a later read fails; and a refused typed create shows its outcome.
+ */
+async function checkTypeCatalogFailed(world) {
+  const context = await world.browser.newContext();
+  try {
+    const tab = await context.newPage();
+    tab.setDefaultTimeout(WAIT_MS);
+    const log = watch(tab, world.origin, '', world.server.content_origin);
+    const creates = [];
+    tab.on('request', (request) => {
+      if (
+        request.method() === 'POST' &&
+        new URL(request.url()).pathname === '/v1/artifacts'
+      )
+        creates.push(request.postDataJSON());
+    });
+    const catalog = (url) => url.pathname === '/v1/types';
+    const failCatalog = (route) =>
+      route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          error: { code: 'unavailable', message: 'Catalog unavailable.' },
+        }),
+      });
+    await tab.route(catalog, failCatalog);
+    await tab.goto(world.origin);
+    const workspace = tab.locator('#artifacts');
+    await workspace.getByLabel('Access token').fill(world.server.token);
+    await workspace.getByRole('button', { name: 'Connect' }).click();
+    const newArtifact = workspace.getByRole('button', { name: 'New artifact' });
+    const dialog = tab.getByRole('dialog', { name: 'New artifact' });
+    const start = dialog.getByLabel('Start from');
+    const typeOption = start.getByRole('option', { name: WORDS.typeOption });
+    const create = dialog.getByRole('button', { name: 'Create' });
+
+    // The read fails: one index.html, and no type offered.
+    await newArtifact.click();
+    await expect(dialog).toContainText(WORDS.catalogFailed);
+    await expect(typeOption).toHaveCount(0);
+    const htmlTitle = `Untyped ${randomUUID().slice(0, 8)}`;
+    await dialog.getByLabel('Title').fill(htmlTitle);
+    await create.click();
+    await expect(dialog).toBeHidden({ timeout: WAIT_MS });
+    assert.equal(creates.length, 1, 'One create was sent.');
+    assert.equal(creates[0]?.type, undefined, 'No type was sent.');
+    assert.deepEqual(
+      creates[0]?.files?.map((file) => file.path),
+      ['index.html'],
+      'The one index.html was sent.',
+    );
+
+    // The next opening reads the catalog again.
+    await tab.unroute(catalog, failCatalog);
+    await newArtifact.click();
+    await expect(typeOption).toBeAttached({ timeout: WAIT_MS });
+    await start.selectOption({ label: WORDS.typeOption });
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).toBeHidden();
+
+    // Each opening reads the catalog afresh, so the earlier list is not
+    // offered while the read is held; a failed read then keeps the chosen
+    // type and holds Create.
+    let answer;
+    const held = new Promise((resolve) => {
+      answer = resolve;
+    });
+    const holdThenFail = async (route) => {
+      await held;
+      await failCatalog(route);
+    };
+    await tab.route(catalog, holdThenFail);
+    await newArtifact.click();
+    await expect(dialog).toContainText(WORDS.catalogReading);
+    await expect(typeOption).toHaveCount(0);
+    answer();
+    await expect(dialog).toContainText(WORDS.catalogFailedKept);
+    await expect(start).toHaveValue('react');
+    await expect(dialog.getByLabel('index.html')).toHaveCount(0);
+    await dialog.getByLabel('Title').fill(`Held ${randomUUID().slice(0, 8)}`);
+    await expect(create).toBeDisabled();
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).toBeHidden();
+    await tab.unroute(catalog, holdThenFail);
+
+    // A refused typed create shows its outcome and leaves the dialog open.
+    const creating = (url) => url.pathname === '/v1/artifacts';
+    await tab.route(creating, (route) =>
+      route.request().method() === 'POST'
+        ? route.fulfill({
+            status: 422,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              error: { code: 'type_unknown', message: 'Unknown type.' },
+            }),
+          })
+        : route.continue(),
+    );
+    await newArtifact.click();
+    await expect(typeOption).toBeAttached({ timeout: WAIT_MS });
+    await expect(start).toHaveValue('react');
+    await create.click();
+    await expect(
+      dialog.getByText('Not created', { exact: true }),
+    ).toBeVisible();
+    await expect(dialog).toBeVisible();
+    assert.equal(creates.length, 2, 'The typed create was sent.');
+    assert.equal(creates[1]?.type, 'react', 'The chosen type was sent.');
+    assert.equal(creates[1]?.files, undefined, 'No files were sent.');
+    await tab.unroute(creating);
+
+    // Only the answers the case gave are set apart: the failed catalog reads
+    // and the refused create, which Chromium logs and Firefox does not.
+    log.unexpected = log.unexpected.filter(
+      (text) =>
+        !text.includes('status of 503 ') && !text.includes('status of 422 '),
+    );
+    assertCalm(log, world.browser, { refused: [], cuts: 0 });
+  } finally {
+    await context.close();
   }
 }
 

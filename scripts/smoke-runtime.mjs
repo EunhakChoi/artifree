@@ -769,7 +769,7 @@ export async function checkRuntime({
     const workspace = compatible.page.locator('#artifacts');
     await workspace.getByRole('button', { name: 'New artifact' }).click();
     const dialog = compatible.page.getByRole('dialog', {
-      name: 'New HTML artifact',
+      name: 'New artifact',
     });
     await dialog.getByLabel('Title').fill('Preview without randomUUID');
     await dialog.getByLabel('index.html').fill('<p id="ordinary">ready</p>');

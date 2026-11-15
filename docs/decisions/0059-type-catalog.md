@@ -4,8 +4,10 @@ Date: 2026-11-15. Status: **accepted; T01aa (rules 1 to 9, 11, 13 and
 15: the catalog, the `react` type, the release lock, schema 17, the core's
 create and commit checks, the HTTP routes and the CLI, contract 0.32.0) and
 T01ab (rule 12: the MCP tools `list_types` and `get_type`, `create_artifact`
-with `type`, and the agent guide, contract 0.33.0) are implemented. T01b
-(rule 14, the web) and rule 10 (owned files) are not.**
+with `type`, and the agent guide, contract 0.33.0) and T01b (rule 14: the
+web workspace's "Start from" choice in New artifact, the type on an
+artifact's page, and its build and build preview from the Jobs and Preview
+tabs) are implemented. Rule 10 (owned files) is not.**
 Roadmap: T01a, T01b.
 
 > Builds on [0003](0003-local-html-artifact-slice.md) (packages and

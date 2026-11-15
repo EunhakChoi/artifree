@@ -279,6 +279,13 @@ export function ArtifactDetail({
             <Badge variant="secondary">
               Revision {artifact.current_revision}
             </Badge>
+            {/* The type and release it was made from, fixed at creation
+                (decision 0059 rules 6 and 14); an untyped artifact has none. */}
+            {artifact.type === null ? null : (
+              <Badge variant="outline">
+                Type {artifact.type.id}, release {artifact.type.release}
+              </Badge>
+            )}
             {inTrash ? null : (
               <>
                 <MetadataActions

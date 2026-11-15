@@ -156,8 +156,10 @@ it, and `artifree artifact create --title <title> --type react` creates one
 from its starter, the template that the `react-v1` build tests build. Every
 later commit must keep the required files. MCP agents do the same with
 `list_types`, `get_type` and `create_artifact` with `type` (see
-[the MCP guide](docs/mcp.md#types)). The web workspace does not create from a
-type yet (T01b).
+[the MCP guide](docs/mcp.md#types)). In the web workspace, New artifact
+offers "Start from" with the listed types; an artifact made from one shows its
+type and release on its page, and its Jobs tab builds it where the server can
+build `react-v1` and an execution worker runs.
 `artifree artifact build-status <id> --build react-v1` prints the latest build
 and whether the current revision's build is built, pending, failed (with its
 diagnostics) or none, and `artifree artifact preview <id> --build react-v1`
