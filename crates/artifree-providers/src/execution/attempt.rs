@@ -1,8 +1,10 @@
-//! One trusted launch of the fixture stub in its own attempt group (decision 0056 rule 5 and
+//! One trusted launch of a profile's stub in its own attempt group (decision 0056 rule 5 and
 //! decision 0042 rules 5 and 6).
 //!
-//! Compiled into the test build and into the `enforcement-fixture` build (decision 0057 rule 2;
-//! 0056 rule 16). Nothing here is visible outside `execution`.
+//! Compiled into the test build, the `enforcement-fixture` build (decision 0057 rule 2; 0056 rule
+//! 16) and the `x86_64` Linux release build (decision 0058 rule 5, R03fa). The parts only the worker
+//! reads are compiled where the worker's adapter is; the pause by phase word stays in the
+//! `enforcement-fixture` build. Nothing here is visible outside `execution`.
 //!
 //! R02ac (0056 rule 14) added the resource part of the group phase. The scratch bounds are read
 //! back from the bootstrap's mount table (`readiness`), and the stub runs behind the two seccomp
@@ -70,7 +72,7 @@ use super::guardian::{self, GuardianReason};
 use super::lock::{AdmissionLock, LockRefusal};
 use super::policy::FilterSet;
 use super::probe_group::{self, ProbeGroup};
-use super::profile::{self, ExecutionProfile, FIXTURE_EXECUTION, InputRule, OutputRule};
+use super::profile::{self, ExecutionProfile, InputRule, OutputRule};
 use super::readiness::{self, GroupObservation};
 use super::registry::{self, HostIdentity, Identity, QuarantineReason, Reconciled, Registry};
 use super::report::HostReport;
@@ -78,7 +80,7 @@ use super::report::HostReport;
 use super::staging::InputListing;
 use super::staging::{self, InputRefusal, VerifiedInput};
 use super::usage::{self, GroupUsage};
-use super::{AdmissionRefusal, InspectionProfile, launcher, policy, read_bounded};
+use super::{AdmissionRefusal, launcher, policy, read_bounded};
 use guardian_link::GuardianLink;
 use keeper::Keeper;
 
@@ -110,11 +112,13 @@ const TEARDOWN_GRACE: Duration = Duration::from_secs(2);
 #[cfg(test)]
 const FIXTURE_PAGE: &[u8] = b"<!doctype html><title>fixture</title>";
 /// The fixture plan's job lease. Its renewal window is a third of it (0042 rule 6).
+#[cfg(test)]
 const FIXTURE_LEASE: Duration = Duration::from_secs(30);
 /// The margin of the guardian's deadline after the readiness and wall deadlines (0056, amendment of
 /// 2026-11-13, the guardian).
 const GUARDIAN_MARGIN: Duration = Duration::from_secs(2);
 /// The sleep step of a held pause.
+#[cfg(any(test, feature = "enforcement-fixture"))]
 const HOLD_STEP: Duration = Duration::from_secs(1);
 
 /// Set once this process quarantined the provider: a cleanup not observed, a routing change, a
@@ -179,7 +183,8 @@ pub(super) struct AttemptPlan {
     pub(super) renew_regardless: bool,
     /// A test-only pause at one phase: set by the provider's tests and, in the
     /// `enforcement-fixture` build, by the worker's adapter from its pause file (decision 0057,
-    /// R02bc). `None` in `fixture()`.
+    /// R02bc). `None` in `fixture()`. A build with neither has no pause.
+    #[cfg(any(test, feature = "enforcement-fixture"))]
     pub(super) pause: Option<Pause>,
     /// Whether the store's checkpoint is asked once more after readiness and before the release,
     /// and the payload released only on its confirmation (decision 0042 rule 3: the generation
@@ -196,12 +201,30 @@ impl AttemptPlan {
         self.lease / 3
     }
 
-    /// The default plan: the fixture program, the fixture stub and the decision 0042 deadlines.
+    /// The provider's test plan: the fixture program, the fixture stub and the decision 0042
+    /// deadlines.
+    #[cfg(test)]
     #[must_use]
     pub(super) fn fixture() -> Self {
         Self {
             program: launcher::EntryProgram::Fixture,
-            profile: &FIXTURE_EXECUTION,
+            checkpoint_at_release: false,
+            ..Self::for_worker(&profile::FIXTURE_EXECUTION, FIXTURE_LEASE)
+        }
+    }
+}
+
+impl AttemptPlan {
+    /// The worker's plan for `profile` (decision 0057 rules 4 and 7): the server binary runs the
+    /// stub, the bootstrap and the guardian, under the job's `lease` and the decision 0042
+    /// deadlines, and the store's checkpoint is asked once more before the release. No pause is
+    /// set; only the `enforcement-fixture` build's adapter adds one.
+    #[cfg(any(test, feature = "enforcement-fixture", target_arch = "x86_64"))]
+    #[must_use]
+    pub(super) fn for_worker(profile: &'static ExecutionProfile, lease: Duration) -> Self {
+        Self {
+            program: launcher::EntryProgram::Server,
+            profile,
             #[cfg(test)]
             stub_override: None,
             wall_deadline: WALL_DEADLINE,
@@ -210,14 +233,15 @@ impl AttemptPlan {
             plant: None,
             #[cfg(test)]
             list_scratch: false,
-            lease: FIXTURE_LEASE,
+            lease,
             #[cfg(test)]
             store: always_confirms,
             guardian: true,
             provider_deadline: true,
             renew_regardless: false,
+            #[cfg(any(test, feature = "enforcement-fixture"))]
             pause: None,
-            checkpoint_at_release: false,
+            checkpoint_at_release: true,
         }
     }
 }
@@ -231,6 +255,7 @@ fn always_confirms(_heartbeat: u32) -> Heartbeat {
 /// A test-only pause of the provider at one phase. At the phase the provider creates the empty
 /// file `<markers>/<word>` and then holds or stalls, as `mode` says (0056, amendment of
 /// 2026-11-13, the guardian).
+#[cfg(any(test, feature = "enforcement-fixture"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct Pause {
     /// The phase at which the pause takes place.
@@ -265,6 +290,7 @@ pub(super) enum Phase {
 
 impl Phase {
     /// The word that names this phase in its marker file.
+    #[cfg(any(test, feature = "enforcement-fixture"))]
     #[must_use]
     pub(super) fn word(self) -> &'static str {
         match self {
@@ -297,6 +323,7 @@ impl Phase {
 }
 
 /// What a paused provider does once its marker file exists.
+#[cfg(any(test, feature = "enforcement-fixture"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PauseMode {
     /// Waits, in a loop, until the process is killed.
@@ -329,14 +356,14 @@ pub(super) enum LeaseLoss {
     /// The authority was lost.
     Authority,
     /// The artifact was trashed (decision 0057 rule 7). Only the worker's checkpoint answers it.
-    #[cfg(feature = "enforcement-fixture")]
+    #[cfg(any(feature = "enforcement-fixture", target_arch = "x86_64"))]
     Trash,
     /// The artifact was purged (decision 0057 rule 7). Only the worker's checkpoint answers it.
-    #[cfg(feature = "enforcement-fixture")]
+    #[cfg(any(feature = "enforcement-fixture", target_arch = "x86_64"))]
     Purge,
     /// A revocation of the lease was stored while the run went on (decisions 0057 rules 7 and 13).
     /// Only the worker's checkpoint answers it.
-    #[cfg(feature = "enforcement-fixture")]
+    #[cfg(any(feature = "enforcement-fixture", target_arch = "x86_64"))]
     Lease,
 }
 
@@ -760,7 +787,7 @@ pub(super) struct Held {
     pub(super) host: HostIdentity,
     /// The records that reconciliation settled and removed in this execution directory. Only the
     /// worker reads them.
-    #[cfg(feature = "enforcement-fixture")]
+    #[cfg(any(feature = "enforcement-fixture", target_arch = "x86_64"))]
     pub(super) reconciled: Vec<Reconciled>,
 }
 
@@ -782,7 +809,7 @@ pub(super) fn hold(execution_dir: &Path) -> Result<Held, AttemptRefusal> {
     let (filters, own_pid_namespace) = policy_and_namespace(roots)?;
     let (host, reconciled) = reconcile_registry(roots, execution_dir).map_err(without_usage)?;
     // Only the worker reads what reconciliation removed.
-    #[cfg(not(feature = "enforcement-fixture"))]
+    #[cfg(not(any(feature = "enforcement-fixture", target_arch = "x86_64")))]
     drop(reconciled);
     Ok(Held {
         _lock: lock,
@@ -791,7 +818,7 @@ pub(super) fn hold(execution_dir: &Path) -> Result<Held, AttemptRefusal> {
         own_pid_namespace,
         filters,
         host,
-        #[cfg(feature = "enforcement-fixture")]
+        #[cfg(any(feature = "enforcement-fixture", target_arch = "x86_64"))]
         reconciled,
     })
 }
@@ -805,11 +832,11 @@ pub(super) struct Launched {
     /// The attempt's evidence, or why the launch produced none.
     pub(super) result: Result<AttemptEvidence, AttemptRefusal>,
     /// Whether the attempt's record is gone, or no record was written. Only the worker reads it.
-    #[cfg(feature = "enforcement-fixture")]
+    #[cfg(any(feature = "enforcement-fixture", target_arch = "x86_64"))]
     pub(super) record_removed: bool,
     /// The payload's standard error, which is untrusted, within the output budget; empty when the
     /// stub did not run or the stream was not read to its end. Only the worker reads it.
-    #[cfg(feature = "enforcement-fixture")]
+    #[cfg(any(feature = "enforcement-fixture", target_arch = "x86_64"))]
     pub(super) stderr: Vec<u8>,
 }
 
@@ -866,14 +893,14 @@ pub(super) fn launch_held(
             // A write can fail after its rename made the record durable, so the record counts as
             // gone only when the registry shows none; otherwise the attempt stays unsettled for
             // the next reconciliation (decision 0057 rules 10 and 19).
-            #[cfg(feature = "enforcement-fixture")]
+            #[cfg(any(feature = "enforcement-fixture", target_arch = "x86_64"))]
             let record_removed = Registry::open(execution_dir)
                 .is_ok_and(|registry| registry.record_absent(identity));
             return Launched {
                 result: Err(without_usage(failure)),
-                #[cfg(feature = "enforcement-fixture")]
+                #[cfg(any(feature = "enforcement-fixture", target_arch = "x86_64"))]
                 record_removed,
-                #[cfg(feature = "enforcement-fixture")]
+                #[cfg(any(feature = "enforcement-fixture", target_arch = "x86_64"))]
                 stderr: Vec::new(),
             };
         }
@@ -883,7 +910,7 @@ pub(super) fn launch_held(
         registry,
         identity,
         removed: false,
-        #[cfg(feature = "enforcement-fixture")]
+        #[cfg(any(feature = "enforcement-fixture", target_arch = "x86_64"))]
         stderr: Vec::new(),
     };
     let result = run_registered(
@@ -897,9 +924,9 @@ pub(super) fn launch_held(
     );
     Launched {
         result,
-        #[cfg(feature = "enforcement-fixture")]
+        #[cfg(any(feature = "enforcement-fixture", target_arch = "x86_64"))]
         record_removed: registered.removed,
-        #[cfg(feature = "enforcement-fixture")]
+        #[cfg(any(feature = "enforcement-fixture", target_arch = "x86_64"))]
         stderr: registered.stderr,
     }
 }
@@ -935,14 +962,14 @@ struct Registered {
     /// The payload's standard error once it was read to its end, for the worker, on every path
     /// that ran the stub (decision 0058 rule 18). It shares the output budget with standard
     /// output, so it holds at most `OUTPUT_BUDGET` bytes.
-    #[cfg(feature = "enforcement-fixture")]
+    #[cfg(any(feature = "enforcement-fixture", target_arch = "x86_64"))]
     stderr: Vec<u8>,
 }
 
 /// The stderr that the launch hands to the worker (decision 0058 rule 18): the stub's capture once
 /// it was read to its end, and none when the payload did not start, so that the trusted entry
 /// point's own diagnostics, such as a failed `exec` of the payload, never pass for the payload's.
-#[cfg(feature = "enforcement-fixture")]
+#[cfg(any(feature = "enforcement-fixture", target_arch = "x86_64"))]
 fn handed_stderr<T>(
     phase: &Result<T, AttemptFailure>,
     stderr: Option<&io::Result<Vec<u8>>>,
@@ -1054,7 +1081,7 @@ fn run_registered(
         &mut session,
     );
     let (settled, guardian_reason) = conclude(group, &group_path, &mut session);
-    #[cfg(feature = "enforcement-fixture")]
+    #[cfg(any(feature = "enforcement-fixture", target_arch = "x86_64"))]
     {
         registered.stderr = handed_stderr(&phase, settled.stderr.as_ref());
     }
@@ -1125,7 +1152,7 @@ fn run_registered(
         usage: counters,
         readiness: passed.readiness,
         filter_sha256: filter,
-        report: held.report.clone(),
+        report: held.report.with_policy(plan.profile.inspection),
         output,
         #[cfg(test)]
         scratch,
@@ -1170,17 +1197,13 @@ fn admit_checked(
     if QUARANTINED.load(Ordering::SeqCst) || registry::quarantine_present(execution_dir) {
         return Err(AttemptFailure::Quarantined);
     }
-    admission::admit_for_attempt(InspectionProfile::fixture(), roots)
-        .map_err(AttemptFailure::Refused)
+    admission::admit_for_attempt(roots).map_err(AttemptFailure::Refused)
 }
 
-/// Builds every profile's filter and reads the supervisor's pid namespace after admission. The
-/// capacity is taken before the claim (0042 rule 5), so no profile is known yet: the digests of
-/// the filters that build are kept, and the launch reads its own profile's. When no filter builds,
-/// or the namespace cannot be read, the attempt is refused before the registry is touched.
 /// The calls the bootstrap adds to the filter of `set`, read from the tool root as the bootstrap
 /// reads them inside the sandbox, so that the digest names the installed program. Only the bundler
 /// measurement has any; a malformed file builds no digest, and the launch is then refused.
+#[cfg(any(test, feature = "enforcement-fixture"))]
 fn measured_calls_of(set: FilterSet, tool_root: &Path) -> Option<Vec<i64>> {
     if set != FilterSet::Measure {
         return Some(Vec::new());
@@ -1192,12 +1215,20 @@ fn measured_calls_of(set: FilterSet, tool_root: &Path) -> Option<Vec<i64>> {
     }
 }
 
+/// Builds every profile's filter and reads the supervisor's pid namespace after admission. The
+/// capacity is taken before the claim (0042 rule 5), so no profile is known yet: the digests of
+/// the filters that build are kept, and the launch reads its own profile's. When no filter builds,
+/// or the namespace cannot be read, the attempt is refused before the registry is touched.
 fn policy_and_namespace(
     roots: &AdmissionRoots<'_>,
 ) -> Result<(Vec<(FilterSet, String)>, PathBuf), AttemptRefusal> {
     let filters: Vec<(FilterSet, String)> = profile::filter_sets()
         .filter_map(|set| {
+            #[cfg(any(test, feature = "enforcement-fixture"))]
             let measured = measured_calls_of(set, roots.tool_root)?;
+            // Only the bundler measurement adds calls, and this build does not know it.
+            #[cfg(not(any(test, feature = "enforcement-fixture")))]
+            let measured: Vec<i64> = Vec::new();
             policy::policy_sha256_with(set, &measured)
                 .ok()
                 .map(|digest| (set, digest))
@@ -1953,6 +1984,7 @@ fn start_guardian(
 /// the phase is created first, so that a test can wait for it. Then the pause holds in a loop
 /// until the process is killed, or stalls for its duration and goes on. A marker that cannot be
 /// created is ignored: the waiting test then fails for want of it.
+#[cfg(any(test, feature = "enforcement-fixture"))]
 fn pause_at(plan: &AttemptPlan, phase: Phase) {
     let Some(pause) = plan.pause.as_ref().filter(|pause| pause.phase == phase) else {
         return;
@@ -1960,9 +1992,14 @@ fn pause_at(plan: &AttemptPlan, phase: Phase) {
     pause_marked(&pause.markers, phase.word(), pause.mode);
 }
 
+/// A build without the test hooks has no pause: every phase goes on at once.
+#[cfg(not(any(test, feature = "enforcement-fixture")))]
+fn pause_at(_plan: &AttemptPlan, _phase: Phase) {}
+
 /// Creates the empty marker file `<markers>/<word>`, then holds in a loop until the process is
 /// killed, or stalls for the mode's duration and returns. A marker that cannot be created is
 /// ignored: the waiting test then fails for want of it.
+#[cfg(any(test, feature = "enforcement-fixture"))]
 pub(super) fn pause_marked(markers: &Path, word: &str, mode: PauseMode) {
     fs::File::create(markers.join(word)).ok();
     match mode {

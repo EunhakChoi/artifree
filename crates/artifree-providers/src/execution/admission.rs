@@ -15,7 +15,7 @@ use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::report::{HostReport, sha256_file_hex, sha256_hex};
+use super::report::{HostReport, sha256_file_hex};
 use super::{
     AdmissionRefusal, InspectionProfile, RoutingObservation, cgroup, launcher, manifest,
     probe_group, read_bounded,
@@ -43,7 +43,7 @@ pub(super) struct AdmissionRoots<'a> {
     pub(super) core_pattern: &'a Path,
     /// The cgroup v2 mount.
     pub(super) cgroup_mount: &'a Path,
-    /// The tool root holding the launcher and the fixture.
+    /// The tool root holding the launcher and the server binary.
     pub(super) tool_root: &'a Path,
     /// The account that must own the tool root and its entries: root (0) in production. A test
     /// names its own account, since it cannot make a root-owned tree.
@@ -83,22 +83,23 @@ pub(super) fn admit(
     // A panic elsewhere cannot leave the remembered path half-written: it is replaced
     // whole, so a poisoned lock still holds a valid value.
     let mut entered = ENTERED.lock().unwrap_or_else(PoisonError::into_inner);
-    admit_with(profile, roots, process::id(), &mut entered, || {
+    admit_with(roots, process::id(), &mut entered, || {
         cgroup::own_uid(roots.proc_self)
     })
+    .map(|report| report.with_policy(profile))
 }
 
 /// Runs the whole admission like `admit` and also returns the delegated group the provider
 /// entered from. An attempt's group is made beside its `supervisor` child (0056 rule 8). Only
-/// the launch calls it: the test build's and, with the `enforcement-fixture` feature, the
-/// worker's (decision 0057 rule 2).
-#[cfg(any(test, feature = "enforcement-fixture"))]
+/// the launch calls it (decision 0057 rule 2; decision 0058 rule 5). The capacity is taken before
+/// the claim, so no profile is known yet: the report carries no policy hash, and the launch sets
+/// the hash of the profile it runs (`HostReport::with_policy`).
+#[cfg(any(test, feature = "enforcement-fixture", target_arch = "x86_64"))]
 pub(super) fn admit_for_attempt(
-    profile: InspectionProfile,
     roots: &AdmissionRoots<'_>,
 ) -> Result<(HostReport, PathBuf), AdmissionRefusal> {
     let mut entered = ENTERED.lock().unwrap_or_else(PoisonError::into_inner);
-    let report = admit_with(profile, roots, process::id(), &mut entered, || {
+    let report = admit_with(roots, process::id(), &mut entered, || {
         cgroup::own_uid(roots.proc_self)
     })?;
     let delegated = entered.clone().ok_or(AdmissionRefusal::UndelegatedCgroup)?;
@@ -111,8 +112,9 @@ pub(super) fn admit_for_attempt(
 /// temporary roots. Facility 7 checks the group that holds this process: the delegated
 /// group on a first call, or its `supervisor` child on a second one. `entered` holds the
 /// delegated group of an earlier successful move in this process and is set by this call's.
+/// The report names no policy (`policy_sha256` is empty): an attempt's capacity is taken before
+/// its profile is known, and the caller sets the hash with `HostReport::with_policy`.
 pub(super) fn admit_with(
-    profile: InspectionProfile,
     roots: &AdmissionRoots<'_>,
     own_pid: u32,
     entered: &mut Option<PathBuf>,
@@ -157,7 +159,7 @@ pub(super) fn admit_with(
         launcher_version: launcher::launcher_version(roots.tool_root),
         launcher_sha256,
         tool_manifest_sha256: tool_manifest.sha256().to_owned(),
-        policy_sha256: sha256_hex(profile.manifest()),
+        policy_sha256: String::new(),
         core_routing: String::from_utf8_lossy(&routing.pattern)
             .trim_end()
             .to_owned(),
@@ -187,7 +189,7 @@ pub(super) fn delegated_group<'a>(discovered: &'a Path, entered: Option<&'a Path
 ///
 /// # Errors
 /// The first refusal, which names the missing facility.
-#[cfg(feature = "enforcement-fixture")]
+#[cfg(any(feature = "enforcement-fixture", target_arch = "x86_64"))]
 pub(super) fn check_delegated_start(roots: &AdmissionRoots<'_>) -> Result<(), AdmissionRefusal> {
     let discovered =
         cgroup::discover_own_group(&roots.proc_self.join("cgroup"), roots.cgroup_mount)?;
@@ -241,11 +243,12 @@ fn probe_in(
     })
 }
 
-/// Starts the trusted probe child: the fixture in `wait` mode, with a cleared environment,
-/// no output, and a standard input that stays open until the group is killed.
+/// Starts the trusted probe child: the root's server binary in its `execution wait` mode
+/// (decision 0058, note "R03f split"), with a cleared environment, no output, and a standard
+/// input that stays open until the group is killed.
 fn spawn_probe_child(tool_root: &Path) -> Result<Child, AdmissionRefusal> {
-    Command::new(tool_root.join(launcher::FIXTURE_FILE))
-        .arg("wait")
+    Command::new(tool_root.join(launcher::SERVER_FILE))
+        .args(launcher::PROBE_CHILD_ARGUMENTS)
         .env_clear()
         .stdin(Stdio::piped())
         .stdout(Stdio::null())

@@ -1,8 +1,8 @@
-//! The worker's adapter of the execution port for the fixture profile (decision 0057 rules 6, 7,
-//! 15, 16, 18 and 19).
+//! The worker's adapter of the execution port (decision 0057 rules 6, 7, 15, 16, 18 and 19).
 //!
-//! Implemented, in a Linux build with the `enforcement-fixture` feature only:
-//! `FixtureExecution::open` checks the execution directory, its identity file and the delegated
+//! Implemented, in a Linux build with the `enforcement-fixture` feature and in the `x86_64` Linux
+//! release build (decision 0058 rule 5, R03fa), for the profiles the build knows:
+//! `WorkerExecution::open` checks the execution directory, its identity file and the delegated
 //! start, and writes only the identity file, on first use. `Execution::capacity` takes the
 //! admission lock, the host admission and the registry reconciliation, and names the attempts that
 //! the caller must settle before its claim. The held capacity's `launch` runs one pinned attempt,
@@ -10,7 +10,8 @@
 //! outcome. Dropping the held capacity releases the lock, so the caller drops it after it has
 //! settled the attempt.
 //!
-//! Test-only, in this feature build only: a file `pause` in the execution directory pauses a launch
+//! Test-only, in the `enforcement-fixture` build only: a file `pause` in the execution directory
+//! pauses a launch
 //! for the enforcement job (decision 0057, R02bc). Its one line is `<phase> hold` or
 //! `<phase> stall <milliseconds>`, where `<phase>` is one of the provider's phase words
 //! (`registered`, `created`, `guarded`, `started`, `ready`, `running`, `collecting`) or
@@ -18,8 +19,9 @@
 //! before it publishes. The empty marker file `<phase>` is created in the directory `paused`
 //! beside it, which the test makes. A missing, unreadable or malformed file pauses nothing. The
 //! record of each launch is a `v2` record naming the database, the job and the fence of the claim.
-//! Not here: any wire contract and any command. A release build has no adapter, so its worker
-//! claims trusted kinds and ends unknown-profile jobs only (0057 rule 2), and has no pause.
+//! Not here: any wire contract and any command. The release build reads no pause file. A release
+//! build for any other target has no adapter, so its worker claims trusted kinds and ends
+//! unknown-profile jobs only (0057 rule 2).
 
 use std::fmt;
 use std::fs;
@@ -41,11 +43,13 @@ use artifree_ports::job_store::AttemptRow;
 use super::admission;
 use super::attempt::{
     self, AttemptEvidence, AttemptFailure, AttemptPlan, Heartbeat, Launched, LeaseLoss,
-    OutputRefusal, Pause, PauseMode, Phase,
+    OutputRefusal,
 };
+#[cfg(feature = "enforcement-fixture")]
+use super::attempt::{Pause, PauseMode, Phase};
 use super::cgroup;
 use super::guardian::GuardianReason;
-use super::launcher::{EntryProgram, KILLED_BY_SIGSYS};
+use super::launcher::KILLED_BY_SIGSYS;
 use super::profile;
 use super::registry::{self, Identity, QuarantineReason, RecordRun};
 use super::staging::{InputListing, InputRefusal, VerifiedInput};
@@ -56,12 +60,16 @@ const DIRECTORY_IDENTITY_FILE: &str = "directory-identity";
 /// The largest identity file that is read. A longer file is malformed and refuses the start.
 const IDENTITY_FILE_BYTES: u64 = 64;
 /// The pause file of the execution directory (see the module documentation).
+#[cfg(feature = "enforcement-fixture")]
 const PAUSE_FILE: &str = "pause";
 /// The directory beside the pause file that receives the marker files; the test makes it.
+#[cfg(feature = "enforcement-fixture")]
 const PAUSED_DIR: &str = "paused";
 /// The pause word of the pause after the caller settled the attempt and before it publishes.
+#[cfg(feature = "enforcement-fixture")]
 const SETTLED_WORD: &str = "settled";
 /// The largest pause file that is read.
+#[cfg(feature = "enforcement-fixture")]
 const PAUSE_BYTES: u64 = 64;
 
 /// Why the worker refuses to start with an execution directory (decision 0057 rule 18). The text
@@ -93,17 +101,17 @@ impl fmt::Display for ExecutionStartRefusal {
 
 impl std::error::Error for ExecutionStartRefusal {}
 
-/// The fixture profile's adapter of the execution port: one execution directory whose identity and
+/// The worker's adapter of the execution port: one execution directory whose identity and
 /// delegation were checked at start (decision 0057 rules 6 and 18).
 #[derive(Debug)]
-pub struct FixtureExecution {
+pub struct WorkerExecution {
     /// The owner-only execution directory of the lock, the registry and the attempts.
     execution_dir: PathBuf,
     /// The directory's identity, 32 lowercase hexadecimal digits.
     directory: String,
 }
 
-impl FixtureExecution {
+impl WorkerExecution {
     /// Checks the execution directory and its identity, then the delegated start of this process,
     /// and returns the adapter. It writes only the identity file, and only on first use. It takes
     /// no lock, claims nothing and launches nothing.
@@ -132,7 +140,7 @@ impl FixtureExecution {
     }
 }
 
-impl Execution for FixtureExecution {
+impl Execution for WorkerExecution {
     fn capacity(&self, unsettled: &[AttemptRow]) -> Capacity {
         let held = match attempt::hold(&self.execution_dir) {
             Ok(held) => held,
@@ -162,7 +170,7 @@ impl Execution for FixtureExecution {
             return Capacity::Refused("no-randomness");
         };
         let tool_digest = held.report.tool_manifest_sha256.clone();
-        Capacity::Held(Box::new(HeldFixture {
+        Capacity::Held(Box::new(HeldWorker {
             held,
             host,
             directory: self.directory.clone(),
@@ -171,16 +179,16 @@ impl Execution for FixtureExecution {
             attempt: AttemptIdentity::from_random(identity.0),
             execution_dir: self.execution_dir.clone(),
             launched: false,
+            #[cfg(feature = "enforcement-fixture")]
             settled_pause: None,
         }))
     }
 }
 
-/// The capacity of one fixture attempt: the held lock, the host admission and reconciliation, and
-/// the attempt identity drawn with them (decision 0057 rules 6 and 19). Its launch runs at most
-/// once.
+/// The capacity of one attempt: the held lock, the host admission and reconciliation, and the
+/// attempt identity drawn with them (decision 0057 rules 6 and 19). Its launch runs at most once.
 #[derive(Debug)]
-struct HeldFixture {
+struct HeldWorker {
     /// The admission lock, the host admission and the reconciliation. Dropping it releases the
     /// lock.
     held: attempt::Held,
@@ -200,10 +208,11 @@ struct HeldFixture {
     launched: bool,
     /// The pause at `settled`, read at the launch and kept only when the launch observed its
     /// cleanup, so that the core settles the attempt before the pause.
+    #[cfg(feature = "enforcement-fixture")]
     settled_pause: Option<PauseMode>,
 }
 
-impl HeldCapacity for HeldFixture {
+impl HeldCapacity for HeldWorker {
     fn host(&self) -> &ExecutionHost {
         &self.host
     }
@@ -239,18 +248,18 @@ impl HeldCapacity for HeldFixture {
             return not_launched("not-launched");
         }
         self.launched = true;
+        #[cfg(feature = "enforcement-fixture")]
         let pause = read_pause(&self.execution_dir);
         let PinnedInput { package, listing } = input;
         let Ok(verified) = VerifiedInput::verify(package, listing_of(listing)) else {
             return not_launched("input-refused");
         };
+        #[cfg(not(feature = "enforcement-fixture"))]
+        let plan = AttemptPlan::for_worker(profile, Duration::from_millis(run.lease_ms));
+        #[cfg(feature = "enforcement-fixture")]
         let plan = AttemptPlan {
-            lease: Duration::from_millis(run.lease_ms),
-            program: EntryProgram::Server,
-            profile,
-            checkpoint_at_release: true,
             pause: pause.phase,
-            ..AttemptPlan::fixture()
+            ..AttemptPlan::for_worker(profile, Duration::from_millis(run.lease_ms))
         };
         let mut renew = |_heartbeat: u32| heartbeat_of(checkpoint.renew());
         let launched = attempt::launch_held(
@@ -271,6 +280,7 @@ impl HeldCapacity for HeldFixture {
         );
         // Only a launch whose cleanup was observed is settled before the capacity is dropped; an
         // unsettled one must not mark `settled`.
+        #[cfg(feature = "enforcement-fixture")]
         if launched.record_removed {
             self.settled_pause = pause.settled;
         }
@@ -278,7 +288,8 @@ impl HeldCapacity for HeldFixture {
     }
 }
 
-impl Drop for HeldFixture {
+#[cfg(feature = "enforcement-fixture")]
+impl Drop for HeldWorker {
     // The core drops the capacity after it settled the attempt and before it publishes (decision
     // 0057 rule 10), so a pause here is the `settled` phase of the recovery matrix (R02bc).
     fn drop(&mut self) {
@@ -301,6 +312,7 @@ fn not_launched(detail: &'static str) -> LaunchOutcome {
 }
 
 /// The test-only pause that the pause file asks for.
+#[cfg(feature = "enforcement-fixture")]
 #[derive(Debug, Default)]
 struct PauseRequest {
     /// A pause at one of the provider's phases.
@@ -311,6 +323,7 @@ struct PauseRequest {
 
 /// Reads the pause file of `execution_dir`. A missing, unreadable or malformed file asks for
 /// no pause.
+#[cfg(feature = "enforcement-fixture")]
 fn read_pause(execution_dir: &Path) -> PauseRequest {
     let Ok(bytes) = read_bounded(&execution_dir.join(PAUSE_FILE), PAUSE_BYTES) else {
         return PauseRequest::default();

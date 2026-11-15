@@ -38,7 +38,8 @@ Options:
   --execution-dir <dir>  The private directory of the admission lock, the
                        attempt registry and the staged input (decision 0057
                        rule 18). A build that knows no execution profile
-                       refuses it with exit status 2.
+                       (any release build but x86_64 Linux) refuses it with
+                       exit status 2.
 
 On SIGINT or SIGTERM (Ctrl-C on Windows) the worker gives the job it holds back
 to the queue at its next checkpoint, without using an attempt, and exits 0. With
@@ -307,10 +308,13 @@ fn run_worker(arguments: &[OsString]) -> Result<(), WorkerFailure> {
 /// # Errors
 ///
 /// [`WorkerFailure::Unsupported`] when the directory or the group is refused.
-#[cfg(all(target_os = "linux", feature = "enforcement-fixture"))]
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "enforcement-fixture", target_arch = "x86_64")
+))]
 fn open_execution(dir: Option<&Path>) -> Result<Option<Box<dyn Execution>>, WorkerFailure> {
     let Some(dir) = dir else { return Ok(None) };
-    match artifree_providers::execution::FixtureExecution::open(dir) {
+    match artifree_providers::execution::WorkerExecution::open(dir) {
         Ok(execution) => Ok(Some(Box::new(execution))),
         Err(refusal) => Err(WorkerFailure::Unsupported(format!(
             "Execution unavailable. {refusal}; --execution-dir needs the only process \
@@ -321,13 +325,18 @@ fn open_execution(dir: Option<&Path>) -> Result<Option<Box<dyn Execution>>, Work
 }
 
 /// Opens the execution port that `--execution-dir` asks for, or returns `None`
-/// when the option is absent. This build knows no execution profile, so it
-/// refuses the option before the database is opened (decision 0057 rule 18).
+/// when the option is absent. This build has no launch (it is neither `x86_64`
+/// Linux nor a Linux build with `enforcement-fixture`) and knows no execution
+/// profile, so it refuses the option before the database is opened (decision
+/// 0057 rule 18).
 ///
 /// # Errors
 ///
 /// [`WorkerFailure::Unsupported`] when `--execution-dir` was given.
-#[cfg(not(all(target_os = "linux", feature = "enforcement-fixture")))]
+#[cfg(not(all(
+    target_os = "linux",
+    any(feature = "enforcement-fixture", target_arch = "x86_64")
+)))]
 fn open_execution(dir: Option<&Path>) -> Result<Option<Box<dyn Execution>>, WorkerFailure> {
     match dir {
         Some(_) => Err(WorkerFailure::Unsupported(

@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 
 use super::super::admission::{AdmissionRoots, admit_with};
-use super::super::{AdmissionRefusal, InspectionProfile, launcher};
+use super::super::{AdmissionRefusal, launcher};
 use super::{
     MANIFEST_FILE, ManifestIdentity, ancestor_protected, ancestors_to, entry_protected, verify,
 };
@@ -398,7 +398,7 @@ fn walk_bound_on_depth() -> Result<(), Box<dyn Error>> {
 fn tool_manifest() -> Vec<u8> {
     format!(
         "{DIGEST_EMPTY} 0 {}\n{DIGEST_EMPTY} 0 {}\n",
-        launcher::FIXTURE_FILE,
+        launcher::SERVER_FILE,
         launcher::LAUNCHER
     )
     .into_bytes()
@@ -449,7 +449,7 @@ fn make_host(scratch: &Scratch, edit: Edit, manifest: Option<Vec<u8>>) -> io::Re
     fs::write(group.join("cgroup.procs"), format!("{}\n", process::id()))?;
     scratch.dir("tool-root/bin")?;
     let tool_root = scratch.path().join("tool-root");
-    for relative in [launcher::LAUNCHER, launcher::FIXTURE_FILE] {
+    for relative in [launcher::LAUNCHER, launcher::SERVER_FILE] {
         let path = tool_root.join(relative);
         fs::write(&path, "")?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
@@ -496,10 +496,10 @@ fn manifest_comes_after_the_named_files_and_before_delegation() -> Result<(), Bo
             AdmissionRefusal::MissingLauncher,
         ),
         (
-            "no fixture and no manifest",
-            |root| fs::remove_file(root.join(launcher::FIXTURE_FILE)),
+            "no server binary and no manifest",
+            |root| fs::remove_file(root.join(launcher::SERVER_FILE)),
             None,
-            AdmissionRefusal::MissingFixture,
+            AdmissionRefusal::MissingServer,
         ),
         (
             "a valid manifest and an extra tool file",
@@ -511,14 +511,8 @@ fn manifest_comes_after_the_named_files_and_before_delegation() -> Result<(), Bo
     for (description, edit, manifest, expected) in cases {
         let scratch = Scratch::new()?;
         let host = make_host(&scratch, edit, manifest)?;
-        let outcome = admit_with(
-            InspectionProfile::fixture(),
-            &host.roots(),
-            process::id(),
-            &mut None,
-            || Ok(u32::MAX),
-        )
-        .map(|_| ());
+        let outcome =
+            admit_with(&host.roots(), process::id(), &mut None, || Ok(u32::MAX)).map(|_| ());
         assert_eq!(outcome, Err(expected), "{description}");
     }
     Ok(())

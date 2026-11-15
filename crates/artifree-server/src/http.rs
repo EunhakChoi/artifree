@@ -124,8 +124,9 @@ pub struct Settings {
     pub worker_status: WorkerStatusHandle,
     /// The build profiles this build knows (decision 0058 rule 17): an
     /// enqueue of a build names one of them, or answers `profile_unknown`.
-    /// The default is the build's own list, empty in a release build until
-    /// R03f; tests replace it.
+    /// The default is the build's own list: `react-v1` in the `x86_64` Linux
+    /// release build, empty in a release build for any other target; tests
+    /// replace it.
     pub build_profiles: Vec<ProfileName>,
 }
 

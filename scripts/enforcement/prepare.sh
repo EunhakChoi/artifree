@@ -50,8 +50,8 @@ usage: prepare.sh VERB [ARGUMENT]
   profile-off         unload and remove that profile
   launcher-away       move the launcher aside (rule 10 removal)
   launcher-back       move the launcher back
-  fixture-away        move the fixture aside (rule 10 removal)
-  fixture-back        move the fixture back
+  server-away         move the server binary aside (rule 10 removal)
+  server-back         move the server binary back
   nomem-slice-on      load the slice that removes the memory controller
   nomem-slice-off     remove that slice
   tool-modify         append one byte to the payload, keeping a copy of the original
@@ -62,6 +62,7 @@ usage: prepare.sh VERB [ARGUMENT]
   measured-calls-off  remove etc/measured-calls and rewrite the manifest
   kernel-log-clear    clear the kernel's message buffer
   package-with SERVER LOCK  run the packaging script for SERVER with the lock list LOCK
+  root-remove         unload the launcher profile and remove the tool root, as an operator removes an old root
   tool-extra-on       add a file that the manifest does not list
   tool-extra-off      remove that file
   tool-owner-on       give the bubblewrap licence to nobody
@@ -129,9 +130,9 @@ write_host_address() {
 # them like every other file: "The fixture's tool root also holds its generated probe programs,
 # under the same manifest" (decision 0056 rule 6, as amended 2026-11-13).
 # The server binary serves the worker's stub, bootstrap and guardian entry points (decision 0057
-# rule 4). It is installed stripped, because every admission hashes every file of the tool root.
-# The fixture stays for admission's namespace check and probe child, the probe programs and the
-# counters.
+# rule 4) and admission's namespace check and probe child (R03fa). It is installed stripped,
+# because every admission hashes every file of the tool root. The fixture stays for the probe
+# programs and the counters.
 install_tool_root() {
   local fixture=$1 payload=$2 server=$3 named
   [[ -f "$fixture" && -x "$fixture" ]] || fail "the fixture is not an executable file: $fixture"
@@ -272,6 +273,15 @@ profile_on() {
 
 profile_off() {
   unload_launcher_profile "$VERSION"
+}
+
+# Removes the job's root and its launcher profile (decision 0058, note "R03f split", R03fa), so
+# that the packaging script alone can build a fresh root for the release build's server. The
+# profile goes first, so no launcher is left allowed by a path that no longer holds the root.
+root_remove() {
+  unload_launcher_profile "$VERSION"
+  [[ -d "$ROOT" && ! -L "$ROOT" ]] || fail "$ROOT is not a directory"
+  rm -rf -- "$ROOT"
 }
 
 # Moves a tool root file aside for one rule 10 removal, and back. Never overwrites.
@@ -583,14 +593,14 @@ main() {
       fi
       ;;
     save-routing | routing-file | routing-pipe | profile-on | profile-off | \
-      launcher-away | launcher-back | fixture-away | fixture-back | \
+      launcher-away | launcher-back | server-away | server-back | \
       nomem-slice-on | nomem-slice-off | tool-modify | tool-restore | \
       package-modify | package-restore | measured-calls-off | kernel-log-clear | \
       tool-extra-on | tool-extra-off | tool-missing-on | tool-missing-off | \
       tool-owner-on | tool-owner-off | tool-writable-on | tool-writable-off | \
       tool-setid-on | tool-setid-off | ancestor-open-on | ancestor-open-off | \
       manifest-away | manifest-back | payload-break | payload-restore | \
-      kernel-log | kernel-log-access) (( $# == 1 )) || usage ;;
+      kernel-log | kernel-log-access | root-remove) (( $# == 1 )) || usage ;;
     counters-install | listener-start | listener-stop | routing-counter-pipe | \
       routing-counter-socket | routing-absolute | counters-show) (( $# == 1 )) || usage ;;
     decoy-off) (( $# == 1 )) || usage ;;
@@ -617,8 +627,8 @@ main() {
     profile-off) profile_off ;;
     launcher-away) move_away "$ROOT/bin/bwrap" ;;
     launcher-back) move_back "$ROOT/bin/bwrap" ;;
-    fixture-away) move_away "$ROOT/bin/artifree-execution-fixture" ;;
-    fixture-back) move_back "$ROOT/bin/artifree-execution-fixture" ;;
+    server-away) move_away "$ROOT/bin/artifree-server" ;;
+    server-back) move_back "$ROOT/bin/artifree-server" ;;
     nomem-slice-on) nomem_slice_on ;;
     nomem-slice-off) nomem_slice_off ;;
     tool-modify) tool_modify ;;
@@ -629,6 +639,7 @@ main() {
     measured-calls-off) measured_calls_off ;;
     kernel-log-clear) dmesg --clear ;;
     package-with) "$SCRIPT_DIR/../tools/package-root.sh" "$2" "$3" ;;
+    root-remove) root_remove ;;
     tool-extra-on) tool_extra_on ;;
     tool-extra-off) tool_extra_off ;;
     tool-owner-on) chown nobody -- "$ROOT/licenses/bubblewrap.copyright" ;;

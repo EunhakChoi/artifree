@@ -49,6 +49,20 @@ pub struct HostReport {
     pub(super) peak_memory_bytes: Option<u64>,
 }
 
+impl HostReport {
+    /// This report with the policy hash of `profile`: an attempt's capacity is admitted before
+    /// its claim names a profile, so the launch names the profile it runs (decision 0058, note
+    /// "R03f split").
+    #[cfg(target_os = "linux")]
+    #[must_use]
+    pub(super) fn with_policy(&self, profile: super::InspectionProfile) -> Self {
+        Self {
+            policy_sha256: sha256_hex(profile.manifest()),
+            ..self.clone()
+        }
+    }
+}
+
 impl fmt::Display for HostReport {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(formatter, "kernel_release={}", self.kernel_release)?;

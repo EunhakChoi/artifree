@@ -87,18 +87,18 @@ fn write_file(path: &Path, mode: u32) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
 }
 
-/// Creates a tool root with a `bin` directory, writing the launcher and the fixture with the given modes; `None` leaves a file out.
+/// Creates a tool root with a `bin` directory, writing the launcher and the server binary with the given modes; `None` leaves a file out.
 fn tool_root(
     launcher_mode: Option<u32>,
-    fixture_mode: Option<u32>,
+    server_mode: Option<u32>,
 ) -> Result<Scratch, Box<dyn Error>> {
     let scratch = Scratch::new()?;
     fs::create_dir(scratch.path().join("bin"))?;
     if let Some(mode) = launcher_mode {
         write_file(&scratch.path().join(LAUNCHER), mode)?;
     }
-    if let Some(mode) = fixture_mode {
-        write_file(&scratch.path().join(FIXTURE_FILE), mode)?;
+    if let Some(mode) = server_mode {
+        write_file(&scratch.path().join(SERVER_FILE), mode)?;
     }
     Ok(scratch)
 }
@@ -415,24 +415,25 @@ fn launcher_arguments_bind_only_the_tool_root_and_its_libraries() {
 }
 
 #[test]
-fn launcher_arguments_end_with_the_fixture_namespace_check() -> Result<(), Box<dyn Error>> {
+fn launcher_arguments_end_with_the_server_namespace_check() -> Result<(), Box<dyn Error>> {
     let arguments = text_arguments(&launcher_arguments(Path::new("/opt/t")));
-    let [.., fixture, mode] = arguments.as_slice() else {
-        return Err("the launcher arguments end before the fixture".into());
+    let [.., server, command, mode] = arguments.as_slice() else {
+        return Err("the launcher arguments end before the server".into());
     };
     assert_eq!(
-        fixture, "/tools/bin/artifree-execution-fixture",
-        "the fixture must run from the tool root's mount"
+        server, "/tools/bin/artifree-server",
+        "the server binary must run from the tool root's mount"
     );
     assert_eq!(
-        mode, "namespaces",
-        "the fixture must run in namespaces mode"
+        (command.as_str(), mode.as_str()),
+        ("execution", "namespaces"),
+        "the server must run in its execution namespaces mode"
     );
     Ok(())
 }
 
 #[test]
-fn tool_files_report_the_launcher_before_the_fixture() -> Result<(), Box<dyn Error>> {
+fn tool_files_report_the_launcher_before_the_server() -> Result<(), Box<dyn Error>> {
     let cases = [
         (
             "neither file",
@@ -444,7 +445,7 @@ fn tool_files_report_the_launcher_before_the_fixture() -> Result<(), Box<dyn Err
             "only a launcher",
             Some(0o755),
             None,
-            Err(AdmissionRefusal::MissingFixture),
+            Err(AdmissionRefusal::MissingServer),
         ),
         (
             "a launcher without an execute bit",
@@ -453,15 +454,15 @@ fn tool_files_report_the_launcher_before_the_fixture() -> Result<(), Box<dyn Err
             Err(AdmissionRefusal::MissingLauncher),
         ),
         (
-            "a fixture without an execute bit",
+            "a server binary without an execute bit",
             Some(0o755),
             Some(0o644),
-            Err(AdmissionRefusal::MissingFixture),
+            Err(AdmissionRefusal::MissingServer),
         ),
         ("two executable files", Some(0o755), Some(0o755), Ok(())),
     ];
-    for (description, launcher_mode, fixture_mode, expected) in cases {
-        let root = tool_root(launcher_mode, fixture_mode)?;
+    for (description, launcher_mode, server_mode, expected) in cases {
+        let root = tool_root(launcher_mode, server_mode)?;
         assert_eq!(
             check_tool_files(root.path()),
             expected,

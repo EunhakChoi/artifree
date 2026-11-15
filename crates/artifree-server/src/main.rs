@@ -629,7 +629,7 @@ Usage:
   artifree-server backup --data-dir <dir> --output <file>
   artifree-server restore --input <file> --data-dir <dir>
   artifree-server worker run --data-dir <dir> [--once | --supervised]
-  artifree-server execution bootstrap|stub|guardian ...   the entry point of one attempt of an execution profile; a build that knows no profile refuses it (exit status 2)
+  artifree-server execution bootstrap|stub|guardian|namespaces|wait ...   the entry points of one attempt of an execution profile and of admission's checks; a build that knows no profile refuses them (exit status 2)
   artifree-server --describe | --version | --help
 
 serve runs the HTTP API and a separate preview content origin until Ctrl+C or

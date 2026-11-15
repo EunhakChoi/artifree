@@ -61,7 +61,7 @@ fn setup(root: &Scratch) -> Result<(PathBuf, PathBuf, Registered), Box<dyn Error
         registry,
         identity,
         removed: false,
-        #[cfg(feature = "enforcement-fixture")]
+        #[cfg(any(feature = "enforcement-fixture", target_arch = "x86_64"))]
         stderr: Vec::new(),
     };
     Ok((execution, delegated, registered))

@@ -27,13 +27,15 @@ import { api, hold, raw } from './smoke-workspace.mjs';
  * job is cancelled from the tab; with no worker the tab says so; a lost answer
  * is retried under its key and makes one job, also after the tab is left and
  * opened again; a refusal shows its code; "Load more" reads the next page; and
- * the list is read again after a reset. On this release build the head build
- * status and "Build revision N" answer profile_unknown (decision 0058, R03ea);
- * since no smoke host runs a profile, a pending and a failed build are given
- * to the tab by intercepting its reads and its enqueue in the browser. The
- * preview's build choice (R03eb) says profile_unknown on this build, and its
- * notice of an older build and its answer for a revision without one are
- * proven with the status, the tickets and the build page intercepted.
+ * the list is read again after a reset. The x86_64 Linux release build knows
+ * react-v1 (decision 0058, R03fa), so "Build revision N" queues a real build,
+ * which waits with the notice that no execution worker is ready, since no
+ * smoke host runs one. A server that cannot build the profile, a pending and a
+ * failed build are given to the tab by intercepting its reads and its enqueue
+ * in the browser. The preview's build choice (R03eb) says profile_unknown for
+ * such a server, and its notice of an older build and its answer for a
+ * revision without one are proven with the status, the tickets and the build
+ * page intercepted.
  *
  * Each page has a browser context of its own, and what it reports is recorded
  * as the other checks record theirs: a refusal the check provokes is counted,
@@ -89,6 +91,7 @@ const RUNNERS = {
   'job-ended': checkJobEnded,
   'load-more': checkLoadMore,
   'running-cancel': checkRunningCancel,
+  'build-queued': checkBuildQueued,
   'build-unknown': checkBuildUnknown,
   'build-intercepted': checkBuildIntercepted,
   'preview-build-unknown': checkPreviewBuildUnknown,
@@ -579,13 +582,106 @@ async function checkRunningCancel(world) {
 }
 
 /**
- * On this release build the head build status says that the server cannot
- * build react-v1, and a press of "Build revision N" is refused with the same
- * code and commits nothing (decision 0058, R03ea).
+ * On the x86_64 Linux release build a press of "Build revision N" queues a
+ * real react-v1 build of the revision, which the tab lists and which waits
+ * with the real notice that no execution worker is ready (decision 0058,
+ * R03fa). On any other host the server knows no build profile, so the case
+ * is skipped there.
+ */
+async function checkBuildQueued(world) {
+  // Only the x86_64 Linux build knows react-v1; a server built for any other
+  // host refuses the build, which build-unknown covers.
+  if (process.platform !== 'linux' || process.arch !== 'x64') {
+    process.stderr.write(
+      `jobs: build-queued skipped on ${process.platform}-${process.arch}\n`,
+    );
+    return;
+  }
+  const artifact = await createArtifact(world.server, 'Jobs build queued');
+  const opened = await openJobs(world, artifact);
+  let queued;
+  try {
+    const banner = opened.panel
+      .getByRole('status')
+      .filter({ hasText: 'Revision 1, the newest' });
+    await expect(banner).toContainText('not built', { timeout: WAIT_MS });
+    await expect(banner).toContainText('No revision has a build yet.');
+    await opened.panel
+      .getByRole('button', { name: 'Build revision 1', exact: true })
+      .click();
+    const row = jobRow(opened.panel, 'Build 1');
+    await expect(row.getByText('Queued', { exact: true })).toBeVisible({
+      timeout: WAIT_MS,
+    });
+    await expect(row).toContainText(`Profile ${PROFILE}`);
+    await expect(banner).toContainText('build pending', { timeout: WAIT_MS });
+    const jobs = await jobsOf(world.server, artifact.id);
+    assert.deepEqual(
+      jobs.map((job) => [job.kind, job.profile, job.revision, job.state]),
+      [['run_profile', PROFILE, 1, 'queued']],
+      'The press queued one build of revision 1.',
+    );
+    queued = jobs[0];
+    await expect(banner).toContainText(`Job ${queued.id}.`);
+    // The server's worker has no execution port, so its real
+    // `GET /v1/background` says no execution worker is ready once the build
+    // has been queued for 5 seconds.
+    await expect(
+      row.getByRole('alert').filter({ hasText: WORDS.noExecution }),
+    ).toBeVisible({ timeout: WAIT_MS });
+    assertCalm(opened.log, world.browser, { refused: [], cuts: 0 });
+  } finally {
+    await opened.context.close();
+    // The build would wait for its claim deadline; it is ended so that it
+    // counts against no other check's open jobs.
+    if (queued !== undefined)
+      await api(world.server, 'POST', `/v1/jobs/${queued.id}/cancel`, {});
+  }
+}
+
+/**
+ * Answers the head build status and the enqueue of a build with 422
+ * profile_unknown in the browser, as a server that cannot build react-v1
+ * does (a release build for a target other than x86_64 Linux). Every other
+ * request reaches the server.
+ */
+async function refuseProfile(tab, artifactId) {
+  const refusal = {
+    error: { code: 'profile_unknown', message: 'Unknown profile.' },
+  };
+  await tab.route(
+    (url) =>
+      url.pathname === `/v1/artifacts/${artifactId}/builds/${PROFILE}` ||
+      url.pathname === `/v1/artifacts/${artifactId}/jobs`,
+    (route) => {
+      const request = route.request();
+      const isStatus = new URL(request.url()).pathname.endsWith(
+        `/builds/${PROFILE}`,
+      );
+      const isBuild =
+        request.method() === 'POST' &&
+        request.postDataJSON()?.kind === 'run_profile';
+      if (!isStatus && !isBuild) return route.fallback();
+      return route.fulfill({
+        status: 422,
+        contentType: 'application/json',
+        body: JSON.stringify(refusal),
+      });
+    },
+  );
+}
+
+/**
+ * On a server that cannot build react-v1 the head build status says so, and a
+ * press of "Build revision N" is refused with the same code and commits
+ * nothing (decision 0058, R03ea). The server's refusals are given in the
+ * browser, since the x86_64 release build knows the profile (R03fa).
  */
 async function checkBuildUnknown(world) {
   const artifact = await createArtifact(world.server, 'Jobs build unknown');
-  const opened = await openJobs(world, artifact);
+  const opened = await openJobs(world, artifact, (tab) =>
+    refuseProfile(tab, artifact.id),
+  );
   try {
     // The banner is a polite status region; a refused press is an alert.
     const banner = opened.panel
@@ -839,12 +935,18 @@ async function interceptBuildPreview(tab, server, artifactId, state) {
 }
 
 /**
- * On this release build the preview's build choice says that the server
- * cannot build react-v1 and asks for no ticket (decision 0058, R03eb).
+ * On a server that cannot build react-v1 the preview's build choice says so
+ * and asks for no ticket (decision 0058, R03eb). The refusal of the status is
+ * given in the browser, since the x86_64 release build knows the profile.
  */
 async function checkPreviewBuildUnknown(world) {
   const artifact = await createArtifact(world.server, 'Preview build unknown');
-  const opened = await openJobs(world, artifact, undefined, 'Preview');
+  const opened = await openJobs(
+    world,
+    artifact,
+    (tab) => refuseProfile(tab, artifact.id),
+    'Preview',
+  );
   try {
     await showBuild(opened.panel);
     await expect(
@@ -1202,8 +1304,9 @@ function watch(tab, origin, artifactId, contentOrigin) {
     const where = message.location().url;
     const fromApi = where.startsWith(`${origin}/v1/`);
     const status = text.match(/status of (\d{3}) /u);
-    // A release build answers each read of the head build status with 422
-    // profile_unknown (decision 0058, R03ea); those are counted apart.
+    // A server that cannot build react-v1 answers each read of the head build
+    // status with 422 profile_unknown (decision 0058, R03ea); the checks that
+    // give that answer in the browser have it counted apart.
     if (
       fromApi &&
       status?.[1] === '422' &&

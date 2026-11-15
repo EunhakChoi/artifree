@@ -2525,7 +2525,8 @@ pub enum ErrorCode {
     /// Wait for one to end or cancel one; nothing was enqueued.
     TooManyJobs,
     /// The server's build cannot build the named profile; nothing was
-    /// enqueued. A release build knows no profile yet.
+    /// enqueued. The `x86_64` Linux release build knows `react-v1`; a release
+    /// build for any other target knows no profile.
     ProfileUnknown,
     /// The idempotency key was already used for a different request.
     RequestKeyReused,

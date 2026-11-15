@@ -9,12 +9,13 @@
 //! and the server's `execution` entry point (0057 rule 4). `write_probe_programs` serves the
 //! test-support program only (0056 rule 4); the probe programs are of use only under the launch.
 //! The launch (0056 rule 14, R02ab and R02ac) is compiled into this crate's tests and, on Linux,
-//! into a build with the `enforcement-fixture` feature (0057 rule 2). That build serves the
-//! fixture profile and, since R03bcbb, the `react-v1` profile (0058 rules 1 to 4), which
-//! `known_profiles` lists; a release build knows no profile and has no launch. The test payload
-//! runs the fixed resource and cleanup scenarios of R02ac and the syscall-mapping and descriptor
-//! scenarios of R02ad. Outside the tests, only the profiles of the feature build can start an
-//! attempt.
+//! into a build with the `enforcement-fixture` feature (0057 rule 2) and, since R03fa, into a
+//! release build for `x86_64` (decision 0058 rule 5). The feature build serves the fixture profile
+//! and the `react-v1` profile (0058 rules 1 to 4); the `x86_64` release build serves `react-v1`
+//! only. `known_profiles` lists them; a release build for any other target knows no profile and
+//! has no launch. The test payload runs the fixed resource and cleanup scenarios of R02ac and the
+//! syscall-mapping and descriptor scenarios of R02ad; only the tests and the feature build know
+//! it.
 //! Its input staging and output collection (R02af) and the routing check during an attempt
 //! (R02ag, `routing_unchanged`) are compiled into the same builds.
 //!
@@ -24,7 +25,7 @@
 //!    process's cgroup v2 group from the `0::` line of `/proc/self/cgroup`
 //!    (`CgroupV2Unavailable`), and `cgroup.kill` in that group (`MissingKillSupport`).
 //! 3. Core routing (the routing refusals above).
-//! 4. Tool root: the launcher, then the fixture (`MissingLauncher`, `MissingFixture`), then the
+//! 4. Tool root: the launcher, then the server (`MissingLauncher`, `MissingServer`), then the
 //!    owner and modes of the root's ancestors (`ToolRootUnprotected`), then every entry against
 //!    the root's `MANIFEST` (`MissingToolManifest`, `ToolRootMismatch`, `ToolRootUnprotected`).
 //! 5. Delegation: the group, its `cgroup.procs` and `cgroup.subtree_control` are
@@ -51,18 +52,24 @@ use artifree_domain::job::ProfileName;
 
 #[cfg(target_os = "linux")]
 mod admission;
-// The launch serves the fixture profile of the test build and of the `enforcement-fixture`
-// feature (decision 0057 rule 2); a release build has none (0056 rule 16, 0042 rule 8).
-#[cfg(all(target_os = "linux", any(test, feature = "enforcement-fixture")))]
+// The launch serves the profiles of the test build, of the `enforcement-fixture` feature
+// (decision 0057 rule 2) and of the x86_64 release build (decision 0058 rule 5, R03fa); a release
+// build for any other target has none (0056 rule 16, 0042 rule 8).
+#[cfg(all(
+    target_os = "linux",
+    any(test, feature = "enforcement-fixture", target_arch = "x86_64")
+))]
 mod attempt;
 #[cfg(target_os = "linux")]
 mod bootstrap;
 #[cfg(target_os = "linux")]
 mod cgroup;
-// Output collection serves only the launch, which exists in the test build and in the
-// `enforcement-fixture` feature (decision 0057 rule 2; 0056 rule 16; amendment of 2026-11-13,
-// input and output).
-#[cfg(all(target_os = "linux", any(test, feature = "enforcement-fixture")))]
+// Output collection serves only the launch (see `attempt`; 0056 rule 16; amendment of
+// 2026-11-13, input and output).
+#[cfg(all(
+    target_os = "linux",
+    any(test, feature = "enforcement-fixture", target_arch = "x86_64")
+))]
 mod collection;
 // The guardian of one attempt (decision 0056, amendment of 2026-11-13, the guardian). Its entry
 // points are the test-support program and the server's `execution guardian` (0056 rule 4;
@@ -71,9 +78,11 @@ mod collection;
 mod guardian;
 #[cfg(target_os = "linux")]
 mod launcher;
-// The admission lock serves only the launch, which exists in the test build and in the
-// `enforcement-fixture` feature (decision 0057 rule 2; 0056 rule 16).
-#[cfg(all(target_os = "linux", any(test, feature = "enforcement-fixture")))]
+// The admission lock serves only the launch (see `attempt`; 0056 rule 16).
+#[cfg(all(
+    target_os = "linux",
+    any(test, feature = "enforcement-fixture", target_arch = "x86_64")
+))]
 mod lock;
 #[cfg(target_os = "linux")]
 mod manifest;
@@ -89,29 +98,38 @@ mod profile;
 mod probes;
 #[cfg(target_os = "linux")]
 mod readiness;
-// The attempt registry, its reconciliation and the persisted quarantine serve only the launch,
-// which exists in the test build and in the `enforcement-fixture` feature (decision 0057 rule 2;
-// 0056 rule 16; amendment of 2026-11-14, the attempt registry).
-#[cfg(all(target_os = "linux", any(test, feature = "enforcement-fixture")))]
+// The attempt registry, its reconciliation and the persisted quarantine serve only the launch
+// (see `attempt`; 0056 rule 16; amendment of 2026-11-14, the attempt registry).
+#[cfg(all(
+    target_os = "linux",
+    any(test, feature = "enforcement-fixture", target_arch = "x86_64")
+))]
 mod registry;
 mod report;
-// The routing check during an attempt serves the launch of the test build and of the
-// `enforcement-fixture` feature (0056 rule 16, amendment of 2026-11-13, crashes). Its tests sit
-// beside it and run in the test build only.
+// The routing check during an attempt serves the launch (0056 rule 16, amendment of 2026-11-13,
+// crashes). Its tests sit beside it and run in the test build only.
 #[cfg(test)]
 mod routing_tests;
-// The input staging serves only the launch, which exists in the test build and in the
-// `enforcement-fixture` feature (decision 0057 rule 2; 0056 rule 16; amendment of 2026-11-13,
-// input and output).
-#[cfg(all(target_os = "linux", any(test, feature = "enforcement-fixture")))]
+// The input staging serves only the launch (see `attempt`; 0056 rule 16; amendment of
+// 2026-11-13, input and output).
+#[cfg(all(
+    target_os = "linux",
+    any(test, feature = "enforcement-fixture", target_arch = "x86_64")
+))]
 mod staging;
-// The attempt group's counters serve only the launch, which exists in the test build and in the
-// `enforcement-fixture` feature (decision 0057 rule 2; 0056 rule 16).
-#[cfg(all(target_os = "linux", any(test, feature = "enforcement-fixture")))]
+// The attempt group's counters serve only the launch (see `attempt`; 0056 rule 16).
+#[cfg(all(
+    target_os = "linux",
+    any(test, feature = "enforcement-fixture", target_arch = "x86_64")
+))]
 mod usage;
-// The worker's adapter of the execution port for the fixture profile (decision 0057 rules 2 and 15
-// to 19). Only a Linux build with the `enforcement-fixture` feature has it; a release build has none.
-#[cfg(all(target_os = "linux", feature = "enforcement-fixture"))]
+// The worker's adapter of the execution port (decision 0057 rules 2 and 15 to 19). A Linux build
+// with the `enforcement-fixture` feature and the x86_64 release build have it (decision 0058 rule
+// 5, R03fa); a release build for any other target has none.
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "enforcement-fixture", target_arch = "x86_64")
+))]
 mod worker_port;
 
 #[cfg(target_os = "linux")]
@@ -119,12 +137,15 @@ pub use bootstrap::{BootstrapFailure, run_bootstrap, run_stub, run_stub_for};
 #[cfg(target_os = "linux")]
 pub use guardian::{GuardianFailure, run_guardian};
 #[cfg(target_os = "linux")]
-pub use launcher::EntryProgram;
+pub use launcher::{EntryProgram, print_namespaces, wait_for_end_of_input};
 #[cfg(target_os = "linux")]
 pub use probes::write_probe_programs;
 pub use report::HostReport;
-#[cfg(all(target_os = "linux", feature = "enforcement-fixture"))]
-pub use worker_port::{ExecutionStartRefusal, FixtureExecution};
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "enforcement-fixture", target_arch = "x86_64")
+))]
+pub use worker_port::{ExecutionStartRefusal, WorkerExecution};
 
 const CORE_PATTERN: &str = "/proc/sys/kernel/core_pattern";
 const MAX_PATTERN_BYTES: u64 = 4096;
@@ -158,8 +179,9 @@ pub enum AdmissionRefusal {
     MissingKillSupport,
     /// The tool root's launcher is missing or not a regular executable file.
     MissingLauncher,
-    /// The tool root's fixture is missing or not a regular executable file.
-    MissingFixture,
+    /// The tool root's server binary, which runs the namespace check and the probe child and is
+    /// the bootstrap, is missing or not a regular executable file.
+    MissingServer,
     /// The tool root has no manifest that could be read and parsed (decision 0056 rule 6).
     MissingToolManifest,
     /// A tool root file differs from its manifest, or the root holds a file the manifest does not list or lacks one it lists (0056 rule 6).
@@ -206,7 +228,7 @@ impl fmt::Display for AdmissionRefusal {
             Self::CgroupV2Unavailable => "no cgroup v2 group was found for the provider",
             Self::MissingKillSupport => "the provider's cgroup has no kill support",
             Self::MissingLauncher => "the tool root's launcher is missing",
-            Self::MissingFixture => "the tool root's fixture is missing",
+            Self::MissingServer => "the tool root's server binary is missing",
             Self::MissingToolManifest => "the tool root has no readable manifest",
             Self::ToolRootMismatch => "the tool root does not match its manifest",
             Self::ToolRootUnprotected => {
@@ -411,7 +433,7 @@ impl AdmissionOutcome {
 
 /// Checks this host's facilities in the documented order and runs the trusted probes.
 ///
-/// On Linux it runs the tool root's launcher and fixture (no payload), moves the calling
+/// On Linux it runs the tool root's launcher and server binary (no payload), moves the calling
 /// process into its group's `supervisor` child, and writes only below the provider's own
 /// delegated cgroup. Calls in one process run one at a time. Call it only from the
 /// supervisor's own view. Other systems are
@@ -441,38 +463,50 @@ pub fn inspect_host(profile: InspectionProfile) -> AdmissionOutcome {
     }
 }
 
-/// The execution profiles this build knows (decision 0057 rules 1 and 2): every profile in the
-/// table in a Linux build with the `enforcement-fixture` feature, none otherwise. A worker passes
-/// them with every claim, so a `run_profile` job of any other profile ends as
-/// `execution_unavailable`.
+/// The execution profiles this build knows (decision 0057 rules 1 and 2; 0058 rule 5): every
+/// profile in the table in a Linux build with the `enforcement-fixture` feature, `react-v1` in the
+/// `x86_64` Linux release build, none otherwise. A worker passes them with every claim, so a
+/// `run_profile` job of any other profile ends as `execution_unavailable`.
 #[must_use]
 pub fn known_profiles() -> Vec<ProfileName> {
-    #[cfg(all(target_os = "linux", feature = "enforcement-fixture"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "enforcement-fixture", target_arch = "x86_64")
+    ))]
     {
         // An invalid constant is left out of the list, which fails closed.
         profile::names()
             .filter_map(|name| name.parse().ok())
             .collect()
     }
-    #[cfg(not(all(target_os = "linux", feature = "enforcement-fixture")))]
+    #[cfg(not(all(
+        target_os = "linux",
+        any(feature = "enforcement-fixture", target_arch = "x86_64")
+    )))]
     {
         Vec::new()
     }
 }
 
 /// The build profiles among `known_profiles` (decision 0058 rule 8): the worker composes a build
-/// profile's output with the revision and publishes it as a build. None in a build without the
-/// `enforcement-fixture` feature on Linux.
+/// profile's output with the revision and publishes it as a build. None in a build that knows no
+/// profile.
 #[must_use]
 pub fn build_profiles() -> Vec<ProfileName> {
-    #[cfg(all(target_os = "linux", feature = "enforcement-fixture"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "enforcement-fixture", target_arch = "x86_64")
+    ))]
     {
         // An invalid constant is left out of the list, which fails closed.
         profile::build_names()
             .filter_map(|name| name.parse().ok())
             .collect()
     }
-    #[cfg(not(all(target_os = "linux", feature = "enforcement-fixture")))]
+    #[cfg(not(all(
+        target_os = "linux",
+        any(feature = "enforcement-fixture", target_arch = "x86_64")
+    )))]
     {
         Vec::new()
     }
@@ -502,7 +536,13 @@ fn read_pattern(reader: io::Result<impl Read>) -> Result<Vec<u8>, AdmissionRefus
 ///
 /// Returns `UnreadableCoreRouting` for a read that fails and `UnknownCoreRouting` for a value
 /// over the bound (both from `read_pattern`), and `CoreRoutingChanged` for bytes that differ.
-#[cfg(any(test, all(target_os = "linux", feature = "enforcement-fixture")))]
+#[cfg(any(
+    test,
+    all(
+        target_os = "linux",
+        any(feature = "enforcement-fixture", target_arch = "x86_64")
+    )
+))]
 pub(super) fn routing_unchanged(
     admitted: &[u8],
     reader: io::Result<impl Read>,

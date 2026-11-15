@@ -1891,7 +1891,7 @@ async fn agents_enqueue_a_build_with_its_profile() -> TestResult {
     assert_eq!(
         error_code(&refused),
         "profile_unknown",
-        "a release build knows no profile"
+        "a build that knows no profile refuses react-v1"
     );
     Ok(())
 }
@@ -2051,7 +2051,7 @@ async fn agents_read_the_build_status_and_preview_a_build() -> TestResult {
     assert_eq!(
         error_code(&refused),
         "profile_unknown",
-        "a release build knows no profile"
+        "a build that knows no profile refuses react-v1"
     );
     Ok(())
 }

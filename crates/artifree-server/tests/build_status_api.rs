@@ -354,7 +354,8 @@ async fn the_build_routes_refuse_a_profile_the_build_cannot_build() -> TestResul
         }
     }
 
-    // A release build knows no build profile until R03f.
+    // A build that knows no build profile, such as a release build for a
+    // target other than x86_64 Linux.
     let release = Harness::new(&[])?;
     let artifact = release.artifact().await?;
     let preview = release.build_preview(&artifact, 1, "react-v1").await?;

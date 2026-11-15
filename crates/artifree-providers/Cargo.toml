@@ -31,5 +31,12 @@ nix = { workspace = true, features = ["signal"] }
 [features]
 enforcement-fixture = []
 
+# The fixture's stub and bootstrap look its identity up in the profile table, which holds the
+# fixture only with the feature (decision 0058, note "R03fa"). Without it the program would refuse
+# its own identity, so it is not built.
+[[example]]
+name = "artifree-execution-fixture"
+required-features = ["enforcement-fixture"]
+
 [lints]
 workspace = true
