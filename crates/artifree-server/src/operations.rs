@@ -197,6 +197,8 @@ impl From<ArtifactError> for ApiError {
             ArtifactError::NotFound(_) => {
                 Self::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, message)
             }
+            // One body for every role refusal (decision 0060 rule 4).
+            ArtifactError::Forbidden => Self::forbidden(message),
             ArtifactError::RevisionConflict { current } => {
                 let mut conflict =
                     Self::new(StatusCode::CONFLICT, ErrorCode::RevisionConflict, message);

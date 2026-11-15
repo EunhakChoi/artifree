@@ -1,9 +1,10 @@
 //! Who may reach an artifact other than its owner (decision 0060).
 //!
 //! An artifact has one owner for its whole life. The owner may make another
-//! registered user a member with one [`Role`]. What each role allows is the
-//! application core's decision (0060 rule 3); this module only names the
-//! roles and how a user stands towards one artifact.
+//! registered user a member with one [`Role`]. This module names the roles,
+//! how a user stands towards one artifact, and what each stand allows (0060
+//! rule 3), so the application core and the store, which reads the role again
+//! where a write commits (rule 5), apply one table.
 
 use std::fmt;
 use std::str::FromStr;
@@ -67,6 +68,32 @@ pub enum Access {
     Member(Role),
 }
 
+/// What an operation needs of its caller (decision 0060 rule 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Need {
+    /// Reading the artifact, duplicating it, or using one's own data and
+    /// asset space: any member.
+    Read,
+    /// Committing source or metadata, or enqueueing a job: owner or editor.
+    Change,
+    /// Moving it to or from the trash, purging it, or changing who has
+    /// access: the owner.
+    Own,
+}
+
+impl Access {
+    /// Whether this stand allows what an operation `need`s.
+    #[must_use]
+    pub fn permits(self, need: Need) -> bool {
+        match (self, need) {
+            (Self::Owner, _)
+            | (Self::Member(_), Need::Read)
+            | (Self::Member(Role::Editor), Need::Change) => true,
+            (Self::Member(_), Need::Own) | (Self::Member(Role::Viewer), Need::Change) => false,
+        }
+    }
+}
+
 /// The number an artifact's member list is at: zero until the first change of
 /// access, then raised by one with each change (decision 0060 rule 6). A grant
 /// or a revocation is conditional on it.
@@ -105,7 +132,24 @@ impl fmt::Display for AccessGeneration {
 
 #[cfg(test)]
 mod tests {
-    use super::Role;
+    use super::{Access, Need, Role};
+
+    #[test]
+    fn each_stand_allows_what_rule_3_says() {
+        let table = [
+            (Access::Owner, [true, true, true]),
+            (Access::Member(Role::Editor), [true, true, false]),
+            (Access::Member(Role::Viewer), [true, false, false]),
+        ];
+        for (access, allowed) in table {
+            for (need, expected) in [Need::Read, Need::Change, Need::Own]
+                .into_iter()
+                .zip(allowed)
+            {
+                assert_eq!(access.permits(need), expected, "{access:?} {need:?}");
+            }
+        }
+    }
 
     #[test]
     fn a_role_reads_back_only_from_its_own_name() {

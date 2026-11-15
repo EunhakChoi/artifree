@@ -10,9 +10,13 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use artifree_core::artifacts::{ArtifactError, ArtifactService};
 use artifree_domain::SourceRevision;
+use artifree_domain::access::{AccessGeneration, Role};
 use artifree_domain::change::ChangeSequence;
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title};
 use artifree_domain::package::{FileChange, FilePackage, PackagePath};
+use artifree_ports::access_store::{
+    AccessList, AccessReceipt, AccessRequest, AccessStore, AccessStoreError,
+};
 use artifree_ports::artifact_store::{
     ArtifactListing, ArtifactRecord, ArtifactStore, ChangePage, CleanupReceipt, CleanupRequest,
     CommitReceipt, ConditionalCommit, Delivery, FileEdit, FileExpectation, MetadataReceipt,
@@ -72,6 +76,29 @@ const FILE_MISSING: u8 = 9;
 struct Misreporting {
     inner: SqliteStore,
     mode: Arc<AtomicU8>,
+}
+
+impl AccessStore for Misreporting {
+    fn access_list(&self, artifact: &ArtifactId) -> Result<Option<AccessList>, StoreError> {
+        self.inner.access_list(artifact)
+    }
+    fn member_role(
+        &self,
+        artifact: &ArtifactId,
+        user: &ActorId,
+    ) -> Result<Option<Role>, StoreError> {
+        self.inner.member_role(artifact, user)
+    }
+    fn access_generation(
+        &self,
+        artifact: &ArtifactId,
+        user: &ActorId,
+    ) -> Result<AccessGeneration, StoreError> {
+        self.inner.access_generation(artifact, user)
+    }
+    fn change_access(&self, request: AccessRequest<'_>) -> Result<AccessReceipt, AccessStoreError> {
+        self.inner.change_access(request)
+    }
 }
 
 impl ArtifactStore for Misreporting {

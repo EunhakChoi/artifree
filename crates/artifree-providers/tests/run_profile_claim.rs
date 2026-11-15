@@ -614,6 +614,33 @@ fn the_checkpoint_answers_current_state_in_rule_7_order_and_stores_it() -> TestR
     Ok(())
 }
 
+/// A running job of a member ends normally after the member is revoked
+/// (decision 0060 rule 15): only an actor who was never the owner or a member
+/// is a change of authority.
+#[test]
+fn the_running_job_of_a_revoked_member_continues() -> TestResult {
+    let fixture = Profiles::new()?;
+    fixture.enqueue_profile(&fixture.owner, "member", &profile_name("fixture"), 10)?;
+    let identities = execution(1);
+    let claimed = fixture.claimed(100, &profiles(&["fixture"]), Some(identities))?;
+    let connection = fixture.sql()?;
+    connection.execute(
+        "UPDATE artifacts SET owner = 'u-07070707070707070707070707070707'",
+        [],
+    )?;
+    connection.execute(
+        "INSERT INTO artifact_members (artifact_id, user_id, role, access_generation)
+         SELECT id, 'local', NULL, 2 FROM artifacts",
+        [],
+    )?;
+    let answer =
+        fixture
+            .store
+            .checkpoint_attempt(&claimed.lease, &identities.attempt, at(600), LEASE_MS)?;
+    assert_eq!(answer, CheckpointAnswer::Continue);
+    Ok(())
+}
+
 #[test]
 fn the_checkpoint_of_an_attempt_of_another_job_is_not_found() -> TestResult {
     let fixture = Profiles::new()?;

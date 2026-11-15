@@ -146,8 +146,10 @@ impl From<StoreError> for DataStoreError {
 
 /// Durable application data storage.
 ///
-/// Artifact ownership authorization belongs to the application core. Binding
-/// and fenced writes additionally check enabled user state. An
+/// Authorization belongs to the application core; a write reads the actor's
+/// access again where it commits, so a user who is neither owner nor member
+/// is [`DataStoreError::NotFound`] (decision 0060 rule 5). Binding and fenced
+/// writes additionally check enabled user state. An
 /// artifact in the trash or purged is [`DataStoreError::NotFound`] for every
 /// read or write, a retry included.
 pub trait DataStore {

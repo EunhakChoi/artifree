@@ -20,10 +20,19 @@ fn authority(
     artifact: &ArtifactId,
     source: Option<SourceRevision>,
 ) -> Result<(), AssetStoreError> {
-    let head: Option<i64> = connection.query_row(
-        "SELECT current_revision FROM artifacts WHERE id = ?1 AND owner = ?2 AND deleted_at IS NULL
-             AND purged_at IS NULL",
-        params![artifact.as_str(), actor.as_str()], |row| row.get(0)).optional().map_err(unavailable)?;
+    let head: Option<i64> = connection
+        .query_row(
+            // The owner or a current member reaches its own space (decision 0060
+            // rule 9); no member reaches the trash.
+            "SELECT current_revision FROM artifacts WHERE id = ?1 AND deleted_at IS NULL
+             AND purged_at IS NULL
+             AND (owner = ?2 OR EXISTS (SELECT 1 FROM artifact_members m
+                  WHERE m.artifact_id = artifacts.id AND m.user_id = ?2 AND m.role IS NOT NULL))",
+            params![artifact.as_str(), actor.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(unavailable)?;
     let head = head.ok_or(AssetStoreError::NotFound)?;
     let current = SourceRevision(u64::try_from(head).map_err(corrupt)?);
     if source.is_some_and(|expected| expected != current) {

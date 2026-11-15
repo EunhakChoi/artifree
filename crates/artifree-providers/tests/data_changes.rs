@@ -5,6 +5,8 @@
 
 mod common;
 
+use artifree_domain::access::Role;
+
 use artifree_domain::change::ChangeSequence;
 use artifree_domain::data::{DataChange, DataError, DataLimit, DataPath, DataValue};
 use artifree_domain::identity::{ActorId, ArtifactId, UnixMillis};
@@ -16,8 +18,8 @@ use artifree_ports::artifact_store::{
 use artifree_ports::data_store::{DataReceipt, DataStore, DataStoreError, DataWrite};
 use artifree_providers::storage::SqliteStore;
 use common::{
-    TempDir, TestResult, actor, create_demo, database_in, digest, key, package, parsed, revise,
-    update_metadata,
+    TempDir, TestResult, actor, create_demo, database_in, digest, key, make_member, package,
+    parsed, revise, update_metadata,
 };
 use rusqlite::Connection;
 
@@ -402,13 +404,21 @@ fn the_row_is_recorded_after_the_data_row_and_the_key() -> TestResult {
     Ok(())
 }
 
-/// In the store, which does not check ownership, a write as another actor on
-/// the owner's artifact goes to that actor's feed and leaves the owner's head.
+/// A write by a member of the owner's artifact goes to the member's own space
+/// and feed and leaves the owner's head (decision 0060 rule 9; the feed's
+/// delivery to every reader is S02c).
 #[test]
 fn a_write_by_another_actor_goes_to_that_actors_feed_and_not_the_owners() -> TestResult {
     let fixture = Fixture::new()?;
     let owner = fixture.owner.clone();
-    let other = actor("other");
+    let other = ActorId::user([7; 16]);
+    make_member(
+        &database_in(fixture.dir.path()),
+        &fixture.created.artifact.id,
+        &fixture.owner,
+        &other,
+        Role::Viewer,
+    )?;
     let owner_head = fixture.head(&owner)?;
     assert_eq!(fixture.head(&other)?, ChangeSequence(0));
 

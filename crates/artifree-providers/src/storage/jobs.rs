@@ -16,6 +16,7 @@
 //! `revision_files` rows of its pinned revision.
 
 use artifree_domain::SourceRevision;
+use artifree_domain::access::Need;
 use artifree_domain::change::FeedId;
 use artifree_domain::identity::{ArtifactId, UnixMillis};
 use artifree_domain::job::{
@@ -289,6 +290,15 @@ fn enqueue(
     if !artifact_in_place(transaction, request.artifact)? {
         return Err(JobStoreError::NotFound);
     }
+    // A viewer may not enqueue, read again here (decision 0060 rules 3 and 5),
+    // before the key, so a viewer's replay of an editor-era key is refused
+    // (rule 17).
+    super::access::admit(
+        transaction,
+        request.artifact,
+        request.request.actor,
+        Need::Change,
+    )?;
     let revision = i64::try_from(request.revision.0).map_err(corrupt)?;
     let pinned: bool = transaction
         .query_row(

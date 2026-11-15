@@ -5,6 +5,8 @@
 
 mod common;
 
+use artifree_domain::access::Role;
+
 use std::collections::BTreeSet;
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -28,8 +30,8 @@ use artifree_ports::user_store::{NewUser, UserStore};
 use artifree_providers::storage::SqliteStore;
 use artifree_providers::tokens::SqliteTokenStore;
 use common::{
-    TempDir, TestResult, actor, create_demo, database_in, digest, key, package, parsed, revise,
-    update_metadata,
+    TempDir, TestResult, actor, create_demo, database_in, digest, key, make_member, package,
+    parsed, revise, update_metadata,
 };
 use rusqlite::Connection;
 
@@ -340,7 +342,15 @@ fn an_actor_may_have_sixteen_jobs_waiting_or_running_and_no_more() -> TestResult
     // The limit counts one actor's jobs. The other actor's job is not due
     // yet, so the claim below takes one of the first actor's jobs and never
     // depends on how jobs created at the same instant are ordered.
-    fixture.enqueue_as(&actor("other"), "other", 2, 5_000)?;
+    let other = ActorId::user([7; 16]);
+    make_member(
+        &database_in(fixture.dir.path()),
+        &fixture.created.artifact.id,
+        &fixture.owner,
+        &other,
+        Role::Editor,
+    )?;
+    fixture.enqueue_as(&other, "other", 2, 5_000)?;
     // Running jobs count; a job that ended makes room.
     let running = fixture.claimed("a", 1_000)?;
     assert_eq!(
@@ -396,7 +406,15 @@ fn the_key_space_is_shared_with_artifact_requests_in_both_directions() -> TestRe
         Some(StoreError::RequestKeyReused)
     );
     // Another actor's use of the same text is a different key.
-    fixture.enqueue_as(&actor("other"), "job-key", 2, 1_000)?;
+    let other = ActorId::user([7; 16]);
+    make_member(
+        &database_in(fixture.dir.path()),
+        &fixture.created.artifact.id,
+        &fixture.owner,
+        &other,
+        Role::Editor,
+    )?;
+    fixture.enqueue_as(&other, "job-key", 2, 1_000)?;
     Ok(())
 }
 
@@ -1024,7 +1042,15 @@ fn jobs_list_newest_first_by_page_for_one_actor() -> TestResult {
     let a = fixture.queued("a", 1_000)?;
     let b = fixture.queued("b", 2_000)?;
     let c = fixture.queued("c", 2_000)?;
-    fixture.enqueue_as(&actor("other"), "o", 2, 3_000)?;
+    let other = ActorId::user([7; 16]);
+    make_member(
+        &database_in(fixture.dir.path()),
+        &fixture.created.artifact.id,
+        &fixture.owner,
+        &other,
+        Role::Editor,
+    )?;
+    fixture.enqueue_as(&other, "o", 2, 3_000)?;
     let list = |after: Option<&JobPosition>, limit: usize| {
         fixture.store.list_jobs(JobListing {
             actor: &fixture.owner,

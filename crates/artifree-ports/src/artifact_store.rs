@@ -492,6 +492,9 @@ pub struct ChangePage {
 pub enum StoreError {
     /// The artifact does not exist, or the request reached it in the trash.
     NotFound,
+    /// The actor is a member whose role, read where the write commits, does
+    /// not allow it (decision 0060 rule 5); nothing was written.
+    Forbidden,
     /// The artifact's current revision is not the requested base.
     RevisionConflict {
         /// The revision that is current now.
@@ -534,6 +537,7 @@ impl fmt::Display for StoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotFound => formatter.write_str("artifact not found"),
+            Self::Forbidden => formatter.write_str("the actor's role does not allow this"),
             Self::RevisionConflict { current } => {
                 write!(formatter, "artifact is at revision {}", current.0)
             }

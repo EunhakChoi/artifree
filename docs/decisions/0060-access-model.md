@@ -2,8 +2,10 @@
 
 Date: 2026-11-16. Status: **accepted as S02's design (S02s). S02a (the
 stored part of rules 1, 6 and 16: members, roles, the access version and
-the access generation, schema 18) is implemented; nothing reads it to
-authorize a request yet, and every other rule is not implemented.**
+the access generation, schema 18) and S02b (the core's and the store's role
+checks of rules 2 to 5, 9 and 17) are implemented; no route grants a role
+yet, so no request reaches them as a member, and every other rule is not
+implemented.**
 Roadmap: S02s, S02.
 
 > Builds on [0036](0036-multi-user-identity.md) (users, tokens, isolation and
@@ -307,16 +309,16 @@ S02 is complete only with behavioural tests, proven by mutation, for:
 
 S02 is split into slices, each its own pull request, in this order:
 
-| Slice | Rules                 | What it adds                                                                                             | State           |
-| ----- | --------------------- | -------------------------------------------------------------------------------------------------------- | --------------- |
-| S02a  | 1, 6 and 16 (storage) | Schema 18: `artifact_members`, `access_requests`, `artifacts.access_version`; the `AccessStore` port     | implemented     |
-| S02b  | 2 to 5, 9, 11, 17     | The core's access and role checks on every artifact operation, read again in the committing transaction  | not implemented |
-| S02c  | 13, 14                | Feed delivery to every reader and the access change rows                                                 | not implemented |
-| S02d  | 15, 16 (memory), 18   | What a revocation, a downgrade and the trash remove, and the confirmations against the access generation | not implemented |
-| S02e  | 6 to 8                | `/v1/me`, the access routes, listings with roles, the CLI and the contract                               | not implemented |
-| S02f  | 10                    | The declared shared space                                                                                | not implemented |
-| S02g  | 12                    | Rooms per artifact                                                                                       | not implemented |
-| S02h  | Acceptance (web)      | The web workspace's sharing                                                                              | not implemented |
+| Slice | Rules                 | What it adds                                                                                             | State                                   |
+| ----- | --------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| S02a  | 1, 6 and 16 (storage) | Schema 18: `artifact_members`, `access_requests`, `artifacts.access_version`; the `AccessStore` port     | implemented                             |
+| S02b  | 2 to 5, 9, 11, 17     | The core's access and role checks on every artifact operation, read again in the committing transaction  | implemented, except as its section says |
+| S02c  | 13, 14                | Feed delivery to every reader and the access change rows                                                 | not implemented                         |
+| S02d  | 15, 16 (memory), 18   | What a revocation, a downgrade and the trash remove, and the confirmations against the access generation | not implemented                         |
+| S02e  | 6 to 8                | `/v1/me`, the access routes, listings with roles, the CLI and the contract                               | not implemented                         |
+| S02f  | 10                    | The declared shared space                                                                                | not implemented                         |
+| S02g  | 12                    | Rooms per artifact                                                                                       | not implemented                         |
+| S02h  | Acceptance (web)      | The web workspace's sharing                                                                              | not implemented                         |
 
 Nothing reaches a member's access before S02e exposes the routes, and S02e
 waits for S02b to S02d, so no slice opens an artifact to another user without
@@ -335,3 +337,36 @@ deletes the rows and blanks the access keys' fingerprints. No route, tool
 or core operation uses it yet. Behavioural tests on a real database
 (`crates/artifree-providers/tests/access.rs`) fail when each guard is
 broken.
+
+**S02b (implemented, except as said here).** The domain names what an
+operation needs (`Need`: read, change, own) and what each stand allows
+(`Access::permits`, rule 3's table); the core and the store apply the same
+table. `ArtifactService` resolves the caller as owner, member with the role
+the store holds (none in the trash), or nobody: nobody gets `not_found`, a
+member whose role does not allow the operation gets the new
+`ArtifactError::Forbidden`, which HTTP and MCP answer as `403` `forbidden`
+with one body, before the request body is looked at (rule 4). Reads and
+duplication need a read, commits, restores, title and pin changes and job
+enqueueing need a change, and a move to or from the trash and a purge need
+the owner. Inside the transaction that commits a revision, a file edit, a
+metadata change, a purge, a copy, a data write or a job, the store reads the
+caller's role again before the request key (rules 5 and 17): a write that
+passed the core's check before a downgrade or a revocation commits nothing,
+and a replay of an editor-era key by a viewer is `forbidden`, by a revoked
+member `not_found`. Data and asset spaces stay keyed by (artifact, user), so
+a member reaches its own space while it is a member (rule 9); a copy is the
+caller's and copies the caller's own space (rule 2). A running job of a
+revoked member is no longer a change of authority (rule 15's running job):
+only an actor who was never owner or member is. Behavioural tests over a
+real database (`crates/artifree-providers/tests/access_writes.rs`,
+`crates/artifree-server/tests/member_roles.rs`, and a case in
+`run_profile_claim.rs`) fail when each guard is broken.
+
+Not in S02b, and moved to the slice named: listing an artifact one is a
+member of, with its role (S02e); runtime capabilities offered by role, so a
+viewer's frame is shown `source.write` as not available (S02d, with the
+downgrade's grant removal) — until then a viewer's runtime source write is
+refused by the role check like any other write; and the owner's cancel of a
+member's job (rule 11), with the job reads of the owner (S02d). Rule 11's
+build sharing needs nothing new: a build is already keyed by artifact,
+revision and profile, and a member reads it through the read check.
