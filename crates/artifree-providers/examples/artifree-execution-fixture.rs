@@ -47,6 +47,7 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Display;
+#[cfg(target_os = "linux")]
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
