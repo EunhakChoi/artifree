@@ -12,6 +12,7 @@ use artifree_domain::AppDataVersion;
 use artifree_domain::SourceRevision;
 use artifree_domain::data::{DataChange, DataError, DataPath, DataValue, MemberPage, Members};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, StateGeneration, UnixMillis};
+use artifree_ports::access_store::AccessStore;
 use artifree_ports::artifact_store::{ArtifactStore, Delivery, RequestIdentity};
 use artifree_ports::data_store::{
     DataReceipt, DataStore, DataStoreError, DataWrite, OutboxBinding, OutboxFence,
@@ -54,7 +55,7 @@ pub struct DataMutation<'a> {
     pub fence: Option<&'a OutboxFence>,
 }
 
-impl<S: ArtifactStore + DataStore> ArtifactService<S> {
+impl<S: ArtifactStore + AccessStore + DataStore> ArtifactService<S> {
     /// Establishes a browser outbox binding from one storage snapshot.
     ///
     /// # Errors
@@ -320,10 +321,14 @@ fn data_error(error: DataStoreError) -> ArtifactError {
 mod tests {
     use std::cell::Cell;
 
+    use artifree_domain::access::{AccessGeneration, Role};
     use artifree_domain::change::ChangeSequence;
     use artifree_domain::data::{DataSpace, MemberName};
     use artifree_domain::package::{FilePackage, PackagePath};
     use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
+    use artifree_ports::access_store::{
+        AccessList, AccessReceipt, AccessRequest, AccessStoreError,
+    };
     use artifree_ports::artifact_store::{
         ArtifactListing, ArtifactRecord, ChangePage, CleanupReceipt, CleanupRequest, CommitReceipt,
         ConditionalCommit, MetadataReceipt, MetadataUpdate, NewArtifact, PurgeReceipt,
@@ -400,6 +405,26 @@ mod tests {
             _: SourceRevision,
         ) -> Result<DataReceipt, DataStoreError> {
             Err(DataStoreError::Unavailable("unused".into()))
+        }
+    }
+
+    /// Only the owner is asked about, so no one is a member.
+    impl AccessStore for NewerEachRead {
+        fn access_list(&self, _: &ArtifactId) -> Result<Option<AccessList>, StoreError> {
+            Err(StoreError::Unavailable("unused".into()))
+        }
+        fn member_role(&self, _: &ArtifactId, _: &ActorId) -> Result<Option<Role>, StoreError> {
+            Ok(None)
+        }
+        fn access_generation(
+            &self,
+            _: &ArtifactId,
+            _: &ActorId,
+        ) -> Result<AccessGeneration, StoreError> {
+            Err(StoreError::Unavailable("unused".into()))
+        }
+        fn change_access(&self, _: AccessRequest<'_>) -> Result<AccessReceipt, AccessStoreError> {
+            Err(AccessStoreError::Unavailable("unused".into()))
         }
     }
 

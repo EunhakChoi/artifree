@@ -284,7 +284,9 @@ fn assess(
                     a.purged_at IS NOT NULL,
                     u.id IS NOT NULL AND u.disabled_at IS NOT NULL,
                     u.state_generation,
-                    a.owner <> j.actor
+                    a.owner <> j.actor AND NOT EXISTS (
+                        SELECT 1 FROM artifact_members m
+                        WHERE m.artifact_id = j.artifact_id AND m.user_id = j.actor)
              FROM jobs j
              JOIN artifacts a ON a.id = j.artifact_id
              LEFT JOIN users u ON u.id = j.actor
@@ -319,8 +321,11 @@ fn assess(
     } else if generation {
         Some(StopReason::Generation)
     } else if foreign {
-        // Authority is the store's mirror of the core's owner-only access
-        // check. Ownership is fixed in R02ba, so only a raw edit reaches it.
+        // Authority is the store's mirror of the core's access check: the
+        // actor is neither the owner nor ever a member. Ownership is fixed in
+        // R02ba and member records are kept after a revocation, whose running
+        // job ends normally (decision 0060 rule 15), so only a raw edit
+        // reaches it.
         Some(StopReason::Authority)
     } else {
         None

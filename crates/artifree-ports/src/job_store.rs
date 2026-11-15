@@ -316,6 +316,9 @@ pub enum JobStoreError {
     /// The job, the artifact, or its revision does not exist, or the artifact
     /// is in the trash or purged, or belongs to another actor.
     NotFound,
+    /// The actor is a member whose role, read where the job is enqueued, does
+    /// not allow enqueueing (decision 0060 rule 5); nothing was written.
+    Forbidden,
     /// The actor already used the key for another request.
     RequestKeyReused,
     /// The job is in a state that does not allow the request.
@@ -344,6 +347,7 @@ impl fmt::Display for JobStoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotFound => formatter.write_str("job not found"),
+            Self::Forbidden => formatter.write_str("the actor's role does not allow this"),
             Self::RequestKeyReused => {
                 formatter.write_str("request key was already used for a different request")
             }
@@ -368,6 +372,7 @@ impl From<StoreError> for JobStoreError {
     fn from(error: StoreError) -> Self {
         match error {
             StoreError::NotFound => Self::NotFound,
+            StoreError::Forbidden => Self::Forbidden,
             StoreError::RequestKeyReused => Self::RequestKeyReused,
             StoreError::Unavailable(reason) => Self::Unavailable(reason),
             other => Self::Unavailable(other.to_string()),
@@ -377,9 +382,12 @@ impl From<StoreError> for JobStoreError {
 
 /// Durable job storage.
 ///
-/// Methods do not check authorization; the application core does. A write
-/// that names an artifact outside the trash and not purged is
-/// [`JobStoreError::NotFound`] otherwise, before the key is looked at.
+/// The application core checks authorization. Enqueueing reads the actor's
+/// access again where it commits: a user who is neither owner nor member is
+/// [`JobStoreError::NotFound`], and a viewer [`JobStoreError::Forbidden`]
+/// (decision 0060 rule 5). A write that names an artifact outside the trash
+/// and not purged is [`JobStoreError::NotFound`] otherwise, before the key is
+/// looked at.
 pub trait JobStore {
     /// Enqueues a job pinned to a revision, or returns the stored receipt of
     /// the same request. One step decides the artifact, the revision, the key,
@@ -389,7 +397,8 @@ pub trait JobStore {
     ///
     /// # Errors
     ///
-    /// [`JobStoreError::NotFound`], [`JobStoreError::RequestKeyReused`],
+    /// [`JobStoreError::NotFound`], [`JobStoreError::Forbidden`] for a
+    /// viewer, [`JobStoreError::RequestKeyReused`],
     /// [`JobStoreError::LimitReached`], [`JobStoreError::InvalidRequest`], or
     /// [`JobStoreError::Unavailable`].
     fn enqueue_job(&self, request: NewJob<'_>) -> Result<JobReceipt, JobStoreError>;
@@ -405,7 +414,8 @@ pub trait JobStore {
     ///
     /// # Errors
     ///
-    /// [`JobStoreError::NotFound`], [`JobStoreError::RequestKeyReused`],
+    /// [`JobStoreError::NotFound`], [`JobStoreError::Forbidden`] for a
+    /// viewer, [`JobStoreError::RequestKeyReused`],
     /// [`JobStoreError::LimitReached`] for a public job, or
     /// [`JobStoreError::Unavailable`].
     fn enqueue_profile_job(&self, request: NewProfileJob<'_>) -> Result<JobReceipt, JobStoreError>;

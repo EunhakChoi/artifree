@@ -19,6 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use artifree_domain::SourceRevision;
 use artifree_domain::identity::{ActorId, ArtifactId, InvalidValue, RequestKey, UnixMillis};
 use artifree_domain::job::{JobId, JobKind, PUBLIC_PROFILE, ProfileName};
+use artifree_ports::access_store::AccessStore;
 use artifree_ports::artifact_store::{ArtifactStore, RequestIdentity};
 use artifree_ports::job_store::{
     ExecutionPresence, JobCancel, JobListing, JobPosition, JobReceipt, JobRecord, JobStore,
@@ -27,6 +28,7 @@ use artifree_ports::job_store::{
 use sha2::{Digest, Sha256};
 
 use crate::artifacts::{ArtifactError, ArtifactService, Fingerprint, Missing};
+use artifree_domain::access::Need;
 
 /// Where the current time comes from. Everything that stamps a job reads it
 /// here, so tests move time without waiting for it.
@@ -134,7 +136,7 @@ pub fn require_build_profile(
     }
 }
 
-impl<S: ArtifactStore + JobStore> ArtifactService<S> {
+impl<S: ArtifactStore + AccessStore + JobStore> ArtifactService<S> {
     /// Enqueues a job of `kind` pinned to `revision` of an artifact `actor`
     /// may read.
     ///
@@ -158,7 +160,8 @@ impl<S: ArtifactStore + JobStore> ArtifactService<S> {
         kind: JobKind,
         now: UnixMillis,
     ) -> Result<JobReceipt, ArtifactError> {
-        let record = self.authorized(actor, artifact)?;
+        // Enqueueing is an owner's or editor's (decision 0060 rule 3).
+        let record = self.reachable(actor, artifact, Need::Change)?;
         if revision.0 == 0 || revision > record.current_revision {
             return Err(ArtifactError::NotFound(Missing::Revision));
         }
@@ -228,7 +231,8 @@ impl<S: ArtifactStore + JobStore> ArtifactService<S> {
         profile: &ProfileName,
         now: UnixMillis,
     ) -> Result<JobReceipt, ArtifactError> {
-        let record = self.authorized(actor, artifact)?;
+        // Enqueueing is an owner's or editor's (decision 0060 rule 3).
+        let record = self.reachable(actor, artifact, Need::Change)?;
         if revision.0 == 0 || revision > record.current_revision {
             return Err(ArtifactError::NotFound(Missing::Revision));
         }
@@ -375,6 +379,7 @@ impl<S: ExecutionPresence> ArtifactService<S> {
 pub(crate) fn job_error(error: JobStoreError, missing: Missing) -> ArtifactError {
     match error {
         JobStoreError::NotFound => ArtifactError::NotFound(missing),
+        JobStoreError::Forbidden => ArtifactError::Forbidden,
         JobStoreError::RequestKeyReused => ArtifactError::RequestKeyReused,
         JobStoreError::Conflict(state) => ArtifactError::JobEnded { state },
         JobStoreError::LimitReached => ArtifactError::TooManyJobs,

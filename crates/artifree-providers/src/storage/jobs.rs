@@ -16,6 +16,7 @@
 //! `revision_files` rows of its pinned revision.
 
 use artifree_domain::SourceRevision;
+use artifree_domain::access::Need;
 use artifree_domain::change::FeedId;
 use artifree_domain::identity::{ArtifactId, UnixMillis};
 use artifree_domain::job::{
@@ -289,6 +290,15 @@ fn enqueue(
     if !artifact_in_place(transaction, request.artifact)? {
         return Err(JobStoreError::NotFound);
     }
+    // A viewer may not enqueue, read again here (decision 0060 rules 3 and 5),
+    // before the key, so a viewer's replay of an editor-era key is refused
+    // (rule 17).
+    super::access::admit(
+        transaction,
+        request.artifact,
+        request.request.actor,
+        Need::Change,
+    )?;
     let revision = i64::try_from(request.revision.0).map_err(corrupt)?;
     let pinned: bool = transaction
         .query_row(
@@ -372,6 +382,14 @@ fn cancel(
     {
         return Err(JobStoreError::NotFound);
     }
+    // A member cancels its own job while it is a member, read again here
+    // before the key (decision 0060 rules 5, 11 and 17).
+    super::access::admit(
+        transaction,
+        &job.artifact,
+        request.request.actor,
+        Need::Read,
+    )?;
     match key_of(transaction, request.request)? {
         Key::Same(id) => {
             return Ok(JobReceipt {
@@ -1053,6 +1071,9 @@ impl JobStore for SqliteStore {
                     public_job!(),
                     "
                        AND a.purged_at IS NULL AND a.deleted_at IS NULL
+                       AND (a.owner = j.actor OR EXISTS (SELECT 1 FROM artifact_members m
+                            WHERE m.artifact_id = a.id AND m.user_id = j.actor
+                              AND m.role IS NOT NULL))
                        AND (?2 IS NULL OR j.artifact_id = ?2)
                        AND (?3 IS NULL OR j.created_at < ?3 OR (j.created_at = ?3 AND j.id > ?4))
                      ORDER BY j.created_at DESC, j.id LIMIT ?5"

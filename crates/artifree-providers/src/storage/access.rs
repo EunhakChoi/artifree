@@ -11,8 +11,12 @@
 //! A move to or from the trash raises every member's generation, and a purge
 //! deletes the rows and blanks the fingerprints of the access keys, both inside
 //! the transactions of [`super::SqliteStore`] that do those.
+//!
+//! Every write of a member reads the member's role again inside the
+//! transaction that commits it ([`admit`], decision 0060 rule 5, slice S02b),
+//! before its key is looked at (rule 17).
 
-use artifree_domain::access::{AccessGeneration, AccessVersion, Role};
+use artifree_domain::access::{Access, AccessGeneration, AccessVersion, Need, Role};
 use artifree_domain::identity::{ActorId, ArtifactId};
 use artifree_ports::access_store::{
     AccessChange, AccessList, AccessReceipt, AccessRequest, AccessStore, AccessStoreError, Member,
@@ -118,6 +122,46 @@ fn member_record(
         Ok((role, AccessGeneration(count(generation)?)))
     })
     .transpose()
+}
+
+/// Whether `actor` may do what a write `need`s on the artifact, read in the
+/// caller's transaction (decision 0060 rule 5). The owner always may; a member
+/// may outside the trash with a role that allows it ([`StoreError::Forbidden`]
+/// otherwise); anyone else, and every member while the artifact is in the
+/// trash, gets [`StoreError::NotFound`] (rule 4). An artifact that does not
+/// exist or was purged passes, so the caller's own lookup answers it as before
+/// (a replay of a purge included).
+pub(super) fn admit(
+    connection: &Connection,
+    artifact: &ArtifactId,
+    actor: &ActorId,
+    need: Need,
+) -> Result<(), StoreError> {
+    let head: Option<(String, bool)> = connection
+        .query_row(
+            "SELECT owner, deleted_at IS NOT NULL FROM artifacts
+             WHERE id = ?1 AND purged_at IS NULL",
+            [artifact.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(unavailable)?;
+    let Some((owner, trashed)) = head else {
+        return Ok(());
+    };
+    if owner == actor.as_str() {
+        return Ok(());
+    }
+    let role = if trashed {
+        None
+    } else {
+        member_record(connection, artifact, actor)?.and_then(|(role, _)| role)
+    };
+    match role.map(Access::Member) {
+        None => Err(StoreError::NotFound),
+        Some(access) if access.permits(need) => Ok(()),
+        Some(_) => Err(StoreError::Forbidden),
+    }
 }
 
 /// Whether `user` is registered, and if so whether it is disabled.

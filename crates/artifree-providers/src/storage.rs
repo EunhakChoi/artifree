@@ -61,6 +61,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::schema;
+use artifree_domain::access::Need;
 use artifree_domain::artifact_type::{ArtifactType, TypeRelease};
 use artifree_domain::change::{ChangeSequence, FeedId};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, UnixMillis};
@@ -245,6 +246,16 @@ impl ArtifactStore for SqliteStore {
                 Settled::Replay(id, position) => return replayed(transaction, &id, position),
                 Settled::Proceed(()) => {}
             }
+            // The copy is the caller's own, so a replay is answered first
+            // (decision 0060 rule 17); a new copy needs its source readable.
+            if let Some(source) = request.source {
+                access::admit(
+                    transaction,
+                    source.artifact,
+                    request.request.actor,
+                    Need::Read,
+                )?;
+            }
             let id = ArtifactId::from_random(random_bytes()?);
             let now = commit_time(transaction)?;
             let revision = SourceRevision(1);
@@ -306,6 +317,12 @@ impl ArtifactStore for SqliteStore {
 
     fn commit_revision(&self, request: RevisionCommit<'_>) -> Result<CommitReceipt, StoreError> {
         self.write(|transaction| {
+            access::admit(
+                transaction,
+                request.artifact,
+                request.request.actor,
+                Need::Change,
+            )?;
             let target = in_place(transaction, request.artifact)?;
             let current = match settle(key_use(transaction, request.request)?, target)? {
                 Settled::Replay(id, position) => return replayed(transaction, &id, position),
@@ -331,6 +348,12 @@ impl ArtifactStore for SqliteStore {
 
     fn commit_edits(&self, request: ConditionalCommit<'_>) -> Result<CommitReceipt, StoreError> {
         self.write(|transaction| {
+            access::admit(
+                transaction,
+                request.artifact,
+                request.request.actor,
+                Need::Change,
+            )?;
             let target = in_place(transaction, request.artifact)?;
             let current = match settle(key_use(transaction, request.request)?, target)? {
                 Settled::Replay(id, position) => return replayed(transaction, &id, position),
@@ -375,6 +398,9 @@ impl ArtifactStore for SqliteStore {
 
     fn update_metadata(&self, request: MetadataUpdate<'_>) -> Result<MetadataReceipt, StoreError> {
         self.write(|transaction| {
+            // A move to or from the trash is the owner's (decision 0060 rule 3).
+            let need = Need::of_metadata(request.deleted.is_some());
+            access::admit(transaction, request.artifact, request.request.actor, need)?;
             // A recovery is the one update that reaches the trash.
             let target = artifact_record(transaction, request.artifact)?
                 .filter(|record| record.deleted_at.is_none() || request.recovers());
@@ -489,6 +515,12 @@ impl ArtifactStore for SqliteStore {
             // The order of `settle`: a replay, then not found, then a reused
             // key. The fingerprint names the operation, so a key that finds
             // its artifact purged was the purge's own.
+            access::admit(
+                transaction,
+                request.artifact,
+                request.request.actor,
+                Need::Own,
+            )?;
             let target = artifact_record(transaction, request.artifact)?;
             match (key_use(transaction, request.request)?, &target) {
                 (KeyUse::Gone(id, position), _) => {

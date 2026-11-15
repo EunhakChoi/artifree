@@ -347,3 +347,41 @@ pub fn expected_artifact_name(version: i64) -> &'static str {
 pub fn database_in(directory: &Path) -> PathBuf {
     directory.join(DATABASE_FILE)
 }
+
+/// Registers `user` and makes it a member of `owner`'s artifact with `role`
+/// (decision 0060), as a grant through the access routes would. The store
+/// reads the role again where a member's write commits (rule 5), so a test
+/// that writes as another actor makes that actor a member first.
+pub fn make_member(
+    database: &Path,
+    artifact: &ArtifactId,
+    owner: &ActorId,
+    user: &ActorId,
+    role: artifree_domain::access::Role,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use artifree_ports::access_store::{AccessChange, AccessRequest, AccessStore};
+    use artifree_ports::user_store::{NewUser, UserStore};
+    artifree_providers::tokens::SqliteTokenStore::open(database)?.register(&NewUser {
+        id: user.clone(),
+        label: parsed("Member"),
+        created_at: "2026-11-16T00:00:00Z".to_owned(),
+    })?;
+    let store = SqliteStore::open(database)?;
+    let base = store
+        .access_list(artifact)?
+        .ok_or("the artifact has no access list")?
+        .version;
+    store.change_access(AccessRequest {
+        request: RequestIdentity {
+            actor: owner,
+            key: &key(&format!("member-{user}")),
+            fingerprint: RequestFingerprint(digest(&format!("{artifact}{user}{role}"))),
+        },
+        artifact,
+        user,
+        change: AccessChange::Grant(role),
+        base,
+        now: artifree_domain::identity::UnixMillis(1),
+    })?;
+    Ok(())
+}

@@ -2,6 +2,7 @@
 
 use super::{SqliteStore, corrupt, key_used_elsewhere, unavailable};
 use artifree_domain::SourceRevision;
+use artifree_domain::access::Need;
 use artifree_domain::assets::{
     AssetId, AssetMediaType, AssetMetadata, AssetRejection, AssetVersion, MAX_ACTOR_ASSETS,
     MAX_ACTOR_BYTES, MAX_ASSET_BYTES, MAX_SPACE_ASSETS, MAX_SPACE_BYTES,
@@ -20,10 +21,21 @@ fn authority(
     artifact: &ArtifactId,
     source: Option<SourceRevision>,
 ) -> Result<(), AssetStoreError> {
-    let head: Option<i64> = connection.query_row(
-        "SELECT current_revision FROM artifacts WHERE id = ?1 AND owner = ?2 AND deleted_at IS NULL
+    // The owner or a current member reaches its own space (decision 0060
+    // rule 9); no member reaches the trash.
+    super::access::admit(connection, artifact, actor, Need::Read).map_err(|error| match error {
+        StoreError::NotFound | StoreError::Forbidden => AssetStoreError::NotFound,
+        other => AssetStoreError::from(other),
+    })?;
+    let head: Option<i64> = connection
+        .query_row(
+            "SELECT current_revision FROM artifacts WHERE id = ?1 AND deleted_at IS NULL
              AND purged_at IS NULL",
-        params![artifact.as_str(), actor.as_str()], |row| row.get(0)).optional().map_err(unavailable)?;
+            [artifact.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(unavailable)?;
     let head = head.ok_or(AssetStoreError::NotFound)?;
     let current = SourceRevision(u64::try_from(head).map_err(corrupt)?);
     if source.is_some_and(|expected| expected != current) {

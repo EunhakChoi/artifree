@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use artifree_core::jobs::Clock;
 use artifree_core::worker::{Pace, Step, WorkerConfig, run_next};
 use artifree_domain::SourceRevision;
+use artifree_domain::access::{AccessGeneration, Role};
 use artifree_domain::change::ChangeSequence;
 use artifree_domain::change::FeedId;
 use artifree_domain::identity::{ActorId, ArtifactId, UnixMillis};
@@ -20,6 +21,9 @@ use artifree_domain::job::{
 };
 use artifree_domain::package::{FilePackage, PackagePath};
 use artifree_domain::{ArtifactKind, MetadataRevision};
+use artifree_ports::access_store::{
+    AccessList, AccessReceipt, AccessRequest, AccessStore, AccessStoreError,
+};
 use artifree_ports::artifact_store::{
     ArtifactListing, ArtifactRecord, ArtifactStore, ChangePage, CleanupReceipt, CleanupRequest,
     CommitReceipt, ConditionalCommit, MetadataReceipt, MetadataUpdate, NewArtifact, PurgeReceipt,
@@ -104,6 +108,29 @@ fn take(counter: &Cell<u32>) -> bool {
 struct Flaky {
     inner: SqliteStore,
     faults: Faults,
+}
+
+impl AccessStore for Flaky {
+    fn access_list(&self, artifact: &ArtifactId) -> Result<Option<AccessList>, StoreError> {
+        self.inner.access_list(artifact)
+    }
+    fn member_role(
+        &self,
+        artifact: &ArtifactId,
+        user: &ActorId,
+    ) -> Result<Option<Role>, StoreError> {
+        self.inner.member_role(artifact, user)
+    }
+    fn access_generation(
+        &self,
+        artifact: &ArtifactId,
+        user: &ActorId,
+    ) -> Result<AccessGeneration, StoreError> {
+        self.inner.access_generation(artifact, user)
+    }
+    fn change_access(&self, request: AccessRequest<'_>) -> Result<AccessReceipt, AccessStoreError> {
+        self.inner.change_access(request)
+    }
 }
 
 impl ArtifactStore for Flaky {

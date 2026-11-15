@@ -4,6 +4,7 @@ use crate::artifacts::{ArtifactService, Fingerprint};
 use artifree_domain::SourceRevision;
 use artifree_domain::assets::{AssetId, AssetMediaType, AssetRejection, AssetVersion};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, UnixMillis};
+use artifree_ports::access_store::AccessStore;
 use artifree_ports::artifact_store::{ArtifactStore, RequestIdentity};
 use artifree_ports::asset_store::{
     AssetContent, AssetReceipt, AssetSnapshot, AssetStore, AssetStoreError, AssetWrite,
@@ -34,7 +35,7 @@ pub struct AssetDeletion<'a> {
     pub now: UnixMillis,
 }
 
-impl<S: ArtifactStore + AssetStore> ArtifactService<S> {
+impl<S: ArtifactStore + AccessStore + AssetStore> ArtifactService<S> {
     /// Reads one scoped asset snapshot under current authority.
     /// # Errors
     /// Missing authority or storage failure.

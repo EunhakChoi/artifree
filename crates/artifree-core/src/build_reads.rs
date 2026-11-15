@@ -14,6 +14,7 @@ use artifree_domain::SourceRevision;
 use artifree_domain::identity::{ActorId, ArtifactId};
 use artifree_domain::job::{BuildDiagnostic, JobFailure, JobId, JobKind, JobState, ProfileName};
 use artifree_domain::package::PackagePath;
+use artifree_ports::access_store::AccessStore;
 use artifree_ports::artifact_store::ArtifactStore;
 use artifree_ports::build_store::{BuildRecord, BuildSnapshot, BuildStore};
 use artifree_ports::job_store::{JobRecord, JobStore};
@@ -60,7 +61,7 @@ pub struct BuildStatus {
     pub head_build: HeadBuild,
 }
 
-impl<S: ArtifactStore + JobStore + BuildStore> ArtifactService<S> {
+impl<S: ArtifactStore + AccessStore + JobStore + BuildStore> ArtifactService<S> {
     /// The build a build preview of `revision` serves (decision 0058 rule
     /// 14), checked as a source preview checks its revision. `profile` must
     /// pass [`require_build_profile`] for `build_profiles`, the build

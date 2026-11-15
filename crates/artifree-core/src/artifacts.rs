@@ -24,6 +24,7 @@ use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title};
 use artifree_domain::job::JobState;
 use artifree_domain::package::{FileChange, FilePackage, FileSet, PackageError, PackagePath};
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
+use artifree_ports::access_store::AccessStore;
 use artifree_ports::artifact_store::{
     ArtifactListing, ArtifactRecord, ArtifactStore, ChangePage, CleanupReceipt, CleanupRequest,
     CommitReceipt, ConditionalCommit, ContentSetDigest, CopySource, Delivery, FileEdit, FileEntry,
@@ -37,6 +38,7 @@ use crate::catalog::{Catalog, Release};
 use crate::listing::{self, ArtifactPage, ListQuery};
 use crate::parts::{self, Boundary, ByteRange, FilePart, RangeError};
 use crate::policy;
+use artifree_domain::access::Need;
 
 /// What could not be found. Inaccessible artifacts are reported as missing so
 /// that callers cannot probe for identifiers they may not read.
@@ -73,6 +75,9 @@ pub enum ArtifactError {
     InvalidPackage(PackageError),
     /// The target is missing or inaccessible.
     NotFound(Missing),
+    /// The actor is a member of the artifact whose role does not allow the
+    /// operation (decision 0060 rule 4); nothing was written.
+    Forbidden,
     /// The change was prepared against an older revision; nothing was written.
     RevisionConflict {
         /// The current revision.
@@ -167,6 +172,7 @@ impl fmt::Display for ArtifactError {
             Self::NotFound(Missing::File) => formatter.write_str("file not found in revision"),
             Self::NotFound(Missing::Job) => formatter.write_str("job not found"),
             Self::NotFound(Missing::Build) => formatter.write_str("revision has no build"),
+            Self::Forbidden => formatter.write_str("the actor's role does not allow this"),
             Self::RevisionConflict { current } => write!(
                 formatter,
                 "artifact changed; current revision is {}",
@@ -244,6 +250,7 @@ impl From<StoreError> for ArtifactError {
     fn from(error: StoreError) -> Self {
         match error {
             StoreError::NotFound => Self::NotFound(Missing::Artifact),
+            StoreError::Forbidden => Self::Forbidden,
             StoreError::RevisionConflict { current } => Self::RevisionConflict { current },
             StoreError::FilesChanged {
                 current,
@@ -308,7 +315,7 @@ pub struct ArtifactService<S> {
     catalog: Catalog,
 }
 
-impl<S: ArtifactStore> ArtifactService<S> {
+impl<S: ArtifactStore + AccessStore> ArtifactService<S> {
     /// Uses `store` for all durable state, with an empty type catalog; see
     /// [`Self::with_catalog`].
     pub fn new(store: S) -> Self {
@@ -494,7 +501,7 @@ impl<S: ArtifactStore> ArtifactService<S> {
         base: SourceRevision,
         changes: Vec<FileChange>,
     ) -> Result<CommitReceipt, ArtifactError> {
-        let record = self.owned(actor, id)?;
+        let record = self.owned(actor, id, Need::Change)?;
         let mut hasher = Fingerprint::new("save");
         hasher.field(id.as_str().as_bytes());
         hasher.field(&base.0.to_be_bytes());
@@ -561,7 +568,7 @@ impl<S: ArtifactStore> ArtifactService<S> {
         base: SourceRevision,
         revision: SourceRevision,
     ) -> Result<CommitReceipt, ArtifactError> {
-        let record = self.owned(actor, id)?;
+        let record = self.owned(actor, id, Need::Change)?;
         let mut hasher = Fingerprint::new("restore");
         hasher.field(id.as_str().as_bytes());
         hasher.field(&base.0.to_be_bytes());
@@ -638,7 +645,7 @@ impl<S: ArtifactStore> ArtifactService<S> {
         base: SourceRevision,
         edits: &[FileEdit],
     ) -> Result<CommitReceipt, ArtifactError> {
-        let record = self.owned(actor, id)?;
+        let record = self.owned(actor, id, Need::Change)?;
         let mut hasher = Fingerprint::new("edit_files");
         hasher.field(id.as_str().as_bytes());
         hasher.field(&base.0.to_be_bytes());
@@ -785,7 +792,7 @@ impl<S: ArtifactStore> ArtifactService<S> {
             key,
             fingerprint: hasher.finish(),
         };
-        let record = match self.owned(actor, id) {
+        let record = match self.owned(actor, id, Need::Read) {
             Ok(record) => record,
             // The source may have been purged since the copy was made. The
             // key is the actor's own, so its copy is replayed; anything else
@@ -841,8 +848,9 @@ impl<S: ArtifactStore> ArtifactService<S> {
         base: MetadataRevision,
         change: &MetadataChange,
     ) -> Result<MetadataReceipt, ArtifactError> {
-        // The store decides the trash: only a recovery reaches it.
-        self.owned(actor, id)?;
+        // The store decides the trash: only a recovery reaches it. A move to
+        // or from the trash is the owner's (decision 0060 rule 3).
+        self.owned(actor, id, Need::of_metadata(change.deleted.is_some()))?;
         let mut hasher = Fingerprint::new("update");
         hasher.field(id.as_str().as_bytes());
         hasher.field(&base.0.to_be_bytes());
@@ -903,10 +911,10 @@ impl<S: ArtifactStore> ArtifactService<S> {
         // still exists can belong to someone else. Anything else goes to the
         // store, which finds the actor's own purge by its key or reports the
         // artifact missing.
-        if let Some(record) = self.store.artifact(id)?
-            && !policy::may_access(actor, &record)
-        {
-            return Err(ArtifactError::NotFound(Missing::Artifact));
+        // Only the owner purges (decision 0060 rule 3): a member outside the
+        // trash is refused for its role, and inside it reaches nothing (rule 4).
+        if let Some(record) = self.store.artifact(id)? {
+            self.admit(actor, &record, Need::Own)?;
         }
         let mut hasher = Fingerprint::new("purge");
         hasher.field(id.as_str().as_bytes());
@@ -1219,13 +1227,25 @@ impl<S: ArtifactStore> ArtifactService<S> {
             .ok_or(ArtifactError::NotFound(Missing::Revision))
     }
 
-    /// An artifact the actor may read: one it owns, outside the trash.
+    /// An artifact the actor may read: its own or one it is a member of,
+    /// outside the trash (decision 0060 rule 3).
     pub(crate) fn authorized(
         &self,
         actor: &ActorId,
         id: &ArtifactId,
     ) -> Result<ArtifactRecord, ArtifactError> {
-        let record = self.owned(actor, id)?;
+        self.reachable(actor, id, Need::Read)
+    }
+
+    /// An artifact outside the trash whose operation `need`s more than a
+    /// read: enqueueing a job needs [`Need::Change`].
+    pub(crate) fn reachable(
+        &self,
+        actor: &ActorId,
+        id: &ArtifactId,
+        need: Need,
+    ) -> Result<ArtifactRecord, ArtifactError> {
+        let record = self.owned(actor, id, need)?;
         if record.deleted_at.is_some() {
             return Err(ArtifactError::NotFound(Missing::Artifact));
         }
@@ -1233,12 +1253,46 @@ impl<S: ArtifactStore> ArtifactService<S> {
     }
 
     /// An artifact the actor may change, also in the trash: a write there
-    /// is answered by [`checked`] and the store (decision 0013).
-    fn owned(&self, actor: &ActorId, id: &ArtifactId) -> Result<ArtifactRecord, ArtifactError> {
-        match self.store.artifact(id)? {
-            Some(record) if policy::may_access(actor, &record) => Ok(record),
-            _ => Err(ArtifactError::NotFound(Missing::Artifact)),
+    /// is answered by [`checked`] and the store (decision 0013). See
+    /// [`Self::admit`] for who reaches it.
+    fn owned(
+        &self,
+        actor: &ActorId,
+        id: &ArtifactId,
+        need: Need,
+    ) -> Result<ArtifactRecord, ArtifactError> {
+        let record = self
+            .store
+            .artifact(id)?
+            .ok_or(ArtifactError::NotFound(Missing::Artifact))?;
+        self.admit(actor, &record, need)?;
+        Ok(record)
+    }
+
+    /// Whether `actor` may do what an operation `need`s on `record`. The owner
+    /// reaches it, in the trash too; a member reaches it outside the trash
+    /// only, with a role that allows what the operation needs, and otherwise
+    /// is refused with [`ArtifactError::Forbidden`]; anyone else gets the
+    /// answer an unknown name gets (decision 0060 rules 3 and 4).
+    fn admit(
+        &self,
+        actor: &ActorId,
+        record: &ArtifactRecord,
+        need: Need,
+    ) -> Result<(), ArtifactError> {
+        // No member reaches the artifact in the trash (the store holds no
+        // role for anyone there), so its role is not looked up.
+        let role = if record.owner == *actor || record.deleted_at.is_some() {
+            None
+        } else {
+            self.store.member_role(&record.id, actor)?
+        };
+        let access = policy::access_of(actor, record, role)
+            .ok_or(ArtifactError::NotFound(Missing::Artifact))?;
+        if !access.permits(need) {
+            return Err(ArtifactError::Forbidden);
         }
+        Ok(())
     }
 }
 
@@ -1432,6 +1486,10 @@ impl Fingerprint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use artifree_domain::access::{AccessGeneration, Role};
+    use artifree_ports::access_store::{
+        AccessList, AccessReceipt, AccessRequest, AccessStoreError,
+    };
 
     fn digest(fields: &[&[u8]]) -> RequestFingerprint {
         let mut fingerprint = Fingerprint::new("test");
@@ -1446,6 +1504,26 @@ mod tests {
     /// between the two (decision 0029). Writes are not used.
     struct PurgedAfterTheCheck {
         record: ArtifactRecord,
+    }
+
+    /// Only the owner is asked about, so no one is a member.
+    impl AccessStore for PurgedAfterTheCheck {
+        fn access_list(&self, _: &ArtifactId) -> Result<Option<AccessList>, StoreError> {
+            Err(StoreError::Unavailable("unused".into()))
+        }
+        fn member_role(&self, _: &ArtifactId, _: &ActorId) -> Result<Option<Role>, StoreError> {
+            Ok(None)
+        }
+        fn access_generation(
+            &self,
+            _: &ArtifactId,
+            _: &ActorId,
+        ) -> Result<AccessGeneration, StoreError> {
+            Err(StoreError::Unavailable("unused".into()))
+        }
+        fn change_access(&self, _: AccessRequest<'_>) -> Result<AccessReceipt, AccessStoreError> {
+            Err(AccessStoreError::Unavailable("unused".into()))
+        }
     }
 
     impl ArtifactStore for PurgedAfterTheCheck {

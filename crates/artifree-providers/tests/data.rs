@@ -4,6 +4,8 @@
 
 mod common;
 
+use artifree_domain::access::Role;
+
 use std::sync::{Arc, Barrier};
 use std::thread;
 
@@ -19,8 +21,8 @@ use artifree_ports::data_store::{DataReceipt, DataStore, DataStoreError, DataWri
 use artifree_ports::job_store::{JobStore, NewJob};
 use artifree_providers::storage::SqliteStore;
 use common::{
-    TempDir, TestResult, actor, create_demo, database_in, digest, key, package, parsed, revise,
-    update_metadata,
+    TempDir, TestResult, actor, create_demo, database_in, digest, key, make_member, package,
+    parsed, revise, update_metadata,
 };
 use rusqlite::Connection;
 
@@ -420,7 +422,14 @@ fn the_same_key_for_another_request_is_refused_and_writes_nothing() -> TestResul
         fixture.write("key", 1, &set("n", "1")).err(),
         Some(DataStoreError::RequestKeyReused)
     );
-    let other = actor("other");
+    let other = ActorId::user([7; 16]);
+    make_member(
+        &database_in(fixture.dir.path()),
+        &fixture.created.artifact.id,
+        &fixture.owner,
+        &other,
+        Role::Viewer,
+    )?;
     assert_eq!(
         fixture.write_as(&other, "key", 0, &set("n", "1"))?.delivery,
         Delivery::Committed,
@@ -540,7 +549,14 @@ fn the_key_space_is_shared_with_every_other_kind_of_request_in_both_directions()
 #[test]
 fn spaces_are_separate_per_actor() -> TestResult {
     let fixture = Fixture::new()?;
-    let other = actor("other");
+    let other = ActorId::user([7; 16]);
+    make_member(
+        &database_in(fixture.dir.path()),
+        &fixture.created.artifact.id,
+        &fixture.owner,
+        &other,
+        Role::Viewer,
+    )?;
     fixture.write("mine", 0, &set("n", "1"))?;
     let theirs = fixture.write_as(&other, "theirs", 0, &set("n", "7"))?;
     assert_eq!(
@@ -924,7 +940,14 @@ fn a_copy_without_data_or_from_an_empty_space_has_an_unwritten_space() -> TestRe
 #[test]
 fn a_copy_takes_only_the_data_of_the_actor_who_copies() -> TestResult {
     let fixture = Fixture::new()?;
-    let other = actor("other");
+    let other = ActorId::user([7; 16]);
+    make_member(
+        &database_in(fixture.dir.path()),
+        &fixture.created.artifact.id,
+        &fixture.owner,
+        &other,
+        Role::Viewer,
+    )?;
     fixture.write_as(&other, "theirs", 0, &set("n", "\"theirs\""))?;
     let copy = copy_of(&fixture, "mine-only", true)?;
     let snapshot = fixture.store.read_data(&copy.artifact.id, &other)?;

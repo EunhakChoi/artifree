@@ -17,6 +17,7 @@
 
 use artifree_domain::AppDataVersion;
 use artifree_domain::SourceRevision;
+use artifree_domain::access::Need;
 use artifree_domain::data::DataSpace;
 use artifree_domain::identity::{ActorId, ArtifactId, StateGeneration};
 use artifree_ports::artifact_store::{Delivery, RequestIdentity, StoreError};
@@ -139,6 +140,14 @@ fn write(
     if !artifact_in_place(transaction, request.artifact)? {
         return Err(DataStoreError::NotFound);
     }
+    // A member writes its own space while it is a member, read again here
+    // (decision 0060 rules 5 and 9); a read is all a role needs for that.
+    super::access::admit(
+        transaction,
+        request.artifact,
+        request.request.actor,
+        Need::Read,
+    )?;
     // A runtime frame's write is fenced to its view's head before the key is
     // looked at, so a retry after the head moved is refused, not replayed
     // (decision 0053, rule 10).
