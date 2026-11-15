@@ -816,16 +816,24 @@ Roadmap: R03.
 >   build." The newest revision reads the head status and follows the note:
 >   a built head is shown, the latest older build is shown with a notice that
 >   names it and the head's status, and with no build at all no ticket is
->   asked for. A status whose head is newer than the shown revision makes it
->   an older one; a status of an older head waits for the next read.
+>   asked for. A status of another head than the newest the page knows
+>   waits, and the build shown before stays meanwhile: a newer head is shown
+>   once the page reads the save, and a status of an older head is read
+>   again, once for each newest revision.
 > - The status is read again on each `job_changed` and `revised` change of
 >   the artifact and after a reset, and not after `profile_unknown` until a
->   reset. A ticket is asked for again only when the build to show changes
->   or "Refresh preview" is pressed.
+>   reset. A read in flight is never abandoned for a change: changes during
+>   it owe one more read after it, and every answer is shown, so a stream of
+>   changes cannot keep the status from being read. A reset drops the status
+>   and the read in flight.
+> - A ticket is asked for again when the build to show changes, when
+>   "Refresh preview" is pressed, and, for a revision said to have no build,
+>   on a `job_changed` change or when "Check again" is pressed. Once the
+>   ticket's expiry passes, the preview says it has expired and to refresh.
 > - The request gate holds `POST .../builds/{profile}/previews` as a read,
 >   as it holds the source preview.
-> - Proven by the model tests of the choice and the words, the request gate
->   tests, and the Jobs smoke cases in Chromium and Firefox:
+> - Proven by the model tests of the choice and the words, the reader tests
+>   of coalesced reads, resets and stops, the request gate tests, and the Jobs smoke cases in Chromium and Firefox:
 >   - `preview-build-unknown` runs on the release build: `profile_unknown`,
 >     no ticket and one status read.
 >   - `preview-build-notice` intercepts the status, the tickets and the build

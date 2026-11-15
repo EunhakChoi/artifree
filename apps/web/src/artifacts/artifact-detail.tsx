@@ -618,7 +618,7 @@ function PreviewPanel({
           stale={stale}
           changes={changes}
           resets={resets}
-          title={`Build preview of ${artifact.title}, revision ${revision}`}
+          artifactTitle={artifact.title}
           className="h-128 w-full rounded-lg border"
         />
       ) : (

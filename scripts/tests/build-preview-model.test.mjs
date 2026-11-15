@@ -23,16 +23,18 @@ const bundle = await build({
 });
 const {
   ArtifreeApiError,
-  PROFILE_UNKNOWN_TEXT,
+  EXPIRED_TEXT,
   buildTarget,
   missingBuildText,
   noBuildText,
   noticeText,
-  statusOutcomeOf,
+  statusIsBehind,
   ticketOutcomeOf,
 } = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`
 );
+
+const UNREAD = { kind: 'unread' };
 
 /** A read head status of revision `head` in `status`, with `fields`. */
 function read(head, status, fields = {}) {
@@ -50,7 +52,7 @@ const CASES = [
     name: 'an older revision asks for its own build and needs no status',
     shown: 2,
     newest: 5,
-    status: undefined,
+    status: UNREAD,
     target: { kind: 'ticket', revision: 2, notice: undefined },
   },
   {
@@ -64,7 +66,7 @@ const CASES = [
     name: 'the newest revision waits for the head status',
     shown: 5,
     newest: 5,
-    status: undefined,
+    status: UNREAD,
     target: { kind: 'wait' },
   },
   {
@@ -108,11 +110,11 @@ const CASES = [
     target: { kind: 'none', head: 'none' },
   },
   {
-    name: 'a status of a newer head makes the shown revision an older one',
+    name: 'a status of a head the page has not read yet waits, rather than guess',
     shown: 5,
     newest: 5,
     status: read(6, 'pending', { job_id: 'job_x', latest_build_revision: 3 }),
-    target: { kind: 'ticket', revision: 5, notice: undefined },
+    target: { kind: 'wait' },
   },
   {
     name: 'a status of an older head is stale, so the choice waits',
@@ -159,14 +161,12 @@ test('a ticket refused as not_found or profile_unknown is kept apart from a fail
   });
 });
 
-test('a status refused as profile_unknown is kept apart from a failure', () => {
-  assert.deepEqual(statusOutcomeOf(apiError(422, 'profile_unknown')), {
-    kind: 'profile_unknown',
-  });
-  assert.deepEqual(statusOutcomeOf(apiError(404, 'not_found')), {
-    kind: 'failed',
-    message: 'Refused with not_found.',
-  });
+test('only a read status of a head older than the newest revision is behind', () => {
+  assert.equal(statusIsBehind(read(4, 'built'), 5), true);
+  assert.equal(statusIsBehind(read(5, 'built'), 5), false);
+  assert.equal(statusIsBehind(read(6, 'pending'), 5), false);
+  assert.equal(statusIsBehind(UNREAD, 5), false);
+  assert.equal(statusIsBehind({ kind: 'failed', message: 'Down.' }, 5), false);
 });
 
 test('the words name the build shown, the head and its status', () => {
@@ -184,7 +184,7 @@ test('the words name the build shown, the head and its status', () => {
   );
   assert.equal(missingBuildText(2), 'Revision 2 has no build.');
   assert.equal(
-    PROFILE_UNKNOWN_TEXT,
-    'This server cannot build the react-v1 profile (profile_unknown).',
+    EXPIRED_TEXT,
+    'This build preview has expired. Refresh the preview to load it again.',
   );
 });
