@@ -1,7 +1,10 @@
 # 0060: The access model for shared artifacts
 
-Date: 2026-11-16. Status: **proposed (S02s, documentation only). No rule below
-is implemented.** Roadmap: S02s, ahead of S02.
+Date: 2026-11-16. Status: **accepted as S02's design (S02s). S02a (the
+stored part of rules 1, 6 and 16: members, roles, the access version and
+the access generation, schema 18) is implemented; nothing reads it to
+authorize a request yet, and every other rule is not implemented.**
+Roadmap: S02s, S02.
 
 > Builds on [0036](0036-multi-user-identity.md) (users, tokens, isolation and
 > the state generation), [0006](0006-change-feed.md) and
@@ -302,4 +305,33 @@ S02 is complete only with behavioural tests, proven by mutation, for:
 
 ## Implementation status
 
-Nothing is implemented. S02 records its slices here as they merge.
+S02 is split into slices, each its own pull request, in this order:
+
+| Slice | Rules                 | What it adds                                                                                             | State           |
+| ----- | --------------------- | -------------------------------------------------------------------------------------------------------- | --------------- |
+| S02a  | 1, 6 and 16 (storage) | Schema 18: `artifact_members`, `access_requests`, `artifacts.access_version`; the `AccessStore` port     | implemented     |
+| S02b  | 2 to 5, 9, 11, 17     | The core's access and role checks on every artifact operation, read again in the committing transaction  | not implemented |
+| S02c  | 13, 14                | Feed delivery to every reader and the access change rows                                                 | not implemented |
+| S02d  | 15, 16 (memory), 18   | What a revocation, a downgrade and the trash remove, and the confirmations against the access generation | not implemented |
+| S02e  | 6 to 8                | `/v1/me`, the access routes, listings with roles, the CLI and the contract                               | not implemented |
+| S02f  | 10                    | The declared shared space                                                                                | not implemented |
+| S02g  | 12                    | Rooms per artifact                                                                                       | not implemented |
+| S02h  | Acceptance (web)      | The web workspace's sharing                                                                              | not implemented |
+
+Nothing reaches a member's access before S02e exposes the routes, and S02e
+waits for S02b to S02d, so no slice opens an artifact to another user without
+the checks, the delivery and the revocation that go with it.
+
+**S02a (implemented).** Schema 18 adds `artifact_members` (one row per
+artifact and user that was ever a member: the role, or none once revoked,
+and an access generation that only grows), `access_requests` (the owner's
+request keys of access changes, in the shared key space) and
+`artifacts.access_version`. The `AccessStore` port reads the list, a
+member's role and generation, and changes one user's access conditional on
+the version, with replay; it refuses the owner, an unknown user and a
+disabled user who is not a member alike, and a revocation of a non-member.
+A move to or from the trash raises every member's generation, and a purge
+deletes the rows and blanks the access keys' fingerprints. No route, tool
+or core operation uses it yet. Behavioural tests on a real database
+(`crates/artifree-providers/tests/access.rs`) fail when each guard is
+broken.
