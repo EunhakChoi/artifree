@@ -807,7 +807,7 @@ Roadmap: R03.
 > **Note, 2026-11-15 (R03eb).** The preview implements R03eb as the R03e
 > split note fixes it; no numbered rule changes and the wire is unchanged.
 >
-> - The preview gains "Show: Files | Build (react-v1)", kept while the page
+> - The preview gains "Preview of: Files | Build (react-v1)", kept while the page
 >   shows the artifact. The build is shown in a plain frame with the
 >   preview's sandbox on the content origin; it has no runtime view, so no
 >   capability or bridge reaches it.

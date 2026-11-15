@@ -593,7 +593,7 @@ function PreviewPanel({
           </NativeSelect>
         </Field>
         <Field orientation="horizontal">
-          <FieldLabel htmlFor="preview-source">Show</FieldLabel>
+          <FieldLabel htmlFor="preview-source">Preview of</FieldLabel>
           <NativeSelect
             id="preview-source"
             value={source}

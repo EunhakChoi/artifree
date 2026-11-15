@@ -784,7 +784,7 @@ async function showBuild(panel, revision) {
     await panel
       .getByLabel('Revision', { exact: true })
       .selectOption(String(revision));
-  await panel.getByLabel('Show', { exact: true }).selectOption('build');
+  await panel.getByLabel('Preview of', { exact: true }).selectOption('build');
 }
 
 /**
@@ -912,9 +912,7 @@ async function checkPreviewBuildNotice(world) {
     await expect(
       opened.panel.getByRole('status').filter({ hasText: WORDS.previewNotice }),
     ).toBeHidden({ timeout: FEED_MS });
-    await expect
-      .poll(() => state.asked, { timeout: WAIT_MS })
-      .toEqual([1, 2]);
+    await expect.poll(() => state.asked, { timeout: WAIT_MS }).toEqual([1, 2]);
     assertCalm(opened.log, world.browser, { refused: [], cuts: 0 });
   } finally {
     await opened.context.close();
