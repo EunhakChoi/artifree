@@ -35,6 +35,7 @@ import {
 import { Textarea } from '@/components/ui/textarea';
 import { describeFailure, useRequest } from './use-request';
 import type { RequestState } from './use-request';
+import { BUILD_PROFILE } from './build-profile';
 
 const STARTER = `<!doctype html>
 <html lang="en">
@@ -68,18 +69,25 @@ export function CreateDialog({
   onCreated,
 }: CreateDialogProps) {
   const [open, setOpen] = useState(false);
+  // Counts openings, so each one reads the catalog afresh.
+  const [opened, setOpened] = useState(0);
   const [title, setTitle] = useState('');
   const [html, setHtml] = useState(STARTER);
   // A type id, or HTML_START for one index.html.
   const [start, setStart] = useState(HTML_START);
   // The catalog is read each time the dialog opens; without it only the
   // index.html start is offered.
-  const types = useRequest<TypeList>(open ? 'types' : undefined, (signal) =>
-    client.listTypes({ signal }),
+  const types = useRequest<TypeList>(
+    open ? `types-${opened}` : undefined,
+    (signal) => client.listTypes({ signal }),
   );
   const offered: readonly TypeSummary[] =
     types.status === 'ready' ? types.value.types : [];
   const chosen = offered.find((type) => type.id === start);
+  // A type chosen earlier that the current catalog read does not offer (still
+  // loading, failed, or withdrawn). It stays chosen, and Create waits, rather
+  // than silently becoming one index.html.
+  const unoffered = start !== HTML_START && chosen === undefined;
   const [pending, setPending] = useState(false);
   const [failure, setFailure] = useState<string>();
   // The last request sent and its key. Sending the same content again reuses
@@ -130,7 +138,10 @@ export function CreateDialog({
         // Stay open until the request settles: its result changes the
         // selection, and the form shows its outcome.
         if (pending) return;
-        if (next) setFailure(undefined);
+        if (next) {
+          setFailure(undefined);
+          setOpened((count) => count + 1);
+        }
         setOpen(next);
       }}
     >
@@ -144,7 +155,7 @@ export function CreateDialog({
           onSubmit={(event) => void submit(event)}
         >
           <DialogHeader>
-            <DialogTitle>New HTML artifact</DialogTitle>
+            <DialogTitle>New artifact</DialogTitle>
             <DialogDescription>
               Saved as revision 1, with one <code>index.html</code> or with the
               starter files of a built-in type. Agents can add more files
@@ -170,21 +181,26 @@ export function CreateDialog({
               <NativeSelect
                 id="new-start"
                 disabled={pending}
-                value={chosen === undefined ? HTML_START : chosen.id}
+                value={start}
                 onChange={(event) => edit(() => setStart(event.target.value))}
               >
                 <NativeSelectOption value={HTML_START}>
                   One index.html
                 </NativeSelectOption>
+                {unoffered ? (
+                  <NativeSelectOption value={start} disabled>
+                    {start} (not offered now)
+                  </NativeSelectOption>
+                ) : null}
                 {offered.map((type) => (
                   <NativeSelectOption key={type.id} value={type.id}>
                     {type.title} ({type.id}, release {type.release})
                   </NativeSelectOption>
                 ))}
               </NativeSelect>
-              <TypeNote types={types} chosen={chosen} />
+              <TypeNote types={types} start={start} chosen={chosen} />
             </Field>
-            {chosen === undefined ? (
+            {start === HTML_START ? (
               <Field>
                 <FieldLabel htmlFor="new-html">index.html</FieldLabel>
                 <Textarea
@@ -212,7 +228,10 @@ export function CreateDialog({
             >
               Cancel
             </DialogClose>
-            <Button type="submit" disabled={pending || title.trim() === ''}>
+            <Button
+              type="submit"
+              disabled={pending || unoffered || title.trim() === ''}
+            >
               {pending ? 'Creating…' : 'Create'}
             </Button>
           </DialogFooter>
@@ -224,14 +243,16 @@ export function CreateDialog({
 
 /**
  * What the chosen start means: a type's description, starter, required files
- * and whether this server builds it; or, for one index.html, why no type is
- * offered when the catalog could not be read.
+ * and whether this workspace builds it; or why a type is not offered when the
+ * catalog is loading or could not be read.
  */
 function TypeNote({
   types,
+  start,
   chosen,
 }: {
   readonly types: RequestState<TypeList>;
+  readonly start: string;
   readonly chosen: TypeSummary | undefined;
 }) {
   if (chosen === undefined) {
@@ -240,21 +261,35 @@ function TypeNote({
     if (types.status === 'error')
       return (
         <FieldDescription>
-          The built-in types could not be read ({types.message}); one index.html
-          can still be created.
+          {start === HTML_START
+            ? `The built-in types could not be read (${types.message}); one index.html can still be created.`
+            : `The built-in types could not be read (${types.message}); reopen the dialog to retry, or choose one index.html.`}
         </FieldDescription>
       );
-    return null;
+    if (start === HTML_START) return null;
+    return (
+      <FieldDescription>
+        The type {start} is not offered by this server; choose another start.
+      </FieldDescription>
+    );
   }
   return (
     <FieldDescription>
       {chosen.description} Starts with {chosen.starter.join(', ')}. Every
       revision must keep {chosen.required.join(', ')}.{' '}
-      {chosen.build_profile === null
-        ? null
-        : chosen.build_available
-          ? `Built with the ${chosen.build_profile} profile from the Jobs tab.`
-          : `This server cannot build the ${chosen.build_profile} profile; the artifact can still be created and edited.`}
+      {chosen.build_profile === null ? null : <BuildNote type={chosen} />}
     </FieldDescription>
   );
+}
+
+/**
+ * Whether this workspace can build the type: the Jobs tab builds only
+ * BUILD_PROFILE, and only where the server can.
+ */
+function BuildNote({ type }: { readonly type: TypeSummary }) {
+  if (type.build_profile === BUILD_PROFILE && type.build_available)
+    return `Built with the ${BUILD_PROFILE} profile from the Jobs tab.`;
+  if (type.build_profile === BUILD_PROFILE)
+    return `This server cannot build the ${BUILD_PROFILE} profile; the artifact can still be created and edited.`;
+  return `This workspace does not build the ${type.build_profile ?? ''} profile; the artifact can still be created and edited.`;
 }

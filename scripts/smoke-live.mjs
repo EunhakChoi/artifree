@@ -259,7 +259,7 @@ export async function checkLiveUpdates({ browser, origin, server }) {
     await reads.quiet();
     const listing = main.routes.hold(read('list'));
     await workspace.getByRole('button', { name: 'New artifact' }).click();
-    const dialog = main.page.getByRole('dialog', { name: 'New HTML artifact' });
+    const dialog = main.page.getByRole('dialog', { name: 'New artifact' });
     await dialog.getByLabel('Title').fill('Page artifact');
     await dialog.getByLabel('index.html').fill(html('Page'));
     await dialog.getByRole('button', { name: 'Create' }).click();

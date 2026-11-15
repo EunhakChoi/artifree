@@ -53,7 +53,7 @@ fetch('${origin}/v1/artifacts').then(
 </script></body></html>
 `;
   await workspace.getByRole('button', { name: 'New artifact' }).click();
-  const dialog = page.getByRole('dialog', { name: 'New HTML artifact' });
+  const dialog = page.getByRole('dialog', { name: 'New artifact' });
   await expect(dialog).toBeVisible();
   await checkAccessibility('workspace-create-dialog');
   await dialog.getByLabel('Title').fill('Smoke artifact');
