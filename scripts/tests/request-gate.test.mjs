@@ -204,6 +204,11 @@ test('Every route family is recognized under any server path prefix', () => {
     ['GET', '/v1/changes', 'stream'],
     ['POST', '/v1/artifacts/a/revisions/2/previews', 'read'],
     ['POST', '/v1/artifacts/a/revisions/2/runtime-views', 'read'],
+    // A build preview issues a ticket and changes nothing (decision 0058,
+    // R03eb); an adoption mark does not make it a write.
+    ['POST', '/v1/artifacts/a/revisions/2/builds/react-v1/previews', 'read'],
+    ['POST', '/v1/artifacts/a/revisions/2/builds/react-v1', 'write'],
+    ['POST', '/v1/artifacts/a/revisions/2/builds/a/b/previews', 'write'],
     ...FRAME_TAILS.map((tail) => [
       'POST',
       `/v1/artifacts/a/revisions/2/runtime-views/view/3/${tail}`,
@@ -227,6 +232,14 @@ test('Every route family is recognized under any server path prefix', () => {
         kind,
         `${method} ${base} ${path}`,
       );
+  assert.equal(
+    requestKind(
+      'POST',
+      '/v1/artifacts/a/revisions/2/builds/react-v1/previews',
+      true,
+    ),
+    'read',
+  );
   // The same under a same-origin path prefix, with a query.
   assert.equal(requestKind('GET', '/prefix/v1/artifacts?limit=5'), 'read');
   assert.equal(requestKind('GET', '/prefix/v1/changes?x=1'), 'stream');

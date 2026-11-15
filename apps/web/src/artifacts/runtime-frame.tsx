@@ -5,14 +5,8 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import type { DataChanges } from './data-changes';
 import type { FrameRpc } from './frame-rpc';
 import { pageVisibility } from './page-visibility';
+import { PREVIEW_SANDBOX } from './preview-sandbox';
 import type * as RuntimeHost from './runtime-host';
-
-// `allow-downloads` is the browser's own flag for a page that starts a
-// download itself. It is unrelated to the `source.download` capability, which
-// asks the workspace to offer a stored file and needs the user's confirmation
-// each time (decision 0032).
-const PREVIEW_SANDBOX =
-  'allow-scripts allow-forms allow-modals allow-downloads';
 
 /** A connected frame that opted in to adoption (decision 0054). */
 export interface LiveFrame {

@@ -22,7 +22,8 @@ write its artifact's application data. One persistent job, `verify_revision`, re
 against their digests in a separate worker process that a persistent server
 starts and restarts by itself (`--no-worker` turns that off). The build kind,
 `run_profile` with `profile: "react-v1"`, with its build preview and build
-status, is on the API, MCP and the CLI, but a release build knows no build
+status, is on the API, MCP, the CLI and the web workspace (the Jobs tab and
+the preview's "Show: Build" choice), but a release build knows no build
 profile yet and refuses them with `profile_unknown`
 ([decision 0058](docs/decisions/0058-react-builds-and-preview.md)). Publishing, roles and sharing, build and
 conversion workers, sandboxed execution of untrusted code, and external

@@ -30,7 +30,10 @@ import { api, hold, raw } from './smoke-workspace.mjs';
  * the list is read again after a reset. On this release build the head build
  * status and "Build revision N" answer profile_unknown (decision 0058, R03ea);
  * since no smoke host runs a profile, a pending and a failed build are given
- * to the tab by intercepting its reads and its enqueue in the browser.
+ * to the tab by intercepting its reads and its enqueue in the browser. The
+ * preview's build choice (R03eb) says profile_unknown on this build, and its
+ * notice of an older build and its answer for a revision without one are
+ * proven with the status, the tickets and the build page intercepted.
  *
  * Each page has a browser context of its own, and what it reports is recorded
  * as the other checks record theirs: a refusal the check provokes is counted,
@@ -63,6 +66,9 @@ const WORDS = {
     'This server cannot build the react-v1 profile (profile_unknown).',
   noExecution: 'No execution worker is ready, so this build waits',
   buildFailed: 'The build reported errors.',
+  previewNotice:
+    'Showing the build of revision 1, the latest build. Revision 2, the newest, has a build pending.',
+  previewMissing: 'Revision 1 has no build.',
 };
 
 /** The build profile the tab asks for (decision 0058, rule 14). */
@@ -85,6 +91,9 @@ const RUNNERS = {
   'running-cancel': checkRunningCancel,
   'build-unknown': checkBuildUnknown,
   'build-intercepted': checkBuildIntercepted,
+  'preview-build-unknown': checkPreviewBuildUnknown,
+  'preview-build-notice': checkPreviewBuildNotice,
+  'preview-build-missing': checkPreviewBuildMissing,
   contract: checkContract,
 };
 
@@ -754,6 +763,202 @@ async function checkBuildIntercepted(world) {
   }
 }
 
+/** Adds revision 2 to an artifact made by `createArtifact`. */
+async function reviseOnce(server, artifact) {
+  await api(server, 'POST', `/v1/artifacts/${artifact.id}/revisions`, {
+    base_revision: 1,
+    changes: [
+      {
+        op: 'put',
+        path: 'index.html',
+        encoding: 'utf8',
+        content: `<p>${artifact.title}, revision 2</p>`,
+      },
+    ],
+  });
+}
+
+/** Chooses "Build" in the preview, after choosing `revision` when given. */
+async function showBuild(panel, revision) {
+  if (revision !== undefined)
+    await panel
+      .getByLabel('Revision', { exact: true })
+      .selectOption(String(revision));
+  await panel.getByLabel('Show', { exact: true }).selectOption('build');
+}
+
+/**
+ * Answers the build choice's reads in the browser: the head status from
+ * `state.status`, a ticket for each revision in `state.tickets` (a revision
+ * missing from it is `not_found`), and the build page each ticket names. The
+ * revisions asked for are recorded in `state.asked`.
+ */
+async function interceptBuildPreview(tab, server, artifactId, state) {
+  const json = (route, status, body) =>
+    route.fulfill({
+      status,
+      contentType: 'application/json',
+      body: JSON.stringify(body),
+    });
+  const ticketPath = new RegExp(
+    `^/v1/artifacts/${artifactId}/revisions/(\\d+)/builds/${PROFILE}/previews$`,
+    'u',
+  );
+  await tab.route(
+    (url) =>
+      url.pathname === `/v1/artifacts/${artifactId}/builds/${PROFILE}` ||
+      ticketPath.test(url.pathname),
+    async (route) => {
+      const { pathname } = new URL(route.request().url());
+      const ticket = ticketPath.exec(pathname);
+      if (ticket === null) return json(route, 200, state.status);
+      const revision = Number(ticket[1]);
+      state.asked.push(revision);
+      if (!state.tickets.includes(revision))
+        return json(route, 404, {
+          error: { code: 'not_found', message: 'No build.' },
+        });
+      return json(route, 201, {
+        url: `${server.content_origin}/b/${'f'.repeat(31)}${revision}/`,
+        revision,
+        expires_at_ms: Date.now() + 60_000,
+      });
+    },
+  );
+  await tab.route(
+    (url) =>
+      url.origin === new URL(server.content_origin).origin &&
+      url.pathname.startsWith('/b/'),
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: '<!doctype html><title>Build</title><p>The intercepted build</p>',
+      }),
+  );
+}
+
+/**
+ * On this release build the preview's build choice says that the server
+ * cannot build react-v1 and asks for no ticket (decision 0058, R03eb).
+ */
+async function checkPreviewBuildUnknown(world) {
+  const artifact = await createArtifact(world.server, 'Preview build unknown');
+  const opened = await openJobs(world, artifact, undefined, 'Preview');
+  try {
+    await showBuild(opened.panel);
+    await expect(
+      opened.panel
+        .getByRole('status')
+        .filter({ hasText: WORDS.profileUnknown }),
+    ).toBeVisible({ timeout: WAIT_MS });
+    await expect(opened.panel.locator('iframe')).toHaveCount(0);
+    assert.deepEqual(opened.log.tickets, [], 'A build ticket was asked for.');
+    assert.equal(opened.log.statusReads.length, 1, 'The status reads.');
+    assertCalm(opened.log, world.browser, { refused: [], cuts: 0 });
+  } finally {
+    await opened.context.close();
+  }
+}
+
+/**
+ * The newest revision has no build, so the build choice shows the latest one
+ * with a notice that names it and the head's status, and asks for no ticket of
+ * the head (rule 15).
+ */
+async function checkPreviewBuildNotice(world) {
+  const artifact = await createArtifact(world.server, 'Preview build notice');
+  await reviseOnce(world.server, artifact);
+  const state = {
+    status: {
+      profile: PROFILE,
+      head_revision: 2,
+      status: 'pending',
+      job_id: `job_${'e'.repeat(32)}`,
+      latest_build_revision: 1,
+    },
+    tickets: [1],
+    asked: [],
+  };
+  const opened = await openJobs(
+    world,
+    artifact,
+    (tab) => interceptBuildPreview(tab, world.server, artifact.id, state),
+    'Preview',
+  );
+  try {
+    await showBuild(opened.panel);
+    await expect(
+      opened.panel.getByRole('status').filter({ hasText: WORDS.previewNotice }),
+    ).toBeVisible({ timeout: WAIT_MS });
+    await expect(
+      opened.panel
+        .frameLocator('iframe[title^="Build preview of"]')
+        .getByText('The intercepted build'),
+    ).toBeVisible({ timeout: WAIT_MS });
+    assert.deepEqual(state.asked, [1], 'The tickets asked for.');
+    await world.checkAccessibility('preview-build-notice', opened.tab);
+    // The head is built now. A real job of the artifact sends job_changed
+    // changes, which read the status again, so the notice goes and the head's
+    // own build is shown.
+    state.status = {
+      profile: PROFILE,
+      head_revision: 2,
+      status: 'built',
+      latest_build_revision: 2,
+    };
+    state.tickets = [1, 2];
+    await enqueue(world.server, artifact.id);
+    await expect(
+      opened.panel.getByRole('status').filter({ hasText: WORDS.previewNotice }),
+    ).toBeHidden({ timeout: FEED_MS });
+    await expect
+      .poll(() => state.asked, { timeout: WAIT_MS })
+      .toEqual([1, 2]);
+    assertCalm(opened.log, world.browser, { refused: [], cuts: 0 });
+  } finally {
+    await opened.context.close();
+  }
+}
+
+/**
+ * An older revision without a build is said to have none, and no newer
+ * build is shown in its place (the R03e split note).
+ */
+async function checkPreviewBuildMissing(world) {
+  const artifact = await createArtifact(world.server, 'Preview build missing');
+  await reviseOnce(world.server, artifact);
+  const state = {
+    status: {
+      profile: PROFILE,
+      head_revision: 2,
+      status: 'built',
+      latest_build_revision: 2,
+    },
+    tickets: [2],
+    asked: [],
+  };
+  const opened = await openJobs(
+    world,
+    artifact,
+    (tab) => interceptBuildPreview(tab, world.server, artifact.id, state),
+    'Preview',
+  );
+  try {
+    await showBuild(opened.panel, 1);
+    await expect(
+      opened.panel
+        .getByRole('status')
+        .filter({ hasText: WORDS.previewMissing }),
+    ).toBeVisible({ timeout: WAIT_MS });
+    await expect(opened.panel.locator('iframe')).toHaveCount(0);
+    assert.deepEqual(state.asked, [1], 'The tickets asked for.');
+    assertCalm(opened.log, world.browser, { refused: ['404'], cuts: 0 });
+  } finally {
+    await opened.context.close();
+  }
+}
+
 /** Creates an artifact with one page whose title the search finds. */
 async function createArtifact(server, label, content) {
   const title = `${label} ${randomUUID().slice(0, 8)}`;
@@ -862,10 +1067,10 @@ try {
 
 /**
  * Connects a new page of its own to the server and opens the artifact's Jobs
- * tab. `prepare`, when given, sets up the page before it loads. The caller
- * closes the returned context.
+ * tab, or the view `view`. `prepare`, when given, sets up the page before it
+ * loads. The caller closes the returned context.
  */
-async function openJobs(world, artifact, prepare) {
+async function openJobs(world, artifact, prepare, view = 'Jobs') {
   const context = await world.browser.newContext();
   try {
     const tab = await context.newPage();
@@ -890,7 +1095,7 @@ async function openJobs(world, artifact, prepare) {
       workspace.getByRole('heading', { name: artifact.title, exact: true }),
     ).toBeVisible({ timeout: WAIT_MS });
     const panel = workspace.getByRole('tabpanel', {
-      name: 'Jobs',
+      name: view,
       exact: true,
     });
     // The page may still be settling the search and the selection when the
@@ -900,7 +1105,7 @@ async function openJobs(world, artifact, prepare) {
     await expect(async () => {
       await workspace
         .getByRole('tablist', { name: 'Artifact views' })
-        .getByRole('tab', { name: 'Jobs', exact: true })
+        .getByRole('tab', { name: view, exact: true })
         .click();
       await expect(panel).toBeVisible({ timeout: 2_000 });
     }).toPass({ timeout: WAIT_MS });
@@ -986,6 +1191,7 @@ function watch(tab, origin, artifactId, contentOrigin) {
     enqueues: [],
     statusRefused: [],
     statusReads: [],
+    tickets: [],
   };
   tab.on('pageerror', (error) => log.errors.push(error.message));
   tab.on('console', (message) => {
@@ -1009,6 +1215,8 @@ function watch(tab, origin, artifactId, contentOrigin) {
     else if (
       fromApi &&
       (status?.[1] === '409' ||
+        (status?.[1] === '404' &&
+          new URL(where).pathname.endsWith(`/builds/${PROFILE}/previews`)) ||
         (status?.[1] === '422' &&
           new URL(where).pathname === `/v1/artifacts/${artifactId}/jobs`))
     )
@@ -1021,6 +1229,8 @@ function watch(tab, origin, artifactId, contentOrigin) {
     const { pathname } = new URL(request.url());
     if (pathname === `/v1/artifacts/${artifactId}/builds/${PROFILE}`)
       log.statusReads.push(request.method());
+    if (pathname.endsWith(`/builds/${PROFILE}/previews`))
+      log.tickets.push(pathname);
     if (request.method() !== 'POST') return;
     if (pathname === `/v1/artifacts/${artifactId}/jobs`)
       log.enqueues.push(request.headers()['idempotency-key']);
