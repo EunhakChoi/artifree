@@ -258,7 +258,8 @@ async fn a_build_is_enqueued_read_listed_and_replayed() -> TestResult {
 }
 
 /// Rule 17: a profile this build cannot build for the public answers
-/// `profile_unknown` and enqueues nothing: a release build's `react-v1`, a
+/// `profile_unknown` and enqueues nothing: `react-v1` on a build that knows no
+/// build profile (a release build for a target other than `x86_64` Linux), a
 /// profile known only for tests, and a name that is no profile, which is not
 /// quoted back.
 #[tokio::test]
@@ -277,7 +278,7 @@ async fn a_profile_the_build_cannot_build_is_profile_unknown() -> TestResult {
     assert_eq!(
         refused.code(),
         "profile_unknown",
-        "a release build knows no profile"
+        "a build that knows no profile refuses react-v1"
     );
 
     let building = Harness::new(&["react-v1", "fixture"])?;

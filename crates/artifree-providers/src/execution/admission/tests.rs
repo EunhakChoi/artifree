@@ -27,7 +27,7 @@ const DEADLINE: Duration = Duration::from_secs(3);
 static SCRATCH_COUNTER: AtomicU32 = AtomicU32::new(0);
 /// The manifest of the baseline tool root: two empty files, sorted by bytes.
 const FAKE_MANIFEST: &str = concat!(
-    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 bin/artifree-execution-fixture\n",
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 bin/artifree-server\n",
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 bin/bwrap\n",
 );
 
@@ -175,7 +175,7 @@ impl FakeHost {
         fs::write(group.join("cgroup.procs"), format!("{own}\n{OTHER_PID}\n"))?;
         fs::create_dir(tool_root.join("bin"))?;
         write_with_mode(&tool_root.join(launcher::LAUNCHER), 0o755)?;
-        write_with_mode(&tool_root.join(launcher::FIXTURE_FILE), 0o755)?;
+        write_with_mode(&tool_root.join(launcher::SERVER_FILE), 0o755)?;
         fs::write(tool_root.join("MANIFEST"), FAKE_MANIFEST)?;
         seal(scratch.path())?;
         let tool_owner = fs::metadata(&tool_root)?.uid();
@@ -228,7 +228,7 @@ fn refusal_as(
     worker_uid: impl FnOnce() -> Result<u32, AdmissionRefusal>,
 ) -> Option<AdmissionRefusal> {
     admit_with(
-        InspectionProfile::fixture(),
+        Some(InspectionProfile::fixture()),
         &host.roots(),
         process::id(),
         &mut None,
@@ -810,25 +810,25 @@ fn core_routing_and_tool_files_come_before_delegation() -> Result<(), Box<dyn Er
                 let launcher_path = host.tool_root.join(launcher::LAUNCHER);
                 fs::remove_file(&launcher_path)?;
                 std::os::unix::fs::symlink(
-                    host.tool_root.join(launcher::FIXTURE_FILE),
+                    host.tool_root.join(launcher::SERVER_FILE),
                     launcher_path,
                 )
             },
             AdmissionRefusal::MissingLauncher,
         ),
         (
-            "fixture absent",
+            "server binary absent",
             |host: &FakeHost| -> io::Result<()> {
-                fs::remove_file(host.tool_root.join(launcher::FIXTURE_FILE))
+                fs::remove_file(host.tool_root.join(launcher::SERVER_FILE))
             },
-            AdmissionRefusal::MissingFixture,
+            AdmissionRefusal::MissingServer,
         ),
         (
-            "fixture without the execute bit",
+            "server binary without the execute bit",
             |host: &FakeHost| -> io::Result<()> {
-                set_mode(&host.tool_root.join(launcher::FIXTURE_FILE), 0o644)
+                set_mode(&host.tool_root.join(launcher::SERVER_FILE), 0o644)
             },
-            AdmissionRefusal::MissingFixture,
+            AdmissionRefusal::MissingServer,
         ),
     ];
     for (name, edit, expected) in variations {

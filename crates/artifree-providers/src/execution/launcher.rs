@@ -23,19 +23,21 @@ pub(super) const TOOL_ROOT: &str = concat!("/opt/artifree/tools/", env!("CARGO_P
 pub(super) const LAUNCHER: &str = "bin/bwrap";
 /// The exit status that the launcher reports for a child that `SIGSYS` (31) ended: it reports a
 /// child that a signal ended as 128 plus the signal.
-#[cfg(any(test, feature = "enforcement-fixture"))]
+#[cfg(any(test, feature = "enforcement-fixture", target_arch = "x86_64"))]
 pub(super) const KILLED_BY_SIGSYS: i32 = 128 + 31;
-/// The fixture inside the tool root, run inside the launcher for the namespace check and as the probe child.
+/// The test-support program inside the tool root, which runs the fixture profile's stub, bootstrap
+/// and guardian in the enforcement job.
+#[cfg(any(test, feature = "enforcement-fixture", target_arch = "x86_64"))]
 pub(super) const FIXTURE_FILE: &str = "bin/artifree-execution-fixture";
 /// The fixture's path inside the sandbox, where the tool root is bound as `/tools`.
 const FIXTURE_COMMAND: &str = "/tools/bin/artifree-execution-fixture";
-/// The server binary inside the tool root (decision 0057 rule 4).
-#[cfg(any(test, feature = "enforcement-fixture"))]
+/// The server binary inside the tool root (decision 0057 rule 4). It is the bootstrap, and in every
+/// build it runs the namespace check and the probe child (decision 0058, note "R03f split").
 pub(super) const SERVER_FILE: &str = "bin/artifree-server";
 /// The server binary's path inside the sandbox.
 const SERVER_COMMAND: &str = "/tools/bin/artifree-server";
 
-/// The program of the tool root that runs an attempt's stub, bootstrap and guardian (decision 0057 rule 4). Admission's namespace check and probe child always use the fixture program.
+/// The program of the tool root that runs an attempt's stub, bootstrap and guardian (decision 0057 rule 4). Admission's namespace check and probe child always use the server binary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EntryProgram {
     /// `bin/artifree-execution-fixture`, the test-support program, whose mode is its first argument.
@@ -46,7 +48,7 @@ pub enum EntryProgram {
 
 impl EntryProgram {
     /// The program's file inside the tool root.
-    #[cfg(any(test, feature = "enforcement-fixture"))]
+    #[cfg(any(test, feature = "enforcement-fixture", target_arch = "x86_64"))]
     #[must_use]
     pub(super) fn file(self) -> &'static str {
         match self {
@@ -74,9 +76,50 @@ impl EntryProgram {
     }
 }
 
+/// The server's arguments for the probe child: read standard input to its end.
+pub(super) const PROBE_CHILD_ARGUMENTS: [&str; 2] = ["execution", "wait"];
+/// The server's arguments for the namespace check: print one `name=target` line per namespace.
+const NAMESPACE_ARGUMENTS: [&str; 2] = ["execution", "namespaces"];
+
+/// The server's `execution namespaces` mode, which the namespace check runs inside the launcher:
+/// prints one `name=target` line per namespace of `NAMESPACES` to standard output. The whole text
+/// is built before anything is written, so a failure prints nothing.
+///
+/// # Errors
+///
+/// Returns the error of a namespace link that cannot be read or is not UTF-8, or of the write.
+pub fn print_namespaces() -> io::Result<()> {
+    use std::io::Write as _;
+
+    let mut text = String::new();
+    for name in NAMESPACES {
+        let link = fs::read_link(format!("/proc/self/ns/{name}"))?;
+        let target = link.to_str().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "namespace target is not UTF-8")
+        })?;
+        text.push_str(name);
+        text.push('=');
+        text.push_str(target);
+        text.push('\n');
+    }
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(text.as_bytes())?;
+    stdout.flush()
+}
+
+/// The server's `execution wait` mode, the probe child: reads standard input to its end and
+/// discards it, so it runs until the probe group is killed.
+///
+/// # Errors
+///
+/// Returns the error of the read.
+pub fn wait_for_end_of_input() -> io::Result<()> {
+    io::copy(&mut io::stdin().lock(), &mut io::sink()).map(drop)
+}
+
 /// The seven namespaces compared with the supervisor's own (0042 rule 1).
 pub(super) const NAMESPACES: [&str; 7] = ["user", "pid", "net", "mnt", "ipc", "uts", "cgroup"];
-/// Bound on the fixture's namespace report (this slice's choice; not an attempt bound).
+/// Bound on the server's namespace report (this slice's choice; not an attempt bound).
 pub(super) const MAX_OUTPUT_BYTES: u64 = 4096;
 /// Bound on the launcher's `--version` output.
 const VERSION_OUTPUT_BYTES: u64 = 256;
@@ -91,17 +134,17 @@ const OUTPUT_GRACE: Duration = Duration::from_secs(1);
 /// The namespace check's scratch tmpfs size in bytes (R02aa's choice; not an attempt bound).
 const CHECK_SCRATCH_BYTES: &str = "1048576";
 
-/// Checks that the tool root holds a regular, executable launcher and then a regular, executable fixture.
+/// Checks that the tool root holds a regular, executable launcher and then a regular, executable server binary.
 ///
 /// # Errors
 ///
-/// Returns `MissingLauncher` or `MissingFixture` for the first file that is missing, is a link, is not a regular file, or has no execute bit.
+/// Returns `MissingLauncher` or `MissingServer` for the first file that is missing, is a link, is not a regular file, or has no execute bit.
 pub(super) fn check_tool_files(root: &Path) -> Result<(), AdmissionRefusal> {
     if !is_regular_executable(&root.join(LAUNCHER)) {
         return Err(AdmissionRefusal::MissingLauncher);
     }
-    if !is_regular_executable(&root.join(FIXTURE_FILE)) {
-        return Err(AdmissionRefusal::MissingFixture);
+    if !is_regular_executable(&root.join(SERVER_FILE)) {
+        return Err(AdmissionRefusal::MissingServer);
     }
     Ok(())
 }
@@ -146,7 +189,7 @@ fn sandbox_arguments(root: &Path) -> Vec<OsString> {
     ]
 }
 
-/// The fixed argument list for the namespace check, in launch order: the shared prefix, then the check's 1 MiB scratch tmpfs at `/tmp` and the fixture's `namespaces` mode.
+/// The fixed argument list for the namespace check, in launch order: the shared prefix, then the check's 1 MiB scratch tmpfs at `/tmp` and the server's `execution namespaces` mode.
 ///
 /// The check still mounts its scratch through the launcher. Only the attempt moves the scratch into its bootstrap (0056 rule 2 with its amendment of 2026-11-12), so the check keeps its own `--size` and `--tmpfs` pair.
 #[must_use]
@@ -160,9 +203,10 @@ pub(super) fn launcher_arguments(root: &Path) -> Vec<OsString> {
             "/tmp",
             "--chdir",
             "/",
-            FIXTURE_COMMAND,
-            "namespaces",
+            SERVER_COMMAND,
         ]
+        .into_iter()
+        .chain(NAMESPACE_ARGUMENTS)
         .map(OsString::from),
     );
     arguments

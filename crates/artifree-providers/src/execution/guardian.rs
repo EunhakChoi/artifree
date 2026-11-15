@@ -187,7 +187,7 @@ fn report_line(reason: GuardianReason, emptied: bool) -> String {
 // enforcement-fixture build (decision 0057 rule 2).
 /// Parses a line that [`report_line`] wrote, with or without its trailing newline. Returns `None`
 /// for any other text.
-#[cfg(any(test, feature = "enforcement-fixture"))]
+#[cfg(any(test, feature = "enforcement-fixture", target_arch = "x86_64"))]
 #[must_use]
 pub(super) fn parse_report(line: &str) -> Option<(GuardianReason, bool)> {
     let body = line.strip_suffix('\n').unwrap_or(line);

@@ -560,7 +560,7 @@ impl Registry {
 
     /// Whether no record of `identity` is in the registry. Any answer but "no such file" counts as
     /// present, so a caller that settles on `true` never settles a record that may still exist.
-    #[cfg(feature = "enforcement-fixture")]
+    #[cfg(any(feature = "enforcement-fixture", target_arch = "x86_64"))]
     #[must_use]
     pub(super) fn record_absent(&self, identity: Identity) -> bool {
         matches!(

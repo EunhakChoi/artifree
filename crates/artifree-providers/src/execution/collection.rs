@@ -187,7 +187,7 @@ impl OutputManifest {
     }
 
     /// The binding this manifest was made under.
-    #[cfg(feature = "enforcement-fixture")]
+    #[cfg(any(feature = "enforcement-fixture", target_arch = "x86_64"))]
     #[must_use]
     pub(super) fn binding(&self) -> &ManifestBinding {
         &self.binding
@@ -257,9 +257,14 @@ fn collect_with(
     walk_directory(out, "", 0, &mut walk, hook)?;
     let refused = |error: PackageError| CollectionRefusal::Package(package_reason(&error));
     let files = FileSet::new(walk.files).map_err(refused)?;
+    // Only the fixture's whole-package output must hold the entry document; a bundle's entry
+    // document is the revision's, added by the worker (decision 0058 rule 8).
+    #[cfg(any(test, feature = "enforcement-fixture"))]
     if rule == OutputRule::Package && files.file(&PackagePath::entry()).is_none() {
         return Err(refused(PackageError::MissingEntry));
     }
+    #[cfg(not(any(test, feature = "enforcement-fixture")))]
+    let OutputRule::Bundle = rule;
     let manifest = OutputManifest::of(&files, binding);
     Ok(CollectedOutput { files, manifest })
 }

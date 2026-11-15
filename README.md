@@ -23,8 +23,10 @@ against their digests in a separate worker process that a persistent server
 starts and restarts by itself (`--no-worker` turns that off). The build kind,
 `run_profile` with `profile: "react-v1"`, with its build preview and build
 status, is on the API, MCP, the CLI and the web workspace (the Jobs tab and
-the preview's "Preview of: Build" choice), but a release build knows no build
-profile yet and refuses them with `profile_unknown`
+the preview's "Preview of: Build" choice). The x86_64 Linux release build
+knows `react-v1`, and its builds run only where an execution worker is ready,
+which no documented host setup provides yet; a release build for any other
+target refuses them with `profile_unknown`
 ([decision 0058](docs/decisions/0058-react-builds-and-preview.md)). Publishing, roles and sharing, build and
 conversion workers, sandboxed execution of untrusted code, and external
 identity (OAuth, passwords, login sessions) are not implemented. The module inventory shown by the UI and
@@ -138,8 +140,9 @@ Jobs are the first background work ([decision 0030](docs/decisions/0030-persiste
 that revision from the database and reports `ok` or the first 50 mismatches;
 `job show`, `job list`, and `job cancel <job> --idempotency-key <key>` follow
 and stop it. `job enqueue <id> --revision <n> --build react-v1` asks for a
-build instead; a release build refuses it with `profile_unknown` until a
-release can build ([decision 0058](docs/decisions/0058-react-builds-and-preview.md)),
+build instead; the x86_64 Linux release build queues it for an execution
+worker, a release build for any other target refuses it with `profile_unknown`
+([decision 0058](docs/decisions/0058-react-builds-and-preview.md)),
 and `--profile` still names the connection profile.
 `artifree artifact build-status <id> --build react-v1` prints the latest build
 and whether the current revision's build is built, pending, failed (with its
@@ -157,9 +160,9 @@ TypeScript client's `followJob` wait for a job to end. In the web workspace
 an artifact's Jobs tab lists its jobs, asks for a verification or a
 `react-v1` build of the revision shown, shows the head revision's build
 status, cancels a job, follows each change without a reload, and says so when
-no worker, or for a build no execution worker, is ready. A release build
-answers the build status and a build request with `profile_unknown`, and the
-tab shows that.
+no worker, or for a build no execution worker, is ready. A release build for
+a target other than x86_64 Linux answers the build status and a build request
+with `profile_unknown`, and the tab shows that.
 
 ### Application data
 

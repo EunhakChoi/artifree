@@ -337,7 +337,8 @@ jobs:
       # The only build with the enforcement-fixture feature (decision 0057 rule 2): the R02bb job
       # tests run the server binary that serves the fixture profile. Release archives, the container
       # image and the clean-install checks build without it; scripts/check-boundaries.mjs enforces
-      # that.
+      # that. Part 18 of the matrix also runs builds through the server built without the feature,
+      # in the release profile, as the release archives build it (decision 0058, R03fa).
       - name: Build the enforcement tests and the test-support programs
         run: |
           cargo test -p artifree-providers --test enforcement --no-run --locked
@@ -345,6 +346,7 @@ jobs:
           cargo build -p artifree-providers --example artifree-execution-fixture --locked
           cargo build -p artifree-providers --example artifree-execution-payload --locked
           cargo test -p artifree-server --features enforcement-fixture --test execution_jobs --no-run --locked
+          cargo build -p artifree-server --bin artifree-server --release --locked
       - name: Run the enforcement matrix
         run: scripts/enforcement/run.sh
       - name: Upload the host report

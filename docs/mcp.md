@@ -258,8 +258,9 @@ trusted server code, not an agent's code.
 With `kind: "run_profile"` and `profile: "react-v1"`, `enqueue_job` asks for a
 build of the revision, the head or an older one, which an execution worker
 runs in its sandbox ([decision 0058](decisions/0058-react-builds-and-preview.md)).
-A server whose build cannot build the profile, which today is every release
-build, answers `profile_unknown`, and so does any other profile. Builds count
+A server whose build cannot build the profile, such as a release build for a
+target other than x86_64 Linux, answers `profile_unknown`, and so does any
+other profile. Builds count
 toward the same 16 open jobs. A succeeded build has `build` with its file and
 byte counts. A failed one has its `failure` (`build_failed`, `limit_exceeded`,
 `output_rejected` or `execution_unavailable`) and, for `build_failed`, up to

@@ -11,7 +11,9 @@
 //! held capacity, so it marked itself seen.
 //!
 //! One ignored test runs the case in `ARTIFREE_BUILD_CASE`. `scripts/enforcement/run.sh` (part
-//! 17) runs it once per case, with the payload scenario each `react-v1` check case needs.
+//! 17) runs it once per case, with the payload scenario each `react-v1` check case needs. Two
+//! more prepare and check a `react-v1` case for the worker of the release build, which knows no
+//! fixture (slice R03fa, part 18).
 
 use artifree_domain::job::BuildDiagnostic;
 use artifree_ports::build_store::BuildStore;
@@ -339,6 +341,59 @@ fn job_a_build_ends_as_its_case_names() -> TestResult {
         store.attempt_of(&job)?.state,
         AttemptState::Settled,
         "the {name} build's attempt must be settled"
+    );
+    Ok(())
+}
+
+/// The release build's half of slice R03fa (decision 0058 rule 5): creates the database in
+/// `ARTIFREE_WORKER_DATA` with the artifact of the `react-v1` case in `ARTIFREE_BUILD_CASE` and
+/// one queued build of it, which a worker of the server built without `enforcement-fixture` then
+/// runs as its unit's own command. `scripts/enforcement/run.sh` (part 18) runs it, the worker and
+/// [`job_check_a_release_build`] once per case.
+#[test]
+#[ignore = "runs only in the Linux enforcement job"]
+fn job_prepare_a_release_build() -> TestResult {
+    let name = std::env::var(BUILD_CASE)?;
+    let case = build_case(&name)?;
+    assert_eq!(
+        case.profile, "react-v1",
+        "the release build knows react-v1 alone"
+    );
+    let store = Store::new(&worker_data()?)?;
+    store.create_build_artifact(&case.files)?;
+    let job = store.enqueue_build(case.profile)?;
+    assert_eq!(
+        store.job_row(&job)?.state,
+        JobState::Queued.as_str(),
+        "the build waits for the release worker"
+    );
+    Ok(())
+}
+
+/// The release worker has ended the build of [`job_prepare_a_release_build`] as its case names:
+/// the template is published and served under `/b/`, a bad import fails as `build_failed` with
+/// the bundler's diagnostic. The attempt is settled and none is left unsettled.
+#[test]
+#[ignore = "runs only in the Linux enforcement job"]
+fn job_check_a_release_build() -> TestResult {
+    let name = std::env::var(BUILD_CASE)?;
+    let case = build_case(&name)?;
+    let store = Store::new(&worker_data()?)?;
+    let job = store.only_run_profile_job()?;
+    let profile: ProfileName = parsed(case.profile)?;
+    let end = store.build_end(&job, &profile)?;
+    assert_eq!(end, case.end, "the release worker's {name} build");
+    if matches!(end, End::Published(_)) {
+        store.preview_the_build(&profile)?;
+    }
+    assert_eq!(
+        store.attempt_of(&job)?.state,
+        AttemptState::Settled,
+        "the {name} build's attempt must be settled"
+    );
+    assert!(
+        store.port.unsettled_attempts()?.is_empty(),
+        "no attempt may be unsettled after the release worker's run"
     );
     Ok(())
 }

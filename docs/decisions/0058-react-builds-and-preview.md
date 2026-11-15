@@ -10,9 +10,9 @@ R03cc (build tickets, the `/b/` route and the head status, below the
 wire), R03cda (the execution readiness, schema 16), R03cdb (the
 claim deadline), R03da (the public kind, contract 0.30.0) and R03db
 (build tickets and the head status on the wire, contract 0.31.0), R03ea
-(the build in the Jobs tab) and R03eb (the build preview) are implemented;
-R03fa (the release build) and R03fb (the release archive and the supported
-host) are not**.
+(the build in the Jobs tab), R03eb (the build preview) and R03fa (the
+launch and `react-v1` in the x86_64 Linux release build) are implemented;
+R03fb (the release archive and the supported host) is not**.
 Roadmap: R03.
 
 > **Note, 2026-11-14 (slices).** R03b is split into R03ba, R03bb and R03bc,
@@ -953,6 +953,52 @@ Roadmap: R03.
 >     execution worker unit with its delegated group, sees
 >     `GET /v1/background` report the worker ready, and publishes a
 >     `react-v1` build of the template that the `/b/` route serves.
+
+> **Note, 2026-11-15 (R03fa).** The release build implements R03fa as the
+> R03f split note describes, with these specifics; no numbered rule changes.
+>
+> - The launch is compiled where `target_arch = "x86_64"` or
+>   `enforcement-fixture` holds, on Linux, and in the test build. The
+>   worker's adapter is compiled where the first two hold. The fixture
+>   profile, the `react-v1` check, the measurement entry, `Measure`, the
+>   measured-calls file and the provider's test pauses stay in the test
+>   build and the build with `enforcement-fixture`. The release table on
+>   x86_64 is `react-v1` alone; on any other target it is empty.
+> - Admission runs when capacity is asked for, before the claim, so no
+>   profile is known yet. It checks no profile's policy there, and its
+>   report's policy hash is empty. The attempt's host report then carries
+>   the hash of the profile it launches. `inspect_host` keeps the fixture's
+>   inspection profile in the builds that have it.
+> - The server's `execution namespaces` and `execution wait` modes exit 0,
+>   or 70 with one line on stderr when the read or the write fails.
+>   Admission's namespace check runs the root's server with
+>   `execution namespaces`, and its probe child with `execution wait`.
+> - The tests that proved `profile_unknown` for a release build already
+>   gave the server an empty list of build profiles, as a build that knows
+>   none, and they name `fixture`, `react-v1-check` and names that are no
+>   profile too. They keep doing so; only their wording changes. The CLI's
+>   tests answer through a stub server and do not depend on the build.
+> - The contract changes only in two descriptions, so the contract checks
+>   ask for no version change, and the contract stays 0.31.0.
+> - `release_build.rs` proves on x86_64 Linux that the fixture's identity
+>   fails with status 70 at the stub and the bootstrap, that `react-v1`'s
+>   identity passes the stub's identity check, that both admission modes
+>   answer, and that `--execution-dir` is not refused for want of a
+>   profile. On any other target it keeps the refusals with status 2.
+> - The Jobs smoke's new case `build-queued` presses "Build revision 1" on
+>   the real server, sees the queued build and the real notice that no
+>   execution worker is ready, and then cancels the build.
+>   `build-unknown` and `preview-build-unknown` answer the status and the
+>   enqueue with `422 profile_unknown` in the browser.
+> - Part 18 of the enforcement job builds the server without the feature
+>   in the release profile. The harness verb `root-remove` unloads the
+>   launcher profile and removes the root. The packaging script alone then
+>   packages a root for that server. For the `template` and `bad-import`
+>   cases, the feature-built job tests prepare a database with one
+>   `react-v1` build. The release worker runs it as its unit's own command
+>   with `--execution-dir --once`. The tests then check, through the
+>   store, a published build served under `/b/` and a `build_failed` with
+>   the bundler's diagnostic.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),

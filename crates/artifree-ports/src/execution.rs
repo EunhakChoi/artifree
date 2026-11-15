@@ -1,10 +1,11 @@
 //! The untrusted execution port of `run_profile` jobs (decision 0057 rule 15).
 //!
-//! Implemented: the port. The only adapter is the fixture profile's, compiled
-//! only into a Linux build with the `enforcement-fixture` feature (decision
-//! 0057 rule 2); a release build has no adapter, so its worker claims trusted
-//! kinds and ends unknown-profile jobs only. The port carries no command, path
-//! or launcher option (decision 0056 rule 1).
+//! Implemented: the port. Its adapter is compiled into the `x86_64` Linux
+//! release build, which runs `react-v1` (decision 0058), and into a Linux build
+//! with the `enforcement-fixture` feature, which also runs the fixture profile
+//! (decision 0057 rule 2). A build for any other target has no adapter, so its
+//! worker claims trusted kinds and ends unknown-profile jobs only. The port
+//! carries no command, path or launcher option (decision 0056 rule 1).
 
 use std::fmt;
 

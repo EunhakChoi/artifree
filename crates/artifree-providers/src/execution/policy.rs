@@ -1,7 +1,7 @@
-//! The seccomp programs for `x86_64` of the fixture profile (decisions 0042 rule 4 and 0056 rule 3)
-//! and, in the test build and the `enforcement-fixture` build, of the bundler measurement and the
-//! `react-v1` profile (decision 0058 rule 3). The public syscall mapping of 0042 rule 8 belongs to
-//! a later slice.
+//! The seccomp programs for `x86_64` of the `react-v1` profile (decision 0058 rule 3) and, in the
+//! test build and the `enforcement-fixture` build, of the fixture profile (decisions 0042 rule 4
+//! and 0056 rule 3) and the bundler measurement. The `x86_64` release build knows `react-v1`'s only
+//! (decision 0058 rule 5). The public syscall mapping of 0042 rule 8 belongs to a later slice.
 //!
 //! The bootstrap installs two programs, in this order. The first is the refusal: it makes
 //! `clone3` fail with `ENOSYS`, so libc falls back to `clone`. The second is the allowlist: it
@@ -16,7 +16,7 @@
 //! protocol 0 or TCP, and datagram with protocol 0 or UDP. The close-on-exec and non-blocking
 //! flags may be added to the type. `setsockopt` is allowed only for `SO_REUSEADDR` at the socket
 //! level (decision 0056, amendment of 2026-11-13, "files, descriptors and network"). On other
-//! architectures `fixture_filters` returns `PolicyError`, and its caller must refuse launch.
+//! architectures every set's programs are a `PolicyError`, and the caller must refuse launch.
 
 #[cfg(target_arch = "x86_64")]
 use std::collections::BTreeMap;
@@ -37,7 +37,9 @@ pub(super) struct PolicyError;
 /// one, and the bootstrap installs only that one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum FilterSet {
-    /// The fixture profile's refusal and allowlist.
+    /// The fixture profile's refusal and allowlist. Only the test build and the
+    /// `enforcement-fixture` build know it.
+    #[cfg(any(test, feature = "enforcement-fixture"))]
     Fixture,
     /// The bundler measurement's programs (decision 0058, note "R03bcb split"): the calls that
     /// the public syscall mapping refuses kill the process, the fixture's allowlist and the calls
@@ -47,9 +49,9 @@ pub(super) enum FilterSet {
     Measure,
     /// The `react-v1` profile's refusal and allowlist (decision 0058 rule 3, slice R03bcbb): the
     /// fixture's refusal, and the fixture's allowlist with the bundler's calls of
-    /// `REACT_V1_MEASURED` and `REACT_V1_UNMEASURED` added. Only the test build and the
-    /// `enforcement-fixture` build know it (rule 22).
-    #[cfg(any(test, feature = "enforcement-fixture"))]
+    /// `REACT_V1_MEASURED` and `REACT_V1_UNMEASURED` added. The test build, the
+    /// `enforcement-fixture` build and the `x86_64` release build know it (rule 5).
+    #[cfg(any(test, feature = "enforcement-fixture", target_arch = "x86_64"))]
     ReactV1,
 }
 
@@ -74,13 +76,14 @@ pub(super) fn filters_with(
     measured: &[i64],
 ) -> Result<[BpfProgram; 2], PolicyError> {
     match set {
+        #[cfg(any(test, feature = "enforcement-fixture"))]
         FilterSet::Fixture => {
             let _ = measured;
             fixture_filters()
         }
         #[cfg(any(test, feature = "enforcement-fixture"))]
         FilterSet::Measure => measure_filters(measured),
-        #[cfg(any(test, feature = "enforcement-fixture"))]
+        #[cfg(any(test, feature = "enforcement-fixture", target_arch = "x86_64"))]
         FilterSet::ReactV1 => {
             let _ = measured;
             react_v1_filters()
@@ -318,6 +321,7 @@ const SOCKET_FORMS: [(u64, u64, u64); 10] = [
 ///
 /// # Errors
 /// Returns `PolicyError` when the architecture is not `x86_64` or the compiler rejects the rules.
+#[cfg(any(test, feature = "enforcement-fixture"))]
 pub(super) fn fixture_filters() -> Result<[BpfProgram; 2], PolicyError> {
     #[cfg(target_arch = "x86_64")]
     {
@@ -339,7 +343,7 @@ pub(super) fn fixture_filters() -> Result<[BpfProgram; 2], PolicyError> {
 /// terminal. The measurement saw only the call, not its request, so `react_v1_rules` allows
 /// `ioctl` only for the two read-only terminal queries the bundler makes (`TERMINAL_QUERIES`); the
 /// attempt's descriptors are pipes and files, so both fail with `ENOTTY`.
-#[cfg(all(target_arch = "x86_64", any(test, feature = "enforcement-fixture")))]
+#[cfg(target_arch = "x86_64")]
 pub(super) const REACT_V1_MEASURED: [(&str, i64); 9] = [
     ("ioctl", 16),
     ("nanosleep", 35),
@@ -356,7 +360,7 @@ pub(super) const REACT_V1_MEASURED: [(&str, i64); 9] = [
 /// "R03bcb split"). On a host whose clock source the vDSO cannot use, the same code makes the
 /// real call, as the fixture's table notes for `clock_gettime`, which the fixture already allows.
 /// Read-only: each reads a clock or the current CPU. Sorted by number.
-#[cfg(all(target_arch = "x86_64", any(test, feature = "enforcement-fixture")))]
+#[cfg(target_arch = "x86_64")]
 pub(super) const REACT_V1_UNMEASURED: [(&str, i64); 3] =
     [("gettimeofday", 96), ("time", 201), ("getcpu", 309)];
 
@@ -366,7 +370,7 @@ pub(super) const REACT_V1_UNMEASURED: [(&str, i64); 3] =
 ///
 /// # Errors
 /// Returns `PolicyError` when the architecture is not `x86_64` or the compiler rejects the rules.
-#[cfg(any(test, feature = "enforcement-fixture"))]
+#[cfg(any(test, feature = "enforcement-fixture", target_arch = "x86_64"))]
 fn react_v1_filters() -> Result<[BpfProgram; 2], PolicyError> {
     #[cfg(target_arch = "x86_64")]
     {
@@ -379,17 +383,17 @@ fn react_v1_filters() -> Result<[BpfProgram; 2], PolicyError> {
 }
 
 /// The `ioctl` system call, the one added call that `react_v1_rules` restricts by its arguments.
-#[cfg(all(target_arch = "x86_64", any(test, feature = "enforcement-fixture")))]
+#[cfg(target_arch = "x86_64")]
 pub(super) const IOCTL: (&str, i64) = ("ioctl", 16);
 
 /// The argument index of `ioctl`'s request.
-#[cfg(all(target_arch = "x86_64", any(test, feature = "enforcement-fixture")))]
+#[cfg(target_arch = "x86_64")]
 const IOCTL_REQUEST_ARGUMENT: u8 = 1;
 
 /// The `ioctl` requests that `react-v1` allows: `TCGETS`, which reads a terminal's settings and
 /// fails with `ENOTTY` on any other descriptor, and `TIOCGWINSZ`, which reads its window size.
 /// The bundler asks both to decide how to print its messages; neither changes anything.
-#[cfg(all(target_arch = "x86_64", any(test, feature = "enforcement-fixture")))]
+#[cfg(target_arch = "x86_64")]
 pub(super) const TERMINAL_QUERIES: [u64; 2] = [0x5401, 0x5413];
 
 /// The `react-v1` allowlist's rules: the fixture's, a rule per request of `TERMINAL_QUERIES` for
@@ -398,7 +402,7 @@ pub(super) const TERMINAL_QUERIES: [u64; 2] = [0x5401, 0x5413];
 ///
 /// # Errors
 /// Returns `PolicyError` when the compiler rejects a condition or a rule.
-#[cfg(all(target_arch = "x86_64", any(test, feature = "enforcement-fixture")))]
+#[cfg(target_arch = "x86_64")]
 pub(super) fn react_v1_rules() -> Result<BTreeMap<i64, Vec<SeccompRule>>, PolicyError> {
     let mut rules = allowlist_rules()?;
     // No added call is one the fixture lists, perhaps with arguments (the table test), so no
@@ -559,7 +563,7 @@ pub(super) fn clone3_refusal() -> Result<BpfProgram, PolicyError> {
 ///
 /// # Errors
 /// Returns `PolicyError` when the compiler rejects the rules.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", any(test, feature = "enforcement-fixture")))]
 pub(super) fn allowlist() -> Result<BpfProgram, PolicyError> {
     compile(allowlist_rules()?)
 }
@@ -684,7 +688,7 @@ pub(super) fn policy_sha256(set: FilterSet) -> Result<String, PolicyError> {
 ///
 /// # Errors
 /// Returns `PolicyError` when the filters cannot be built.
-#[cfg(any(test, feature = "enforcement-fixture"))]
+#[cfg(any(test, feature = "enforcement-fixture", target_arch = "x86_64"))]
 pub(super) fn policy_sha256_with(set: FilterSet, measured: &[i64]) -> Result<String, PolicyError> {
     let programs = filters_with(set, measured)?;
     let mut bytes = Vec::new();

@@ -1,10 +1,14 @@
-//! The release build of the server (decision 0057 rules 1, 2, 4 and 18). A build
-//! without the `enforcement-fixture` feature knows no execution profile: its
-//! worker ends a `run_profile` job as `execution_unavailable` without an attempt,
-//! refuses `--execution-dir` before it opens the database, and refuses every
-//! `execution` entry point. Each refusal exits with status 2 and writes one line
-//! to stderr. The file compiles to nothing with the feature, which the enforcement
-//! job builds; the server-binary job of CI runs this file on default features.
+//! The release build of the server (decision 0057 rules 1, 2, 4 and 18; decision
+//! 0058 rule 5). A build without the `enforcement-fixture` feature does not know
+//! the fixture profile: its worker ends a fixture `run_profile` job as
+//! `execution_unavailable` without an attempt. The `x86_64` Linux release build has
+//! the launch (R03fa): it accepts `--execution-dir`, serves the entry points of
+//! `react-v1`, and fails the fixture's identity with status 70. A release build
+//! for any other target knows no execution profile: it refuses `--execution-dir`
+//! before it opens the database and refuses every `execution` entry point, each
+//! with status 2 and one line on stderr. The file compiles to nothing with the
+//! feature, which the enforcement job builds; the server-binary job of CI runs
+//! this file on default features.
 
 #![cfg(not(feature = "enforcement-fixture"))]
 
@@ -31,10 +35,15 @@ type TestResult = Result<(), Box<dyn Error>>;
 
 const BIN: &str = env!("CARGO_BIN_EXE_artifree-server");
 const NOW: UnixMillis = UnixMillis(1_000_000);
-/// The words of the one stderr line that refuses an execution request.
+/// The words of the one stderr line that refuses an execution request in a build
+/// without the launch.
 const REFUSAL: &str = "knows no execution profile";
+/// The fixture profile's identity, which no release build knows.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const FIXTURE_IDENTITY: &str = "artifree-fixture-inspection-v1";
 /// The entry points of `execution` (decision 0057 rule 4), each with the
 /// arguments it is given.
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 const ENTRY_POINTS: [&[&str]; 4] = [
     &["execution"],
     &["execution", "bootstrap", "artifree-fixture-inspection-v1"],
@@ -92,7 +101,8 @@ where
 }
 
 /// Creates the database in `dir` with one artifact at revision 1 and one queued
-/// `fixture` `run_profile` job for it, and returns the job's identifier.
+/// `fixture` `run_profile` job for it, a profile no release build knows, and
+/// returns the job's identifier.
 fn data_with_fixture_job(dir: &Path) -> Result<String, Box<dyn Error>> {
     let service = ArtifactService::new(SqliteStore::open(&dir.join(DATABASE_FILE))?);
     let owner: ActorId = parsed("owner")?;
@@ -163,6 +173,7 @@ fn json_lines(stdout: &[u8]) -> Result<Vec<Value>, Box<dyn Error>> {
 
 /// Asserts that `output` wrote exactly one line to stderr and that the line names
 /// the missing execution profile support.
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 fn assert_refusal_line(output: &Output, what: &str) {
     let stderr = stderr_of(output);
     let lines: Vec<&str> = stderr.lines().collect();
@@ -247,6 +258,7 @@ fn a_release_worker_ends_a_fixture_job_as_execution_unavailable() -> TestResult 
     Ok(())
 }
 
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 #[test]
 fn a_release_worker_refuses_an_execution_directory_before_the_database() -> TestResult {
     let dir = TempDir::new()?;
@@ -288,6 +300,7 @@ fn a_release_worker_refuses_an_execution_directory_before_the_database() -> Test
 
 // --- the execution entry points ---------------------------------------------
 
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 #[test]
 fn a_release_build_refuses_every_execution_entry_point() -> TestResult {
     // The command runs in an empty directory, which a refused command must leave empty.
@@ -312,5 +325,135 @@ fn a_release_build_refuses_every_execution_entry_point() -> TestResult {
         assert_refusal_line(&output, &format!("{arguments:?}"));
         assert_empty(cwd.path())?;
     }
+    Ok(())
+}
+
+// --- the x86_64 Linux release build (R03fa) ----------------------------------
+
+/// Runs `artifree-server` with `arguments` in an empty directory, with no input,
+/// and checks that the directory stays empty.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn run_in_empty_dir(arguments: &[&str]) -> Result<Output, Box<dyn Error>> {
+    let cwd = TempDir::new()?;
+    let output = Command::new(BIN)
+        .args(arguments)
+        .current_dir(cwd.path())
+        .stdin(Stdio::null())
+        .output()?;
+    assert_empty(cwd.path())?;
+    Ok(output)
+}
+
+/// Asserts that `output` exited with `status` and wrote one stderr line that
+/// holds `words`.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn assert_failure(output: &Output, status: i32, words: &str, what: &str) {
+    let stderr = stderr_of(output);
+    assert_eq!(
+        output.status.code(),
+        Some(status),
+        "{what} exits with status {status}, stderr: {stderr}"
+    );
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert!(
+        matches!(lines.as_slice(), [line] if line.contains(words)),
+        "{what}: expected one stderr line naming {words:?}, got {stderr:?}"
+    );
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn the_x86_64_release_worker_accepts_an_execution_directory() -> TestResult {
+    let dir = TempDir::new()?;
+    let data = dir.path().join("data");
+    let execution = dir.path().join("execution");
+    fs::create_dir(&data)?;
+    private_dir(&execution)?;
+
+    let output = Command::new(BIN)
+        .args(["worker", "run", "--once", "--data-dir"])
+        .arg(&data)
+        .arg("--execution-dir")
+        .arg(&execution)
+        .stdin(Stdio::null())
+        .output()?;
+
+    // Whether the test's process is the only one of a delegated group decides
+    // how far the worker gets; either way it does not refuse the option for
+    // want of a profile, and it creates no database.
+    let stderr = stderr_of(&output);
+    assert_ne!(output.status.code(), Some(0), "stderr: {stderr}");
+    assert!(
+        !stderr.contains(REFUSAL),
+        "the x86_64 release build knows react-v1, got {stderr:?}"
+    );
+    assert!(
+        !data.join(DATABASE_FILE).exists(),
+        "the worker creates no database"
+    );
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn the_x86_64_release_build_fails_the_fixture_identity_with_status_70() -> TestResult {
+    let bootstrap = run_in_empty_dir(&["execution", "bootstrap", FIXTURE_IDENTITY])?;
+    assert_failure(
+        &bootstrap,
+        70,
+        "the execution profile identity is unknown",
+        "bootstrap of the fixture",
+    );
+    let stub = run_in_empty_dir(&["execution", "stub", FIXTURE_IDENTITY, "/nonexistent-input"])?;
+    assert_failure(
+        &stub,
+        70,
+        "the execution profile identity is unknown",
+        "stub of the fixture",
+    );
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn the_x86_64_release_build_knows_the_react_v1_identity() -> TestResult {
+    // A relative input fails after the identity check and before anything else.
+    let stub = run_in_empty_dir(&["execution", "stub", "artifree-react-v1", "input"])?;
+    assert_failure(
+        &stub,
+        70,
+        "the input path is not absolute",
+        "stub of react-v1",
+    );
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn the_x86_64_release_build_serves_the_admission_modes() -> TestResult {
+    let namespaces = run_in_empty_dir(&["execution", "namespaces"])?;
+    assert_eq!(
+        namespaces.status.code(),
+        Some(0),
+        "stderr: {}",
+        stderr_of(&namespaces)
+    );
+    let text = String::from_utf8(namespaces.stdout)?;
+    let names: Vec<&str> = text
+        .lines()
+        .filter_map(|line| line.split_once('=').map(|(name, _)| name))
+        .collect();
+    assert_eq!(
+        names,
+        ["user", "pid", "net", "mnt", "ipc", "uts", "cgroup"],
+        "{text:?}"
+    );
+    // The probe child reads its input to the end; a closed input ends it.
+    let wait = run_in_empty_dir(&["execution", "wait"])?;
+    assert_eq!(wait.status.code(), Some(0), "stderr: {}", stderr_of(&wait));
+    assert!(wait.stdout.is_empty(), "the probe child prints nothing");
+    // A mode the build does not know is a usage error.
+    let unknown = run_in_empty_dir(&["execution"])?;
+    assert_eq!(unknown.status.code(), Some(2));
     Ok(())
 }

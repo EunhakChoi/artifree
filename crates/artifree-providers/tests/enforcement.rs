@@ -242,12 +242,13 @@ fn job_missing_launcher_is_refused() {
     assert_refused_with(artifree_providers::execution::AdmissionRefusal::MissingLauncher);
 }
 
-/// Rule 10: the tool root's fixture is moved away.
+/// Rule 10: the tool root's server binary, which runs the namespace check and the probe child, is
+/// moved away (decision 0058, note "R03f split").
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "runs only in the Linux enforcement job (decision 0056 rule 12)"]
-fn job_missing_fixture_is_refused() {
-    assert_refused_with(artifree_providers::execution::AdmissionRefusal::MissingFixture);
+fn job_missing_server_is_refused() {
+    assert_refused_with(artifree_providers::execution::AdmissionRefusal::MissingServer);
 }
 
 /// Rule 10: the job appends one byte to the tool root's payload, so its length and digest no

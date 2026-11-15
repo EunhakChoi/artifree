@@ -1293,7 +1293,7 @@
         },
         {
           "const": "profile_unknown",
-          "description": "The server's build cannot build the named profile; nothing was\nenqueued. A release build knows no profile yet.",
+          "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
           "type": "string"
         },
         {

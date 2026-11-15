@@ -107,7 +107,8 @@ const CHECK_ARGUMENTS: &[&str] = &[
     "/tmp",
     "--chdir",
     "/",
-    "/tools/bin/artifree-execution-fixture",
+    "/tools/bin/artifree-server",
+    "execution",
     "namespaces",
 ];
 
@@ -141,6 +142,33 @@ fn sample_report() -> HostReport {
     }
 }
 
+/// Admission runs before the claim, so it names no policy; the attempt's report carries the hash
+/// of the profile it launches and keeps every other fact (decision 0058, note "R03fa").
+#[test]
+fn the_attempt_report_carries_the_launched_profiles_policy() {
+    let admitted = sample_report();
+    let react = admitted.with_policy(profile::REACT_V1.inspection);
+    assert_eq!(
+        react.policy_sha256,
+        super::super::report::sha256_hex(profile::REACT_V1.inspection.manifest())
+    );
+    assert_ne!(
+        react.policy_sha256,
+        admitted
+            .with_policy(super::super::InspectionProfile::fixture())
+            .policy_sha256,
+        "each profile has its own hash"
+    );
+    assert_eq!(
+        HostReport {
+            policy_sha256: admitted.policy_sha256.clone(),
+            ..react
+        },
+        admitted,
+        "only the policy hash changes"
+    );
+}
+
 #[test]
 fn attempt_arguments_add_the_capabilities_and_leave_the_scratch_to_the_bootstrap() {
     let arguments = text_arguments(&launcher::attempt_arguments(
@@ -158,7 +186,7 @@ fn namespace_check_arguments_keep_their_own_scratch_and_mode() {
     let arguments = text_arguments(&launcher::launcher_arguments(Path::new("/opt/t")));
     assert_eq!(
         arguments, CHECK_ARGUMENTS,
-        "the namespace check must use the 1 MiB scratch and the namespaces mode"
+        "the namespace check must use the 1 MiB scratch and the server's namespaces mode"
     );
 }
 

@@ -365,7 +365,7 @@ restore_host() {
     sudo "$PREPARE" kernel-log || true
     sudo systemctl stop 'artifree-supervisor-*' 2> /dev/null || true
     sudo "$PREPARE" launcher-back 2> /dev/null || true
-    sudo "$PREPARE" fixture-back 2> /dev/null || true
+    sudo "$PREPARE" server-back 2> /dev/null || true
     sudo "$PREPARE" nomem-slice-off 2> /dev/null || true
     sudo "$PREPARE" tool-restore 2> /dev/null || true
     sudo "$PREPARE" package-restore 2> /dev/null || true
@@ -516,9 +516,9 @@ sudo "$PREPARE" launcher-away
 run_unit "$test_binary" removed-launcher job_missing_launcher_is_refused -p Delegate=yes
 sudo "$PREPARE" launcher-back
 
-sudo "$PREPARE" fixture-away
-run_unit "$test_binary" removed-fixture job_missing_fixture_is_refused -p Delegate=yes
-sudo "$PREPARE" fixture-back
+sudo "$PREPARE" server-away
+run_unit "$test_binary" removed-server job_missing_server_is_refused -p Delegate=yes
+sudo "$PREPARE" server-back
 
 say "part 4: the attempt, its admission lock and the syscall table"
 run_direct "$lib_binary" syscall-table execution::policy::tests::job_syscall_table_matches_the_kernel_headers
@@ -820,6 +820,48 @@ done
 run_server_job thread-refusal server-build-filter builds::job_a_build_ends_as_its_case_names --setenv=ARTIFREE_BUILD_CASE=filter
 run_server_job flood server-build-flood builds::job_a_build_ends_as_its_case_names --setenv=ARTIFREE_BUILD_CASE=flood
 sudo "$PREPARE" scenario exit
+
+# Part 18 is the release build's worker (decision 0058, note "R03f split", R03fa): the server
+# built without enforcement-fixture, in the release profile, as the release archives build it.
+# The job's root and its launcher profile are removed, the packaging script alone builds a fresh
+# root for that server, and its worker, as its unit's own command, runs one react-v1 build that
+# succeeds and one that fails with the bundler's diagnostic. The feature-built job tests only
+# prepare each database and check its end through the store.
+say "part 18: builds through the release build's worker (0058, R03fa)"
+release_metadata="$(cargo build -p artifree-server --bin artifree-server --release --locked --message-format=json)"
+release_bins="$(printf '%s\n' "$release_metadata" \
+  | jq -r 'select(.reason == "compiler-artifact" and .target.name == "artifree-server" and (.target.kind | index("bin")) != null and .executable != null) | .executable')"
+case "$release_bins" in
+  "") fail "cargo reported no release artifree-server binary" ;;
+  *$'\n'*) fail "cargo reported more than one release artifree-server binary" ;;
+esac
+release_bin=$release_bins
+[[ -x "$release_bin" ]] || fail "the release artifree-server binary is not executable: $release_bin"
+[[ "$release_bin" != "$server_bin" ]] || fail "the release server is the feature build's binary"
+sudo "$PREPARE" root-remove
+[[ ! -e "$ROOT" ]] || fail "the removed root is still there: $ROOT"
+sudo "$PREPARE" package-with "$release_bin" "$PWD/scripts/tools/react-v1.lock"
+for case in template bad-import; do
+  release_data="$OUT/release-$case-data"
+  release_exec="$OUT/release-$case-exec"
+  rm -rf -- "$release_data" "$release_exec"
+  mkdir -m 700 -- "$release_data" "$release_exec"
+  ARTIFREE_WORKER_DATA="$PWD/$release_data" ARTIFREE_BUILD_CASE=$case \
+    run_direct "$server_test" "release-$case-prepare" builds::job_prepare_a_release_build
+  sudo systemd-run --quiet --wait --pipe --collect --service-type=exec \
+    --uid="$(id -u)" --gid="$(id -g)" --working-directory="$PWD" -p Delegate=yes \
+    -- "$release_bin" worker run --data-dir "$PWD/$release_data" --execution-dir "$PWD/$release_exec" --once \
+    > "$OUT/release-$case.jsonl" 2> "$OUT/release-$case.stderr" \
+    || fail "the release worker unit failed; see $OUT/release-$case.stderr"
+  ARTIFREE_WORKER_DATA="$PWD/$release_data" ARTIFREE_BUILD_CASE=$case \
+    run_direct "$server_test" "release-$case-check" builds::job_check_a_release_build
+  chmod -R u+w -- "$release_exec"
+  rm -rf -- "$release_data" "$release_exec"
+done
+grep -Fq '"state":"succeeded"' "$OUT/release-template.jsonl" \
+  || fail "the release worker recorded no succeeded build; see $OUT/release-template.jsonl"
+grep -Fq '"failure":"build_failed"' "$OUT/release-bad-import.jsonl" \
+  || fail "the release worker recorded no failed build; see $OUT/release-bad-import.jsonl"
 
 say "restore the routing and the profile"
 sudo "$PREPARE" routing-pipe

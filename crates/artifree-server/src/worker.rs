@@ -6,11 +6,11 @@
 //! own and no credential: it reads and writes the database file through the
 //! same store layer as the server, with the same busy timeout and
 //! write-ahead log. It does not sandbox anything. Without an execution port it
-//! runs no untrusted code. With one (a Linux build with the
-//! `enforcement-fixture` feature, started with `--execution-dir`) it can run
-//! jobs of the fixture profile of decision 0057, and no other untrusted profile
-//! exists: untrusted execution beyond that fixture (roadmap R02), React builds
-//! (R03), and provider sampling (P01) are not implemented. Two workers, or a
+//! runs no untrusted code. With one (started with `--execution-dir`, in the
+//! `x86_64` Linux release build or a Linux build with the `enforcement-fixture`
+//! feature) it can run jobs of the profiles the build knows: `react-v1` builds
+//! (decision 0058), and in the feature build also the fixture profile of
+//! decision 0057. Provider sampling (P01) is not implemented. Two workers, or a
 //! worker and a server, may share a data directory; each transition is one
 //! atomic database transaction.
 //!

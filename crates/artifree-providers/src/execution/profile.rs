@@ -5,14 +5,17 @@
 //! system call filter; the stub is given `stub` and the identity. Nothing a request carries selects or changes any of them
 //! (decision 0042 rule 2): a job names a profile, and the provider looks the name up here.
 //!
-//! The fixture is the only profile of a release build's table, which no release build uses yet.
-//! The test build and the `enforcement-fixture` build also know `react-v1` (decision 0058 rule 22,
-//! slice R03bcbb) and the `react-v1` check, a build profile that runs the fixture's payload under
-//! `react-v1`'s filter (slice R03cb), and one entry with no store name that only the enforcement
-//! job's attempt tests launch: the bundler measurement.
+//! The `x86_64` release build's table holds `react-v1` only (decision 0058 rule 5, R03fa), and a
+//! release build for any other target's table is empty. The test build and the
+//! `enforcement-fixture` build know the fixture, `react-v1` (slice R03bcbb) and the `react-v1`
+//! check, a build profile that runs the fixture's payload under `react-v1`'s filter (slice R03cb),
+//! and one entry with no store name that only the enforcement job's attempt tests launch: the
+//! bundler measurement.
 
+#[cfg(any(test, feature = "enforcement-fixture"))]
+use super::FIXTURE;
+use super::InspectionProfile;
 use super::policy::FilterSet;
-use super::{FIXTURE, InspectionProfile};
 
 /// One reviewed, fixed execution profile.
 #[derive(Debug, Eq, PartialEq)]
@@ -39,35 +42,42 @@ pub(super) struct ExecutionProfile {
 /// What a profile requires of its input before it is staged.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum InputRule {
-    /// Any verified package.
+    /// Any verified package. Only the profiles of the test build and the `enforcement-fixture`
+    /// build use it.
+    #[cfg(any(test, feature = "enforcement-fixture"))]
     Any,
     /// No file that would change how the bundler resolves an import (decision 0058 rule 2): the
-    /// pinned packages of the tool root are the only ones a build can import. Only the profiles of
-    /// the test build and the `enforcement-fixture` build use it.
-    #[cfg(any(test, feature = "enforcement-fixture"))]
+    /// pinned packages of the tool root are the only ones a build can import.
+    #[cfg(any(test, feature = "enforcement-fixture", target_arch = "x86_64"))]
     FixedResolution,
 }
 
 /// What a profile's collected output must be.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum OutputRule {
-    /// A whole package, with its `index.html`.
+    /// A whole package, with its `index.html`. Only the fixture of the test build and the
+    /// `enforcement-fixture` build uses it.
+    #[cfg(any(test, feature = "enforcement-fixture"))]
     Package,
     /// A bundler's output: files under the package rules except the entry document, which the
     /// trusted worker adds from the revision (decision 0058 rule 8). Its profile is a build
-    /// profile. Only the profiles of the test build and the `enforcement-fixture` build use it.
-    #[cfg(any(test, feature = "enforcement-fixture"))]
+    /// profile.
+    #[cfg(any(test, feature = "enforcement-fixture", target_arch = "x86_64"))]
     Bundle,
 }
 
 /// The name of the fixture execution profile (decision 0057 rule 2).
+#[cfg(any(test, feature = "enforcement-fixture"))]
 const FIXTURE_PROFILE: &str = "fixture";
 
 /// The fixture's payload executable inside the tool root, as the bootstrap sees it.
+#[cfg(any(test, feature = "enforcement-fixture"))]
 const PAYLOAD: &str = "/tools/bin/artifree-execution-payload";
 
 /// The repository's fixture: the test-support payload with no arguments and an empty
-/// environment, under the fixture's filter.
+/// environment, under the fixture's filter. Only the test build and the `enforcement-fixture` build
+/// know it (decision 0058 rule 5).
+#[cfg(any(test, feature = "enforcement-fixture"))]
 pub(super) const FIXTURE_EXECUTION: ExecutionProfile = ExecutionProfile {
     name: FIXTURE_PROFILE,
     inspection: FIXTURE,
@@ -80,17 +90,17 @@ pub(super) const FIXTURE_EXECUTION: ExecutionProfile = ExecutionProfile {
 };
 
 /// The name of the React profile (decision 0058 rule 1).
-#[cfg(any(test, feature = "enforcement-fixture"))]
+#[cfg(any(test, feature = "enforcement-fixture", target_arch = "x86_64"))]
 const REACT_V1_PROFILE: &str = "react-v1";
 
 /// The bundler's executable inside the tool root, as the bootstrap sees it.
-#[cfg(any(test, feature = "enforcement-fixture"))]
+#[cfg(any(test, feature = "enforcement-fixture", target_arch = "x86_64"))]
 const BUNDLER: &str = "/tools/bin/esbuild";
 
 /// The React profile (decision 0058 rules 1 to 3): the root's bundler with the argv and
-/// environment of rule 1, under its own filter. Only the test build and the
-/// `enforcement-fixture` build know it until R03f (rule 22).
-#[cfg(any(test, feature = "enforcement-fixture"))]
+/// environment of rule 1, under its own filter. The test build, the `enforcement-fixture` build
+/// and the `x86_64` release build know it (rule 5, R03fa).
+#[cfg(any(test, feature = "enforcement-fixture", target_arch = "x86_64"))]
 pub(super) const REACT_V1: ExecutionProfile = ExecutionProfile {
     name: REACT_V1_PROFILE,
     inspection: InspectionProfile {
@@ -105,9 +115,20 @@ pub(super) const REACT_V1: ExecutionProfile = ExecutionProfile {
     output: OutputRule::Bundle,
 };
 
-/// Every profile, in no particular order. Names and identities are unique.
-#[cfg(not(any(test, feature = "enforcement-fixture")))]
-const PROFILES: &[ExecutionProfile] = &[FIXTURE_EXECUTION];
+/// Every profile, in no particular order. Names and identities are unique. The `x86_64` release
+/// build knows `react-v1` only (decision 0058 rule 5).
+#[cfg(all(
+    target_arch = "x86_64",
+    not(any(test, feature = "enforcement-fixture"))
+))]
+const PROFILES: &[ExecutionProfile] = &[REACT_V1];
+
+/// Every profile: none in a release build for any other target, which has no launch.
+#[cfg(all(
+    not(target_arch = "x86_64"),
+    not(any(test, feature = "enforcement-fixture"))
+))]
+const PROFILES: &[ExecutionProfile] = &[];
 
 /// Every profile, in no particular order. Names and identities are unique.
 #[cfg(any(test, feature = "enforcement-fixture"))]
@@ -161,7 +182,7 @@ const TEST_ENTRIES: [&ExecutionProfile; 1] = [&MEASUREMENT];
 /// browser, the automatic JSX runtime, minified, without colour and with at most 20 messages.
 /// No source map or metafile is asked for, and esbuild writes neither unless asked (its
 /// `--sourcemap` takes no `false` value).
-#[cfg(any(test, feature = "enforcement-fixture"))]
+#[cfg(any(test, feature = "enforcement-fixture", target_arch = "x86_64"))]
 const BUNDLER_ARGUMENTS: &[&str] = &[
     "/input/src/main.tsx",
     "--bundle",
@@ -178,7 +199,7 @@ const BUNDLER_ARGUMENTS: &[&str] = &[
 /// The bundler's whole environment (decision 0058 rule 1): the module directory of the root's
 /// preinstalled packages, and one processor for the Go runtime, so that it stays within one CPU
 /// and 64 tasks.
-#[cfg(any(test, feature = "enforcement-fixture"))]
+#[cfg(any(test, feature = "enforcement-fixture", target_arch = "x86_64"))]
 const BUNDLER_ENVIRONMENT: &[(&str, &str)] =
     &[("NODE_PATH", "/tools/modules"), ("GOMAXPROCS", "1")];
 
@@ -200,14 +221,14 @@ pub(super) fn by_identity(identity: &str) -> Option<&'static ExecutionProfile> {
 
 /// The filter of every profile and of every entry of `TEST_ENTRIES`, each once, so that a
 /// capacity taken before any claim can show that each one builds (decision 0042 rule 5).
-#[cfg(any(test, feature = "enforcement-fixture"))]
+#[cfg(any(test, feature = "enforcement-fixture", target_arch = "x86_64"))]
 pub(super) fn filter_sets() -> impl Iterator<Item = FilterSet> {
     let mut sets: Vec<FilterSet> = Vec::new();
-    for set in PROFILES
-        .iter()
-        .chain(TEST_ENTRIES)
-        .map(|profile| profile.filter)
-    {
+    #[cfg(any(test, feature = "enforcement-fixture"))]
+    let entries = PROFILES.iter().chain(TEST_ENTRIES);
+    #[cfg(not(any(test, feature = "enforcement-fixture")))]
+    let entries = PROFILES.iter();
+    for set in entries.map(|profile| profile.filter) {
         if !sets.contains(&set) {
             sets.push(set);
         }
@@ -216,14 +237,14 @@ pub(super) fn filter_sets() -> impl Iterator<Item = FilterSet> {
 }
 
 /// The store name of every profile, for the list a worker passes with each claim.
-#[cfg(feature = "enforcement-fixture")]
+#[cfg(any(feature = "enforcement-fixture", target_arch = "x86_64"))]
 pub(super) fn names() -> impl Iterator<Item = &'static str> {
     PROFILES.iter().map(|profile| profile.name)
 }
 
 /// The store name of every build profile, whose output the trusted worker composes and publishes
 /// as a build (decision 0058 rule 8).
-#[cfg(feature = "enforcement-fixture")]
+#[cfg(any(feature = "enforcement-fixture", target_arch = "x86_64"))]
 pub(super) fn build_names() -> impl Iterator<Item = &'static str> {
     PROFILES
         .iter()
@@ -232,7 +253,7 @@ pub(super) fn build_names() -> impl Iterator<Item = &'static str> {
 }
 
 /// The profile whose store name is exactly `name`.
-#[cfg(any(test, feature = "enforcement-fixture"))]
+#[cfg(any(test, feature = "enforcement-fixture", target_arch = "x86_64"))]
 #[must_use]
 pub(super) fn by_name(name: &str) -> Option<&'static ExecutionProfile> {
     PROFILES.iter().find(|profile| profile.name == name)
