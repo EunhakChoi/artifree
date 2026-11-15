@@ -639,9 +639,9 @@ fn backup_restore_keeps_asset_bytes_versions_receipts_and_independent_future_cha
 fn schema_eleven_upgrade_adds_assets_and_failed_upgrade_is_atomic() -> TestResult {
     let f = Fixture::new()?;
     // A version 11 file has none of the tables of later steps: the asset tables
-    // (12), the execution attempts (14), the builds and diagnostics (15), and
-    // the readiness rows (16).
-    let sql = "DROP TABLE asset_requests; DROP TABLE assets; DROP TABLE asset_spaces; DROP TABLE asset_ids; DROP TABLE execution_attempts; DROP TABLE build_files; DROP TABLE builds; DROP TABLE job_diagnostics; DROP TABLE execution_workers; ALTER TABLE artifacts DROP COLUMN type_release; ALTER TABLE artifacts DROP COLUMN type_id; PRAGMA user_version=11;";
+    // (12), the execution attempts (14), the builds and diagnostics (15), the
+    // readiness rows (16), the type columns (17) and the access tables (18).
+    let sql = "DROP TABLE access_requests; DROP TABLE artifact_members; ALTER TABLE artifacts DROP COLUMN access_version; DROP TABLE asset_requests; DROP TABLE assets; DROP TABLE asset_spaces; DROP TABLE asset_ids; DROP TABLE execution_attempts; DROP TABLE build_files; DROP TABLE builds; DROP TABLE job_diagnostics; DROP TABLE execution_workers; ALTER TABLE artifacts DROP COLUMN type_release; ALTER TABLE artifacts DROP COLUMN type_id; PRAGMA user_version=11;";
     f.sql()?.execute_batch(sql)?;
     let reopened = SqliteStore::open(&database_in(f.dir.path()))?;
     assert_eq!(reopened.assets(&f.owner, f.id())?.version, AssetVersion(0));

@@ -1699,6 +1699,9 @@ fn no_unreviewed_binary_column_could_hide_a_content_digest() -> TestResult {
         // A data request's fingerprint hashes the written value; a purge blanks
         // it (decision 0031). The data tables hold no other binary column.
         "data_requests.fingerprint",
+        // An access request's fingerprint hashes the user and the change; a
+        // purge blanks it (decision 0060).
+        "access_requests.fingerprint",
         // The feed's identity is random.
         "feed.id",
     ]

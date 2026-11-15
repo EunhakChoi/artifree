@@ -4,6 +4,7 @@
 //! metadata revision, document sequence, running application's data version,
 //! and change feed sequence have independent lifecycles.
 
+pub mod access;
 pub mod artifact_type;
 pub mod assets;
 pub mod change;

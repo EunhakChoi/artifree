@@ -51,6 +51,7 @@ macro_rules! public_job {
     };
 }
 
+mod access;
 mod assets;
 mod data;
 mod jobs;
@@ -412,6 +413,11 @@ impl ArtifactStore for SqliteStore {
                 // same transaction as the move.
                 jobs::revoke_for_trash(transaction, request.artifact, now)?;
             }
+            if matches!(kind, ChangeKind::Deleted | ChangeKind::Recovered) {
+                // Decision 0060 rule 16: a move to or from the trash changes every
+                // member's access, so it raises every member's generation.
+                access::raise_for_trash(transaction, request.artifact)?;
+            }
             let metadata = if kind == ChangeKind::MetadataUpdated
                 && *values.title == current.title
                 && values.pinned == current.pinned
@@ -515,6 +521,8 @@ impl ArtifactStore for SqliteStore {
             assets::erase_for_purge(transaction, request.artifact)?;
             // Application data is erased with the files (decision 0031).
             data::erase_for_purge(transaction, request.artifact)?;
+            // Only a purge ends the membership records (decision 0060 rule 16).
+            access::erase_for_purge(transaction, request.artifact)?;
             // Jobs pinned to the revisions that were just removed end, and
             // what they found about the files is erased (decision 0030).
             jobs::revoke_for_purge(transaction, request.artifact, now)?;
@@ -893,8 +901,9 @@ fn key_use(
 /// them: a key any of them holds cannot start a request of another kind. A test
 /// compares this list with the tables that have a `request_key` column, so a
 /// later table cannot be left out.
-pub(crate) const KEY_TABLES: [&str; 5] = [
+pub(crate) const KEY_TABLES: [&str; 6] = [
     "request_keys",
+    "access_requests",
     "cleanup_runs",
     "job_requests",
     "data_requests",

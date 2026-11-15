@@ -19,7 +19,7 @@ use crate::storage::{random_bytes, unavailable};
 
 /// The schema version this build creates and reads. It is the database's
 /// `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i64 = 17;
+pub const SCHEMA_VERSION: i64 = 18;
 
 // Asset associations and receipts deliberately retain no bytes outside `blobs`.
 const ASSET_SCHEMA: &str = "
@@ -704,6 +704,35 @@ ALTER TABLE artifacts ADD COLUMN type_release INTEGER
         AND (type_release IS NULL OR type_release >= 1));
 ";
 
+/// Added in schema version 18 (decision 0060, slice S02a): an artifact's
+/// members and its access version. A revoked member keeps its row with no
+/// role, so its access generation never starts over (0060 rule 16); only a
+/// purge deletes the rows. `access_requests` keeps the owner's request keys of
+/// access changes, in the shared key space.
+const ACCESS_SCHEMA: &str = "
+ALTER TABLE artifacts ADD COLUMN access_version INTEGER NOT NULL DEFAULT 0
+    CHECK (access_version >= 0);
+CREATE TABLE artifact_members (
+    artifact_id TEXT NOT NULL REFERENCES artifacts (id),
+    user_id TEXT NOT NULL REFERENCES users (id),
+    role TEXT CHECK (role IS NULL OR role IN ('editor', 'viewer')),
+    access_generation INTEGER NOT NULL CHECK (access_generation >= 1),
+    PRIMARY KEY (artifact_id, user_id)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX artifact_members_by_user ON artifact_members (user_id, artifact_id)
+    WHERE role IS NOT NULL;
+CREATE TABLE access_requests (
+    actor TEXT NOT NULL,
+    request_key TEXT NOT NULL,
+    fingerprint BLOB NOT NULL CHECK (length(fingerprint) = 32),
+    artifact_id TEXT NOT NULL REFERENCES artifacts (id),
+    access_version INTEGER NOT NULL CHECK (access_version >= 0),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (actor, request_key)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX access_requests_by_artifact ON access_requests (artifact_id);
+";
+
 /// Brings the database to [`SCHEMA_VERSION`] in one immediate transaction, or
 /// leaves it as it was. An empty database (version 0, no tables) is created
 /// fresh; an older version is upgraded step by step.
@@ -837,7 +866,11 @@ fn upgrade_steps(connection: &mut Connection) -> Result<(), StoreError> {
             rebuild_jobs(&transaction, schema, step)?;
         }
     }
-    for (step, schema) in [(16, PRESENCE_SCHEMA), (17, TYPE_SCHEMA)] {
+    for (step, schema) in [
+        (16, PRESENCE_SCHEMA),
+        (17, TYPE_SCHEMA),
+        (18, ACCESS_SCHEMA),
+    ] {
         if version < step {
             transaction.execute_batch(schema).map_err(unavailable)?;
         }
