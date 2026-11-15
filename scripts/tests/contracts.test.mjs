@@ -143,6 +143,7 @@ test('A change event carries a data version of at least 1, only for a data chang
     change: 'data_changed',
     revision: 2,
     metadata_revision: 1,
+    type: null,
     committed_at_ms: 1,
   };
   assert.equal(check({ ...change, data_version: 1 }), true);
@@ -164,6 +165,7 @@ test('A change event states its data version exactly when it is a data change', 
     artifact_id: 'art_0',
     revision: 2,
     metadata_revision: 1,
+    type: null,
     committed_at_ms: 1,
   };
   const dataChanged = { ...change, change: 'data_changed' };

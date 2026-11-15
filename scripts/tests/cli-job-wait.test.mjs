@@ -64,6 +64,7 @@ const jobChanged = {
   change: 'job_changed',
   revision: 3,
   metadata_revision: 1,
+  type: null,
   committed_at_ms: 6,
   job_id: JOB_ID,
 };

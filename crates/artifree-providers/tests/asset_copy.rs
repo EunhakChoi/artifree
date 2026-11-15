@@ -111,6 +111,7 @@ impl Fixture {
                 fingerprint: RequestFingerprint(digest(&format!("copy {copy_assets}"))),
             },
             kind: ArtifactKind::App,
+            artifact_type: None,
             title: &parsed::<Title>("Source (Copy)"),
             package: &package(&[("index.html", "<h1>source</h1>"), ("style.css", "h1{}")]),
             source: Some(CopySource {

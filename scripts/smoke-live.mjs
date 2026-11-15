@@ -967,6 +967,7 @@ function change(id, revision, metadataRevision = 1) {
     change: 'revised',
     revision,
     metadata_revision: metadataRevision,
+    type: null,
     committed_at_ms: Date.now(),
   };
 }

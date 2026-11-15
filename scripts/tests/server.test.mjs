@@ -347,6 +347,135 @@ test('Every JSON body the server sends matches the API schema root', async () =>
       '/v1/artifacts/art_00000000000000000000000000000000',
     );
     await request(405, 'DELETE', '/v1/artifacts');
+    // The type catalog and a create from it (decision 0059 rule 11).
+    const types = await request(200, 'GET', '/v1/types');
+    assert.deepEqual(
+      types.types.map(({ name }) => name),
+      ['react-1'],
+    );
+    await request(200, 'GET', '/v1/types/react');
+    await request(200, 'GET', '/v1/types/react/releases/1');
+    await request(
+      200,
+      'GET',
+      '/v1/types/react/releases/1/references/layout-example.md',
+    );
+    await request(404, 'GET', '/v1/types/slides');
+    await request(404, 'GET', '/v1/types/react/releases/2');
+    await request(404, 'GET', '/v1/types/react/releases/1/references/x.md');
+    const typed = await request(201, 'POST', '/v1/artifacts', {
+      title: 'Typed',
+      type: 'react',
+    });
+    assert.deepEqual(typed.artifact.type, { id: 'react', release: 1 });
+    await request(422, 'POST', '/v1/artifacts', {
+      title: 'Lacking',
+      type: 'react',
+      files: [{ path: 'index.html', encoding: 'utf8', content: '<p>1</p>' }],
+    });
+    await request(422, 'POST', '/v1/artifacts', {
+      title: 'Unknown',
+      type: 'slides',
+    });
+    await request(400, 'POST', '/v1/artifacts', { title: 'No files' });
+  } finally {
+    await server.stop();
+  }
+});
+
+test('CLI reads the type catalog, creates from a type, and keeps its required paths', async () => {
+  const data = dataDirectory('type-data');
+  const site = await freshDirectory('type-site');
+  await writeFile(join(site, 'index.html'), '<div id="root"></div>');
+  const server = await startServer(binary, data);
+  const typeCli = (args) => {
+    const env = {
+      ...process.env,
+      ARTIFREE_URL: server.api_url,
+      ARTIFREE_TOKEN: server.token,
+    };
+    delete env.ARTIFREE_TOKEN_FILE;
+    const result = spawnSync(
+      process.execPath,
+      ['apps/cli/dist/main.js', 'type', ...args],
+      { cwd: root, encoding: 'utf8', timeout: 20_000, env },
+    );
+    if (result.error) throw result.error;
+    return result;
+  };
+  try {
+    const listed = json(typeCli(['list']));
+    assert.match(listed.notice, /grants no permission/);
+    const [react] = listed.types;
+    assert.equal(react.id, 'react');
+    assert.equal(react.release, 1);
+    assert.deepEqual(react.required, ['index.html', 'src/main.tsx']);
+    assert.equal(react.build_profile, 'react-v1');
+    assert.equal(typeof react.build_available, 'boolean');
+    assert.equal(react.guide, undefined, 'A listing carries no guide.');
+    const shown = json(typeCli(['show', 'react', '--release', '1']));
+    assert.match(shown.guide, /src\/main\.tsx/);
+    const reference = json(
+      typeCli(['show', 'react', '--reference', 'layout-example.md']),
+    );
+    assert.equal(reference.release, 1);
+    assert.match(reference.content, /createRoot/);
+    const unknown = typeCli(['show', 'slides']);
+    assert.equal(unknown.status, 1);
+    assert.match(unknown.stderr, /^error\[not_found\]/);
+    assert.equal(typeCli(['show', 'react', '--release', '0']).status, 2);
+
+    // No files: revision 1 is the starter.
+    const created = json(
+      cli(server, ['create', '--title', 'React', '--type', 'react']),
+    );
+    assert.deepEqual(created.artifact.type, { id: 'react', release: 1 });
+    assert.deepEqual(
+      created.revision.files.map((file) => file.path),
+      ['index.html', 'src/app.css', 'src/main.tsx'],
+    );
+    const id = created.artifact.id;
+    assert.deepEqual(json(cli(server, ['show', id])).type, {
+      id: 'react',
+      release: 1,
+    });
+    // Files are the whole revision, so these lack src/main.tsx.
+    const lacking = cli(server, [
+      'create',
+      '--title',
+      'Lacking',
+      '--type',
+      'react',
+      '--dir',
+      site,
+    ]);
+    assert.equal(lacking.status, 1);
+    assert.equal(lacking.stdout, '');
+    assert.match(lacking.stderr, /^error\[type_requirements\]/);
+    assert.match(lacking.stderr, /^missing src\/main\.tsx$/m);
+    const unknownType = cli(server, [
+      'create',
+      '--title',
+      'Unknown',
+      '--type',
+      'slides',
+    ]);
+    assert.equal(unknownType.status, 1);
+    assert.match(unknownType.stderr, /^error\[type_unknown\]/);
+    // A save that deletes a required path is refused before it writes.
+    const deleting = cli(server, [
+      'save',
+      id,
+      '--base',
+      '1',
+      '--delete',
+      'src/main.tsx',
+    ]);
+    assert.equal(deleting.status, 1);
+    assert.match(deleting.stderr, /^error\[type_requirements\]/);
+    assert.equal(json(cli(server, ['show', id])).current_revision, 1);
+    // Without --type, files are still required.
+    assert.equal(cli(server, ['create', '--title', 'Plain']).status, 2);
   } finally {
     await server.stop();
   }

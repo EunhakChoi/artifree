@@ -5,23 +5,23 @@
 //! error semantics; only the framing differs.
 
 use artifree_contracts::api::{
-    AgentSessionList, AppData, Artifact, ArtifactKind as WireKind, ArtifactList, Asset, AssetList,
-    BackgroundStatus, BuildStatus as WireBuildStatus, CancelJobResponse, CommitResponse,
-    ConflictingFile, ContentEncoding, CopiedPart, CreateArtifactRequest, CreateRuntimeViewRequest,
-    DataMembers, DataWriteResponse, DeleteAssetRequest, DeleteAssetResponse, DeleteDataRequest,
-    DiagnosticLocation, DuplicateArtifactRequest, DuplicateArtifactResponse, EditFilesRequest,
-    EnqueueJobRequest, EnqueueJobResponse, ErrorBody, ErrorCode, ExecutionStatus, ExportRuntime,
-    FileChange as WireChange, FileEdit as WireEdit, FileUpload, Handoff, HandoffState,
-    HeadBuildStatus, Job as WireJob, JobBuild, JobDiagnostic, JobFailure as WireFailure,
-    JobKind as WireJobKind, JobList, JobMismatch, JobProblem, JobResult, JobState as WireJobState,
-    JobVerdict, JsonValue, ListArtifactsQuery, ListJobsQuery, ListSort, Preview,
-    PurgeArtifactRequest, PurgeArtifactResponse, ReadDataMembersQuery,
+    AgentSessionList, AppData, Artifact, ArtifactKind as WireKind, ArtifactList, ArtifactTypeRef,
+    Asset, AssetList, BackgroundStatus, BuildStatus as WireBuildStatus, CancelJobResponse,
+    CommitResponse, ConflictingFile, ContentEncoding, CopiedPart, CreateArtifactRequest,
+    CreateRuntimeViewRequest, DataMembers, DataWriteResponse, DeleteAssetRequest,
+    DeleteAssetResponse, DeleteDataRequest, DiagnosticLocation, DuplicateArtifactRequest,
+    DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorBody,
+    ErrorCode, ExecutionStatus, ExportRuntime, FileChange as WireChange, FileEdit as WireEdit,
+    FileUpload, Handoff, HandoffState, HeadBuildStatus, Job as WireJob, JobBuild, JobDiagnostic,
+    JobFailure as WireFailure, JobKind as WireJobKind, JobList, JobMismatch, JobProblem, JobResult,
+    JobState as WireJobState, JobVerdict, JsonValue, ListArtifactsQuery, ListJobsQuery, ListSort,
+    Preview, PurgeArtifactRequest, PurgeArtifactResponse, ReadDataMembersQuery,
     RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse, RestoreRevisionRequest,
     Revision, RevisionFile, RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata,
     RuntimeView, SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest, SourceExportFormat,
-    SourceExportManifest, StageHandoffRequest, UnreferencedContent as WireContent,
-    UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest, UploadAssetRequest,
-    UploadAssetResponse,
+    SourceExportManifest, StageHandoffRequest, TYPE_NOTICE, TypeDescriptor, TypeList,
+    TypeReference, TypeSummary, UnreferencedContent as WireContent, UpdateArtifactRequest,
+    UpdateArtifactResponse, UpdateDataRequest, UploadAssetRequest, UploadAssetResponse,
 };
 use artifree_contracts::mcp::{HandoffInbox, HandoffReceipt, RegisteredHandoffSession};
 use artifree_core::artifacts::{
@@ -29,6 +29,7 @@ use artifree_core::artifacts::{
 };
 use artifree_core::assets::AssetUpload;
 use artifree_core::build_reads::HeadBuild;
+use artifree_core::catalog::Release;
 use artifree_core::data::DataMutation;
 use artifree_core::jobs::{JobPageSize, NewBuild};
 use artifree_core::listing::{ListQuery, PageSize, SearchText};
@@ -36,6 +37,7 @@ use artifree_core::members::{MAX_TOKEN_BYTES, MemberLimit, MemberQuery, MemberTo
 use artifree_core::parts::{Boundary, ByteRange, FilePart, RangeError};
 use artifree_core::room::TabKey;
 use artifree_domain::AppDataVersion;
+use artifree_domain::artifact_type::{ArtifactType, TypeId, TypeRelease};
 use artifree_domain::assets::{
     AssetId, AssetMediaType, AssetMetadata, AssetRejection, AssetVersion, MAX_ASSET_BYTES,
     MAX_SPACE_ASSETS, MAX_SPACE_BYTES,
@@ -96,6 +98,7 @@ impl ApiError {
                 current_asset_version: None,
                 conflicting_files: None,
                 conflicting_files_total: None,
+                missing_paths: None,
             }),
             range_size: None,
         }
@@ -175,6 +178,38 @@ impl ApiError {
     }
 }
 
+impl ApiError {
+    /// The contract error of a command the type catalog refused (decision
+    /// 0059 rules 5 to 7).
+    fn type_refusal(error: ArtifactError, message: String) -> Self {
+        match error {
+            ArtifactError::TypeUnknown => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                ErrorCode::TypeUnknown,
+                message,
+            ),
+            ArtifactError::TypeRequirements { missing } => {
+                let mut refused = Self::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    ErrorCode::TypeRequirements,
+                    message,
+                );
+                refused.body.missing_paths =
+                    Some(missing.iter().map(ToString::to_string).collect());
+                refused
+            }
+            ArtifactError::TypeReleaseUnknown => {
+                Self::new(StatusCode::CONFLICT, ErrorCode::TypeReleaseUnknown, message)
+            }
+            _ => Self::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::Internal,
+                message,
+            ),
+        }
+    }
+}
+
 impl From<ArtifactError> for ApiError {
     fn from(error: ArtifactError) -> Self {
         let message = error.to_string();
@@ -216,6 +251,9 @@ impl From<ArtifactError> for ApiError {
                 ErrorCode::ProfileUnknown,
                 message,
             ),
+            error @ (ArtifactError::TypeUnknown
+            | ArtifactError::TypeRequirements { .. }
+            | ArtifactError::TypeReleaseUnknown) => Self::type_refusal(error, message),
             ArtifactError::OutboxBindingChanged => Self::new(
                 StatusCode::CONFLICT,
                 ErrorCode::OutboxBindingChanged,
@@ -383,8 +421,39 @@ pub(crate) async fn create(
         .title
         .parse()
         .map_err(|error| ApiError::unprocessable(format!("title: {error}")))?;
-    too_many("files", request.files.len(), MAX_FILES)?;
-    let mut files = Vec::with_capacity(request.files.len());
+    let artifact_type = request
+        .artifact_type
+        .as_deref()
+        .map(|id| {
+            id.parse::<TypeId>()
+                .map_err(|error| ApiError::unprocessable(format!("type: {error}")))
+        })
+        .transpose()?;
+    // With a type the files may be left out, and revision 1 is the starter
+    // (decision 0059 rule 5); without one they are required, as before.
+    let receipt = if let Some(type_id) = artifact_type {
+        let package = request.files.map(upload_package).transpose()?;
+        state
+            .run(move |artifacts| {
+                artifacts.create_from_type(&actor, &key, &title, &type_id, package.as_ref())
+            })
+            .await?
+    } else {
+        let uploads = request
+            .files
+            .ok_or_else(|| ApiError::invalid("files: required unless type is given"))?;
+        let package = upload_package(uploads)?;
+        state
+            .run(move |artifacts| artifacts.create(&actor, &key, &title, &package))
+            .await?
+    };
+    Ok(announce(state, receipt))
+}
+
+/// The package of a create's uploaded files.
+fn upload_package(uploads: Vec<FileUpload>) -> Result<FilePackage, ApiError> {
+    too_many("files", uploads.len(), MAX_FILES)?;
+    let mut files = Vec::with_capacity(uploads.len());
     for (
         index,
         FileUpload {
@@ -392,7 +461,7 @@ pub(crate) async fn create(
             encoding,
             content,
         },
-    ) in request.files.into_iter().enumerate()
+    ) in uploads.into_iter().enumerate()
     {
         let path = package_path(&format!("files[{index}].path"), &path)?;
         files.push((
@@ -400,12 +469,7 @@ pub(crate) async fn create(
             decode(&format!("files[{index}].content"), encoding, content)?,
         ));
     }
-    let package = FilePackage::new(files)
-        .map_err(|error| ApiError::unprocessable(format!("files: {error}")))?;
-    let receipt = state
-        .run(move |artifacts| artifacts.create(&actor, &key, &title, &package))
-        .await?;
-    Ok(announce(state, receipt))
+    FilePackage::new(files).map_err(|error| ApiError::unprocessable(format!("files: {error}")))
 }
 
 pub(crate) async fn save(
@@ -1706,6 +1770,95 @@ pub(crate) async fn background(state: &AppState) -> BackgroundStatus {
     }
 }
 
+/// The wire form of `release`, as this server's build sees it.
+fn type_summary(state: &AppState, release: &Release) -> TypeSummary {
+    TypeSummary {
+        id: release.id.to_string(),
+        release: u64::from(release.release.get()),
+        name: format!("{}-{}", release.id, release.release),
+        title: release.title.clone(),
+        description: release.description.clone(),
+        kind: wire_kind(release.kind),
+        required: release.required.iter().map(ToString::to_string).collect(),
+        starter: release
+            .starter
+            .files()
+            .map(|(path, _)| path.to_string())
+            .collect(),
+        build_profile: release.build_profile.as_ref().map(ToString::to_string),
+        build_available: release.build_available(&state.settings().build_profiles),
+        references: release
+            .references
+            .iter()
+            .map(|(path, _)| path.to_string())
+            .collect(),
+    }
+}
+
+/// The current release of each catalog type (decision 0059 rule 11).
+pub(crate) fn list_types(state: &AppState) -> TypeList {
+    TypeList {
+        notice: TYPE_NOTICE.to_owned(),
+        types: state
+            .catalog()
+            .current_releases()
+            .map(|release| type_summary(state, release))
+            .collect(),
+    }
+}
+
+/// The release `release` of the type `id` (its current one for `None`). An
+/// id or release that is malformed or unknown is not found, as rule 11 asks.
+fn find_release<'a>(
+    state: &'a AppState,
+    id: &str,
+    release: Option<&str>,
+) -> Result<&'a Release, ApiError> {
+    let missing = || ApiError::not_found("type not found");
+    let id: TypeId = id.parse().map_err(|_| missing())?;
+    let found = match release {
+        None => state.catalog().current(&id),
+        Some(release) => {
+            let release: TypeRelease = release.parse().map_err(|_| missing())?;
+            state.catalog().release(&id, release)
+        }
+    };
+    found.ok_or_else(missing)
+}
+
+/// One release of a type with its guide (decision 0059 rule 11).
+pub(crate) fn show_type(
+    state: &AppState,
+    id: &str,
+    release: Option<&str>,
+) -> Result<TypeDescriptor, ApiError> {
+    let release = find_release(state, id, release)?;
+    Ok(TypeDescriptor {
+        notice: TYPE_NOTICE.to_owned(),
+        release: type_summary(state, release),
+        guide: release.guide.clone(),
+    })
+}
+
+/// One reference file of a release (decision 0059 rule 11).
+pub(crate) fn type_reference(
+    state: &AppState,
+    id: &str,
+    release: &str,
+    path: &str,
+) -> Result<TypeReference, ApiError> {
+    let found = find_release(state, id, Some(release))?;
+    let missing = || ApiError::not_found("reference not found");
+    let path: PackagePath = path.parse().map_err(|_| missing())?;
+    let content = found.reference(&path).ok_or_else(missing)?;
+    Ok(TypeReference {
+        id: found.id.to_string(),
+        release: u64::from(found.release.get()),
+        path: path.to_string(),
+        content: content.to_owned(),
+    })
+}
+
 pub(crate) async fn show_job(
     state: &AppState,
     actor: ActorId,
@@ -2294,17 +2447,30 @@ fn commit_response(receipt: CommitReceipt) -> CommitResponse {
     }
 }
 
+fn wire_kind(kind: ArtifactKind) -> WireKind {
+    match kind {
+        ArtifactKind::App => WireKind::App,
+        ArtifactKind::Document => WireKind::Document,
+        ArtifactKind::Slides => WireKind::Slides,
+        ArtifactKind::Dashboard => WireKind::Dashboard,
+        ArtifactKind::Design => WireKind::Design,
+        ArtifactKind::Motion => WireKind::Motion,
+    }
+}
+
+/// The wire form of an artifact's type (decision 0059 rule 8).
+pub(crate) fn type_ref(pinned: &ArtifactType) -> ArtifactTypeRef {
+    ArtifactTypeRef {
+        id: pinned.id.to_string(),
+        release: u64::from(pinned.release.get()),
+    }
+}
+
 fn artifact_dto(record: &ArtifactRecord) -> Artifact {
     Artifact {
         id: record.id.to_string(),
-        kind: match record.kind {
-            ArtifactKind::App => WireKind::App,
-            ArtifactKind::Document => WireKind::Document,
-            ArtifactKind::Slides => WireKind::Slides,
-            ArtifactKind::Dashboard => WireKind::Dashboard,
-            ArtifactKind::Design => WireKind::Design,
-            ArtifactKind::Motion => WireKind::Motion,
-        },
+        kind: wire_kind(record.kind),
+        artifact_type: record.artifact_type.as_ref().map(type_ref),
         title: record.title.as_str().to_owned(),
         pinned: record.pinned,
         current_revision: record.current_revision.0,
@@ -2367,6 +2533,7 @@ mod tests {
             id: format!("art_{}", "a".repeat(32)).parse()?,
             owner: "owner".parse()?,
             kind: ArtifactKind::App,
+            artifact_type: None,
             title: "Edit".parse()?,
             pinned: false,
             current_revision: SourceRevision(2),
@@ -2464,6 +2631,7 @@ mod tests {
             id: format!("art_{}", "a".repeat(32)).parse()?,
             owner: "owner".parse()?,
             kind: ArtifactKind::App,
+            artifact_type: None,
             title: "Export".parse()?,
             pinned: false,
             current_revision: SourceRevision(2),

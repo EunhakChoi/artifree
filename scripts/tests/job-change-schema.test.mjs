@@ -42,6 +42,7 @@ function artifactChange(kind, fields = {}) {
     change: kind,
     revision: 1,
     metadata_revision: 1,
+    type: null,
     committed_at_ms: 1767225600000,
     ...fields,
   };

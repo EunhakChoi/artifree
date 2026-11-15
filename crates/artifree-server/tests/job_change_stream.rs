@@ -58,12 +58,13 @@ const PROMPT_MS: i64 = 2_000;
 const POLLED_MS: i64 = 17_000;
 /// The fields of a `job_changed` event, as the contract names them (rule 8). The
 /// `data_version` field is not among them, because only a data change carries it.
-const JOB_CHANGE_FIELDS: [&str; 7] = [
+const JOB_CHANGE_FIELDS: [&str; 8] = [
     "artifact_id",
     "cursor",
     "change",
     "revision",
     "metadata_revision",
+    "type",
     "job_id",
     "committed_at_ms",
 ];

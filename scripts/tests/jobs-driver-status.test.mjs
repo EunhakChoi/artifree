@@ -80,6 +80,7 @@ function change(kind, fields = {}) {
     artifact_id: ARTIFACT,
     revision: 2,
     metadata_revision: 1,
+    type: null,
     committed_at_ms: 1,
     change: kind,
     ...fields,

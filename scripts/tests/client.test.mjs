@@ -13,6 +13,7 @@ import {
 const artifact = {
   id: `art_${'0'.repeat(32)}`,
   kind: 'app',
+  type: null,
   title: 'Demo',
   pinned: false,
   current_revision: 1,
@@ -3035,6 +3036,7 @@ const changeData = (sequence, change = 'revised') =>
     change,
     revision: sequence,
     metadata_revision: 1,
+    type: null,
     committed_at_ms: 1,
   });
 const changeEvent = (sequence, change = 'revised') => ({
@@ -3045,6 +3047,7 @@ const changeEvent = (sequence, change = 'revised') => ({
     change,
     revision: sequence,
     metadata_revision: 1,
+    type: null,
     committed_at_ms: 1,
   },
 });
@@ -3096,7 +3099,7 @@ test('The feed parser follows the event stream rules', async () => {
   // A byte order mark and a character split across chunks; comments, unknown
   // fields and events, an event without data, and joined data lines.
   const bytes = new TextEncoder().encode(
-    `event: change\ndata: {"cursor":"${cursor(5)}","artifact_id":"${artifact.id}",\ndata: "change":"created","revision":5,"metadata_revision":1,"committed_at_ms":1}\n\n`,
+    `event: change\ndata: {"cursor":"${cursor(5)}","artifact_id":"${artifact.id}",\ndata: "change":"created","revision":5,"metadata_revision":1,"type":null,"committed_at_ms":1}\n\n`,
   );
   const split = bytes.indexOf(0x22, 20) + 1;
   assert.deepEqual(

@@ -89,7 +89,10 @@ export type ApiBody =
   | UpdateDataRequest
   | DeleteDataRequest
   | DataWriteResponse
-  | DataOutboxBinding;
+  | DataOutboxBinding
+  | TypeList
+  | TypeDescriptor
+  | TypeReference;
 /**
  * Byte encoding of a file's `content` string.
  */
@@ -198,6 +201,9 @@ export type ErrorCode =
   | 'data_too_large'
   | 'job_ended'
   | 'too_many_jobs'
+  | 'type_unknown'
+  | 'type_requirements'
+  | 'type_release_unknown'
   | 'profile_unknown'
   | 'request_key_reused'
   | 'payload_too_large'
@@ -409,13 +415,23 @@ export interface DeleteAssetResponse {
  */
 export interface CreateArtifactRequest {
   /**
-   * Initial files; `index.html` is required.
+   * The whole of revision 1; `index.html` is required. Required without
+   * `type`. With `type` it may be left out, and revision 1 is then the
+   * type's starter; when given, it replaces the starter and must hold the
+   * type's required paths (`type_requirements` otherwise).
    */
-  files: FileUpload[];
+  files?: FileUpload[] | null;
   /**
    * Display title, 1-200 characters.
    */
   title: string;
+  /**
+   * The id of a catalog type to create from (decision 0059 rule 5). The
+   * artifact records the type's current release for good and gets its
+   * kind. Read the type with `GET /v1/types/{id}` first. An unknown id is
+   * `type_unknown`.
+   */
+  type?: string | null;
 }
 /**
  * One file of a new artifact.
@@ -550,10 +566,29 @@ export interface Artifact {
    */
   title: string;
   /**
+   * The type and release the artifact was made from, or `null` for an
+   * untyped artifact. Always present.
+   */
+  type: ArtifactTypeRef | null;
+  /**
    * Time of the latest source revision in Unix milliseconds; metadata
    * updates do not change it.
    */
   updated_at_ms: number;
+}
+/**
+ * The catalog type and release an artifact was made from (decision 0059).
+ * Both are fixed at creation.
+ */
+export interface ArtifactTypeRef {
+  /**
+   * The type's id, such as `react`.
+   */
+  id: string;
+  /**
+   * The release the artifact keeps, a positive number.
+   */
+  release: number;
 }
 /**
  * An immutable source revision.
@@ -1796,6 +1831,11 @@ export interface ErrorBody {
    * Human-readable explanation; not a stable contract.
    */
   message: string;
+  /**
+   * The required paths the revision lacks, in path order; present for
+   * `type_requirements`.
+   */
+  missing_paths?: string[] | null;
 }
 /**
  * A file named by an edit that is not as expected, with what it is now.
@@ -1861,6 +1901,11 @@ export interface ArtifactChange {
    * data version.
    */
   revision: number;
+  /**
+   * The changed artifact's type and release, or `null` for an untyped
+   * artifact. Always present; it never changes (decision 0059 rule 8).
+   */
+  type: ArtifactTypeRef | null;
 }
 /**
  * Data of the `ready` and `reset` events of `GET /v1/changes`. `ready`
@@ -2516,6 +2561,107 @@ export interface DataOutboxBinding {
    * Existing feed identity, renewed by supported restore.
    */
   storage_epoch: string;
+}
+/**
+ * Body of `GET /v1/types`: the current release of each type, in catalog
+ * order.
+ */
+export interface TypeList {
+  /**
+   * What a guide is; see [`TYPE_NOTICE`].
+   */
+  notice: string;
+  /**
+   * Each type's current release.
+   */
+  types: TypeSummary[];
+}
+/**
+ * One release of a catalog type, without its guide (decision 0059 rule 2).
+ */
+export interface TypeSummary {
+  /**
+   * Whether this server can build that profile. When `false`, a build is
+   * refused with `profile_unknown`; the artifact can still be created and
+   * edited.
+   */
+  build_available: boolean;
+  /**
+   * The build profile that builds an artifact of the type, or `null`.
+   * Always present.
+   */
+  build_profile: string | null;
+  /**
+   * What the type is for, at most 280 characters.
+   */
+  description: string;
+  /**
+   * The type's id, such as `react`.
+   */
+  id: string;
+  kind: ArtifactKind;
+  /**
+   * `<id>-<release>`, such as `react-1`, for people only. Programs use
+   * `id` and `release`.
+   */
+  name: string;
+  /**
+   * The paths of the reference files, read one at a time.
+   */
+  references: string[];
+  /**
+   * The release number; the newest is the type's current release.
+   */
+  release: number;
+  /**
+   * The paths every revision of an artifact of this release must hold.
+   */
+  required: string[];
+  /**
+   * The paths of the starter, the files of an artifact created without
+   * files.
+   */
+  starter: string[];
+  /**
+   * A short name.
+   */
+  title: string;
+}
+/**
+ * Body of `GET /v1/types/{id}` and `GET /v1/types/{id}/releases/{release}`:
+ * one release with its guide.
+ */
+export interface TypeDescriptor {
+  /**
+   * How to fill the type, in Markdown, at most 32 KiB.
+   */
+  guide: string;
+  /**
+   * What a guide is; see [`TYPE_NOTICE`].
+   */
+  notice: string;
+  release: TypeSummary;
+}
+/**
+ * Body of `GET /v1/types/{id}/releases/{release}/references/{path}`.
+ */
+export interface TypeReference {
+  /**
+   * Its Markdown text, at most 32 KiB.
+   */
+  content: string;
+  /**
+   * The type's id.
+   */
+  id: string;
+  /**
+   * The reference file's path.
+   */
+  path: string;
+  /**
+   * The release the file belongs to.
+   */
+  release: number;
 }
 
 /**

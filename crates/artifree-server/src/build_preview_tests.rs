@@ -96,11 +96,12 @@ impl World {
             "create-key".parse()?,
             CreateArtifactRequest {
                 title: "Build".into(),
-                files: vec![FileUpload {
+                artifact_type: None,
+                files: Some(vec![FileUpload {
                     path: "index.html".into(),
                     encoding: ContentEncoding::Utf8,
                     content: String::from_utf8(SOURCE.to_vec())?,
-                }],
+                }]),
             },
         )
         .await

@@ -29,11 +29,11 @@ use super::tests::{ExecutionDir, assert_no_attempt_groups};
 use super::{AttemptFailure, AttemptPlan, OutputRefusal, launch_with};
 
 /// The template's entry document.
-const INDEX: &[u8] = include_bytes!("bundler_template/index.html");
+const INDEX: &[u8] = include_bytes!("../../../../../types/react/1/starter/index.html");
 /// The template's entry module, which imports `react`, `react-dom/client` and its CSS.
-const MAIN: &[u8] = include_bytes!("bundler_template/main.tsx");
+const MAIN: &[u8] = include_bytes!("../../../../../types/react/1/starter/src/main.tsx");
 /// The template's style sheet.
-const STYLE: &[u8] = include_bytes!("bundler_template/app.css");
+const STYLE: &[u8] = include_bytes!("../../../../../types/react/1/starter/src/app.css");
 /// An entry module that imports a package the root does not hold.
 const BAD_IMPORT: &[u8] = b"import pad from \"left-pad\";\nconsole.log(pad(\"x\", 3));\n";
 /// How many generated modules the larger input imports, below the package's 256 files.

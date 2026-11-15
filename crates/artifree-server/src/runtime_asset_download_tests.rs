@@ -128,11 +128,12 @@ async fn declared_artifact(state: &AppState, actor: &ActorId) -> Result<String, 
         "asset-download-artifact".parse()?,
         CreateArtifactRequest {
             title: "Asset download".into(),
-            files: vec![FileUpload {
+            artifact_type: None,
+            files: Some(vec![FileUpload {
                 path: "index.html".into(),
                 encoding: ContentEncoding::Utf8,
                 content: INDEX_HTML.into(),
-            }],
+            }]),
         },
     )
     .await

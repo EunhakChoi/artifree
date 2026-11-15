@@ -830,6 +830,7 @@ fn copy_of(fixture: &Fixture, name: &str, copy_data: bool) -> Result<CommitRecei
             fingerprint: RequestFingerprint(digest(&format!("copy {name}"))),
         },
         kind: fixture.created.artifact.kind,
+        artifact_type: None,
         title: &parsed("Copy"),
         package: &package(&[("index.html", SECOND), ("style.css", "h1{}")]),
         source: Some(CopySource {

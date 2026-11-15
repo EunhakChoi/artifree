@@ -1292,8 +1292,9 @@ async fn send_case(
 }
 
 /// Routes that name no artifact. Each has its own caller-scoped or
-/// administrative authorization tests.
-const NOT_ARTIFACT_SCOPED: [&str; 14] = [
+/// administrative authorization tests; the type catalog routes read only the
+/// built-in catalog, which is the same for every caller (decision 0059).
+const NOT_ARTIFACT_SCOPED: [&str; 18] = [
     "/mcp",
     "/v1/artifacts",
     "/v1/background",
@@ -1305,6 +1306,10 @@ const NOT_ARTIFACT_SCOPED: [&str; 14] = [
     "/v1/tokens",
     "/v1/tokens/{}",
     "/v1/tokens/{}/rotate",
+    "/v1/types",
+    "/v1/types/{}",
+    "/v1/types/{}/releases/{}",
+    "/v1/types/{}/releases/{}/references/{}",
     "/v1/users",
     "/v1/users/{}/disable",
     "/v1/users/{}/enable",

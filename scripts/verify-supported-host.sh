@@ -3,10 +3,11 @@
 # follows docs/execution-host.md step by step and ends with a published react-v1 build served by
 # the /b/ route.
 #
-# Usage: scripts/verify-supported-host.sh RELEASE_DIR TEMPLATE_DIR
+# Usage: scripts/verify-supported-host.sh RELEASE_DIR
 #
-# RELEASE_DIR holds the archive and its .sha256 file; TEMPLATE_DIR holds the bundler template
-# (index.html, main.tsx, app.css). The script changes the host as an operator would: it routes
+# RELEASE_DIR holds the archive and its .sha256 file. The built revision is the starter of the
+# react type (decision 0059 rule 4), created through the packaged CLI. The script changes the
+# host as an operator would: it routes
 # core dumps to a plain file, tightens /opt, creates the account artifree, installs Bubblewrap and
 # a tool root, loads an AppArmor profile and starts two systemd units. So it runs only on a
 # disposable GitHub-hosted Ubuntu 24.04 x86_64 runner and refuses anywhere else; never run it on a
@@ -21,7 +22,7 @@ say() {
   printf '== %s\n' "$*"
 }
 
-(($# == 2)) || fail "usage: scripts/verify-supported-host.sh RELEASE_DIR TEMPLATE_DIR"
+(($# == 1)) || fail "usage: scripts/verify-supported-host.sh RELEASE_DIR"
 [[ "${GITHUB_ACTIONS:-}" == true && "${RUNNER_ENVIRONMENT:-}" == github-hosted ]] \
   || fail "this check changes the host; it runs only on a GitHub-hosted runner"
 # shellcheck source=/dev/null # The host's own file.
@@ -29,7 +30,6 @@ say() {
 [[ "$ID" == ubuntu && "$VERSION_ID" == 24.04 && "$(uname -m)" == x86_64 ]] \
   || fail "the supported host is Ubuntu 24.04 on x86_64, not $ID $VERSION_ID on $(uname -m)"
 release=$(cd -- "$1" && pwd)
-template=$(cd -- "$2" && pwd)
 checkout=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 
 shopt -s nullglob
@@ -83,11 +83,11 @@ curl --silent --show-error --fail --output /dev/null http://127.0.0.1:7410/healt
 sudo test -f /var/lib/artifree/data/access-token || fail "the server made no access token"
 sudo systemctl enable --now artifree-execution.service
 
-say "7. readiness, then a react-v1 build of the template"
+say "7. readiness, then a react-v1 build of the react starter"
 token_file=${RUNNER_TEMP:?}/artifree-access-token
 sudo install -o "$(id -u)" -g "$(id -g)" -m 0600 /var/lib/artifree/data/access-token "$token_file"
 node "$checkout/scripts/verify-supported-host.mjs" \
-  --package "$package" --token-file "$token_file" --template "$template"
+  --package "$package" --token-file "$token_file"
 restarts=$(systemctl show --property=NRestarts --value artifree-execution.service)
 [[ "$restarts" == 0 ]] || fail "the execution worker was restarted $restarts times"
 say "the supported host published a build"

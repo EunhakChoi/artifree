@@ -108,6 +108,7 @@ function changed(version, sequence = version) {
     change: 'data_changed',
     revision: 1,
     metadata_revision: 1,
+    type: null,
     committed_at_ms: 1,
     data_version: version,
   };

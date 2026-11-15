@@ -23,6 +23,7 @@ const sha = (text) => createHash('sha256').update(text).digest('hex');
 const artifact = {
   id: `art_${'0'.repeat(32)}`,
   kind: 'app',
+  type: null,
   title: 'Demo',
   pinned: false,
   current_revision: 3,

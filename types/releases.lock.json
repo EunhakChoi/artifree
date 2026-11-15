@@ -1,0 +1,12 @@
+{
+  "releases": {
+    "react/1": {
+      "guide.md": "1452e3aa423c70b4e951bb1623fe23dec5af2c06d0f2766f6328e926c2ec6aac",
+      "references/layout-example.md": "e912845488168ee21949fe6c736d5fe968618d5211579a9987edb9c8da45ac6e",
+      "starter/index.html": "698c3c11263c043c8eafe92cc72ec7fe587841ffb46512b8390c92a631efdd11",
+      "starter/src/app.css": "b7cd5a8f45cd5df5a0ba08593f68b0a7656a3949aaee9ea433288f566507b3cc",
+      "starter/src/main.tsx": "8f9d3f354f40a43467c4b675dbbee92010d28c453007c169e9c71419dace88d5",
+      "type.txt": "90dc7b5a804d8e8379efd4c41b2e4c66a63b4a94166dcf2395bb33a5a4c92203"
+    }
+  }
+}

@@ -19,7 +19,7 @@ use crate::storage::{random_bytes, unavailable};
 
 /// The schema version this build creates and reads. It is the database's
 /// `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i64 = 16;
+pub const SCHEMA_VERSION: i64 = 17;
 
 // Asset associations and receipts deliberately retain no bytes outside `blobs`.
 const ASSET_SCHEMA: &str = "
@@ -692,6 +692,18 @@ CREATE TABLE execution_workers (
 ) STRICT, WITHOUT ROWID;
 ";
 
+/// Added in schema version 17 (decision 0059 rule 15, slice T01aa): the type
+/// and release an artifact was made from. Both are null for an untyped
+/// artifact, which every artifact before this version is, or both are set;
+/// the store checks the pair again as it reads it.
+const TYPE_SCHEMA: &str = "
+ALTER TABLE artifacts ADD COLUMN type_id TEXT
+    CHECK (type_id IS NULL OR length(type_id) BETWEEN 1 AND 32);
+ALTER TABLE artifacts ADD COLUMN type_release INTEGER
+    CHECK ((type_release IS NULL) = (type_id IS NULL)
+        AND (type_release IS NULL OR type_release >= 1));
+";
+
 /// Brings the database to [`SCHEMA_VERSION`] in one immediate transaction, or
 /// leaves it as it was. An empty database (version 0, no tables) is created
 /// fresh; an older version is upgraded step by step.
@@ -825,10 +837,10 @@ fn upgrade_steps(connection: &mut Connection) -> Result<(), StoreError> {
             rebuild_jobs(&transaction, schema, step)?;
         }
     }
-    if version < 16 {
-        transaction
-            .execute_batch(PRESENCE_SCHEMA)
-            .map_err(unavailable)?;
+    for (step, schema) in [(16, PRESENCE_SCHEMA), (17, TYPE_SCHEMA)] {
+        if version < step {
+            transaction.execute_batch(schema).map_err(unavailable)?;
+        }
     }
     // Foreign keys are off for these steps (decision 0057 rule 14), so they are
     // checked here: no table may have more foreign keys that do not resolve

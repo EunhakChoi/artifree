@@ -226,6 +226,7 @@ mod tests {
             id: ArtifactId::from_random([7; 16]),
             owner: parsed::<ActorId>("local"),
             kind: ArtifactKind::App,
+            artifact_type: None,
             title: parsed::<Title>("Plan"),
             pinned: false,
             current_revision: SourceRevision(3),

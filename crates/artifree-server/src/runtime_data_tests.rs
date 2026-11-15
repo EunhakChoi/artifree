@@ -131,11 +131,12 @@ async fn granted_view(state: &AppState, actor: &ActorId) -> Result<Fixture, Box<
         "data-race-artifact".parse()?,
         CreateArtifactRequest {
             title: "Data race".into(),
-            files: vec![FileUpload {
+            artifact_type: None,
+            files: Some(vec![FileUpload {
                 path: "index.html".into(),
                 encoding: ContentEncoding::Utf8,
                 content: "<!doctype html><html><head><!-- artifree-runtime --></head><body>test</body></html>".into(),
-            }],
+            }]),
         },
     )
     .await

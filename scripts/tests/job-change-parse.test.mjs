@@ -21,6 +21,7 @@ function changeData(kind, fields) {
     change: kind,
     revision: 3,
     metadata_revision: 1,
+    type: null,
     committed_at_ms: 1,
     ...fields,
   });
@@ -41,6 +42,7 @@ function expectedEvent(change, extra = {}) {
       change,
       revision: 3,
       metadata_revision: 1,
+      type: null,
       committed_at_ms: 1,
       ...extra,
     },

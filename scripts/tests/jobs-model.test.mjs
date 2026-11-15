@@ -92,6 +92,7 @@ const apiError = (status, code, message) =>
 const feedChange = (kind, fields = {}) => ({
   artifact_id: ARTIFACT,
   change: kind,
+  type: null,
   committed_at_ms: 1000,
   cursor: 'cursor-1',
   metadata_revision: 1,

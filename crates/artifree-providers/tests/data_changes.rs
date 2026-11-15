@@ -442,6 +442,7 @@ fn new_copy(fixture: &Fixture, name: &str, copy_data: bool) -> Result<CommitRece
             fingerprint: RequestFingerprint(digest(name)),
         },
         kind: fixture.created.artifact.kind,
+        artifact_type: None,
         title: &parsed("Copy"),
         package: &package(&[("index.html", "<h1>2</h1>")]),
         source: Some(CopySource {

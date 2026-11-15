@@ -87,11 +87,11 @@ impl ArtifactStore for Misreporting {
     fn update_metadata(&self, request: MetadataUpdate<'_>) -> Result<MetadataReceipt, StoreError> {
         self.inner.update_metadata(request)
     }
-    fn replay_create(
+    fn replay_receipt(
         &self,
         request: RequestIdentity<'_>,
     ) -> Result<Option<CommitReceipt>, StoreError> {
-        self.inner.replay_create(request)
+        self.inner.replay_receipt(request)
     }
     fn purge_artifact(&self, request: PurgeRequest<'_>) -> Result<PurgeReceipt, StoreError> {
         self.inner.purge_artifact(request)

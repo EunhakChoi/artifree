@@ -52,6 +52,7 @@ test('CLI list without paging options prints every page', async () => {
   const artifact = (title, index) => ({
     id: `art_${String(index).repeat(32)}`,
     kind: 'app',
+    type: null,
     title,
     pinned: false,
     current_revision: 1,
@@ -321,6 +322,7 @@ test('CLI build previews and the build status send the right requests and refuse
         JSON.stringify({
           id: artifactId,
           kind: 'app',
+          type: null,
           title: 'Page',
           pinned: false,
           current_revision: 3,

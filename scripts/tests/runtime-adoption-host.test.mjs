@@ -291,6 +291,7 @@ function dataChanged(dataVersion, revision) {
       artifact_id: ARTIFACT,
       change: 'data_changed',
       cursor: CURSOR,
+      type: null,
       committed_at_ms: 1,
       revision,
       metadata_revision: 1,

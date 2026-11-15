@@ -1543,6 +1543,7 @@ fn the_findings_of_a_purged_artifact_are_erased_from_the_database_file() -> Test
             fingerprint: RequestFingerprint(digest("marked")),
         },
         kind: ArtifactKind::App,
+        artifact_type: None,
         title: &parsed("Marked"),
         package: &package(&[("index.html", "<p>x</p>"), (marker, "<p>y</p>")]),
         source: None,

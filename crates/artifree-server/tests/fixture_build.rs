@@ -106,6 +106,7 @@ impl Data {
                 fingerprint: RequestFingerprint([1; 32]),
             },
             kind: ArtifactKind::App,
+            artifact_type: None,
             title: &"Title".parse()?,
             package: &package,
             source: None,

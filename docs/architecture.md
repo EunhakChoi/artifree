@@ -221,7 +221,7 @@ admission policy. Reads are authenticated scoped attachments with
 no-store/nosniff; there is no public URL, and a frame reaches assets only through
 the runtime view routes above. The client calls, the MCP tools, the CLI
 commands, the web panel and the duplicate asset copy exist. The [content policy](asset-validation.md) records these limits.
-SQLite schema 16 keeps immutable bytes, independent versions, receipts and
+SQLite schema 17 keeps immutable bytes, independent versions, receipts and
 logical quotas in the same database as source files. Source and asset
 associations both protect shared blobs from purge and cleanup.
 
@@ -293,6 +293,7 @@ every slice. This table only points from an area to its records.
 | Application data              | R06, R06b, R07                | 0031, 0040, 0046                         | `domain/data.rs`, `core/data.rs`, `providers/storage/data.rs`                                                                                              |
 | Browser data outbox (partial) | R08a–R08c                     | 0041, 0043, 0044, 0047, 0049             | `client/outbox/` (its own entry point; the public sender is off)                                                                                           |
 | Uploaded assets               | R09                           | 0045                                     | `core/assets.rs`, `core/asset_validation/`, `providers/storage/assets.rs`                                                                                  |
+| Type catalog (T01aa)          | T01a                          | 0059                                     | `core/catalog.rs`, `types/`, `scripts/check-type-releases.mjs`                                                                                             |
 | Runtime bridge                | R04, R05, R11, R09d, R13, R14 | 0019, 0020, 0032, 0033, 0045, 0052, 0053 | `server/runtime_*.rs`, `server/http/runtime.rs`, `client/runtime-*.ts`, `web/artifacts/frame-rpc.ts`, `web/artifacts/frame-calls/`, `packages/runtime-sdk` |
 | Rooms                         | R12                           | 0034                                     | `core/room.rs`, `server/rooms.rs`, `client/room.ts`                                                                                                        |
 | Users                         | S01                           | 0036                                     | `ports/user_store.rs`, `providers/users.rs`, `server/users.rs`                                                                                             |

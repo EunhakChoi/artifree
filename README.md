@@ -147,6 +147,15 @@ build instead; the x86_64 Linux release build queues it for an execution
 worker, a release build for any other target refuses it with `profile_unknown`
 ([decision 0058](docs/decisions/0058-react-builds-and-preview.md)),
 and `--profile` still names the connection profile.
+Artifacts can be created from a built-in type
+([decision 0059](docs/decisions/0059-type-catalog.md)). The one type is
+`react`, release 1: `artifree type list` and `artifree type show react` (or
+`GET /v1/types` and `GET /v1/types/react`) give its required files
+(`index.html`, `src/main.tsx`), its guide and whether this server can build
+it, and `artifree artifact create --title <title> --type react` creates one
+from its starter, the template that the `react-v1` build tests build. Every
+later commit must keep the required files. MCP and the web workspace do not
+create from a type yet (T01ab, T01b).
 `artifree artifact build-status <id> --build react-v1` prints the latest build
 and whether the current revision's build is built, pending, failed (with its
 diagnostics) or none, and `artifree artifact preview <id> --build react-v1`

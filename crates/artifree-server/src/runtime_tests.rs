@@ -140,11 +140,12 @@ async fn create_runtime_artifact(
         "runtime-race-key".parse()?,
         CreateArtifactRequest {
             title: "Runtime race".into(),
-            files: vec![FileUpload {
+            artifact_type: None,
+            files: Some(vec![FileUpload {
                 path: "index.html".into(),
                 encoding: ContentEncoding::Utf8,
                 content: "<!doctype html><html><head><!-- artifree-runtime --></head><body>test</body></html>".into(),
-            }],
+            }]),
         },
     ).await.map_err(|error| error.body.message)?;
     Ok(created.artifact.id)
@@ -1081,11 +1082,12 @@ async fn queued_second_handoff(
         "next-handoff".parse()?,
         CreateArtifactRequest {
             title: "Another source".into(),
-            files: vec![FileUpload {
+            artifact_type: None,
+            files: Some(vec![FileUpload {
                 path: "index.html".into(),
                 encoding: ContentEncoding::Utf8,
                 content: "<p>next</p>".into(),
-            }],
+            }]),
         },
     )
     .await

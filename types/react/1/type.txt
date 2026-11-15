@@ -1,0 +1,11 @@
+# The descriptor of release 1 of the react type (decision 0059 rule 2).
+# One "key: value" per line; "required" repeats. This release never changes:
+# a change is a new release in a new directory (rule 3).
+id: react
+release: 1
+title: React app
+description: A single-page React app written in TypeScript. Its source is bundled on request with the react-v1 build profile, and the build preview serves the bundle.
+kind: app
+build_profile: react-v1
+required: index.html
+required: src/main.tsx

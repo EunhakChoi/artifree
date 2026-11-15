@@ -8,6 +8,7 @@ import { runContent } from './content.js';
 import { runData } from './data.js';
 import { runJob } from './jobs.js';
 import { runToken } from './tokens.js';
+import { runType } from './types.js';
 import { runUser } from './users.js';
 
 const help = `Artifree — open artifacts, any agent.
@@ -19,6 +20,7 @@ Usage:
   artifree data <command>      Read and write the application data of an artifact (get, set, update, delete)
   artifree job <command>       Queue, read, list, and cancel verification jobs (enqueue, show, list, cancel)
   artifree token <command>     Manage agent access tokens (list, create, rotate, revoke)
+  artifree type <command>      Read the built-in artifact types and their guides (list, show)
   artifree user <command>      Register and manage users (list, create, disable, enable)
   artifree describe [--json]  Inspect the build-time module inventory
   artifree --version         Print the version
@@ -31,6 +33,7 @@ Data commands talk to a running artifree-server; see artifree data --help.
 Job commands talk to a running artifree-server; see artifree job --help. The server runs
 jobs with its own worker unless it was started with --no-worker or as a one-shot session.
 Token commands talk to a running artifree-server; see artifree token --help.
+Type commands talk to a running artifree-server; see artifree type --help.
 User commands talk to a running artifree-server; see artifree user --help.
 describe prints an inventory bundled at build time; it does not probe a server.
 `;
@@ -122,6 +125,27 @@ function currentAssetVersionOf(error: ArtifreeApiError): number | undefined {
   return version;
 }
 
+// Read from the unchecked body like the asset version, and printed only when
+// every entry is a string.
+function missingPathsOf(error: ArtifreeApiError): string[] {
+  if (error.code !== 'type_requirements') return [];
+  const body = error.body;
+  if (typeof body !== 'object' || body === null || !('error' in body))
+    return [];
+  const detail = body.error;
+  if (
+    typeof detail !== 'object' ||
+    detail === null ||
+    !('missing_paths' in detail) ||
+    !Array.isArray(detail.missing_paths)
+  )
+    return [];
+  const paths: unknown[] = detail.missing_paths;
+  return paths.every((path) => typeof path === 'string')
+    ? paths.filter((path) => typeof path === 'string')
+    : [];
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args[0] === 'artifact') await runArtifact(args.slice(1));
@@ -130,6 +154,7 @@ async function main(): Promise<void> {
   else if (args[0] === 'data') await runData(args.slice(1));
   else if (args[0] === 'job') await runJob(args.slice(1));
   else if (args[0] === 'token') await runToken(args.slice(1));
+  else if (args[0] === 'type') await runType(args.slice(1));
   else if (args[0] === 'user') await runUser(args.slice(1));
   else describe(args);
 }
@@ -150,6 +175,7 @@ try {
     const currentAssetVersion = currentAssetVersionOf(error);
     if (currentAssetVersion !== undefined)
       console.error(`current_asset_version=${currentAssetVersion}`);
+    for (const path of missingPathsOf(error)) console.error(`missing ${path}`);
     if (error instanceof FileConflictError) {
       for (const file of error.files)
         console.error(

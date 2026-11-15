@@ -34,8 +34,9 @@ use artifree_contracts::api::{
     RuntimeSourceListRequest, RuntimeSourcePart, RuntimeSourceReadRequest,
     RuntimeSourceWriteReceipt, RuntimeSourceWriteRequest, RuntimeView, SaveRevisionRequest,
     SetDataRequest, SetRuntimeGrantRequest, SourceExportManifest, StageHandoffRequest, TokenInfo,
-    TokenList, UnreferencedContent, UpdateArtifactRequest, UpdateArtifactResponse,
-    UpdateDataRequest, UploadAssetRequest, UploadAssetResponse, UserInfo, UserList,
+    TokenList, TypeDescriptor, TypeList, TypeReference, UnreferencedContent, UpdateArtifactRequest,
+    UpdateArtifactResponse, UpdateDataRequest, UploadAssetRequest, UploadAssetResponse, UserInfo,
+    UserList,
 };
 use artifree_contracts::{ServiceDescription, mcp};
 use schemars::generate::SchemaSettings;
@@ -133,6 +134,9 @@ fn api_bodies(generator: &mut SchemaGenerator) -> Vec<Schema> {
         generator.subschema_for::<DeleteDataRequest>(),
         generator.subschema_for::<DataWriteResponse>(),
         generator.subschema_for::<DataOutboxBinding>(),
+        generator.subschema_for::<TypeList>(),
+        generator.subschema_for::<TypeDescriptor>(),
+        generator.subschema_for::<TypeReference>(),
     ];
     // Registers these definitions for generated clients.
     generator.subschema_for::<ListArtifactsQuery>();

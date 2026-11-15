@@ -7,6 +7,7 @@ pub mod asset_validation;
 pub mod assets;
 pub mod build;
 pub mod build_reads;
+pub mod catalog;
 pub mod data;
 pub mod documents;
 pub mod jobs;

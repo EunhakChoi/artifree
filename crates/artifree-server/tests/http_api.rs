@@ -230,6 +230,13 @@ async fn every_api_route_requires_the_bearer_token() -> TestResult {
         ("GET", "/v1/content/unreferenced".to_owned()),
         ("DELETE", "/v1/content/unreferenced".to_owned()),
         ("DELETE", "/v1/artifacts".to_owned()),
+        ("GET", "/v1/types".to_owned()),
+        ("GET", "/v1/types/react".to_owned()),
+        ("GET", "/v1/types/react/releases/1".to_owned()),
+        (
+            "GET",
+            "/v1/types/react/releases/1/references/layout-example.md".to_owned(),
+        ),
         ("GET", "/v1/no-such-route".to_owned()),
     ] {
         for token in [

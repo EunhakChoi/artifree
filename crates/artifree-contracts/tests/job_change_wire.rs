@@ -14,7 +14,7 @@ const JOB_ID: &str = "job_0123456789abcdef0123456789abcdef";
 fn change_with(kind: &str, members: &[(&str, Value)]) -> Value {
     let mut body = serde_json::json!({
         "cursor": "c.1", "artifact_id": "art_0", "change": kind,
-        "revision": 1, "metadata_revision": 1, "committed_at_ms": 1
+        "revision": 1, "metadata_revision": 1, "type": null, "committed_at_ms": 1
     });
     for (name, value) in members {
         body[*name] = value.clone();
