@@ -711,10 +711,11 @@ Roadmap: R03.
 > in the Jobs tab, and R03eb, the build preview. Each changes the web only,
 > on the calls R03da and R03db put on the wire, and each passes the
 > component tests and the Chromium and Firefox smoke that rule 22 asks of
-> R03e. R03ea comes first, since the build preview names a build that only
-> the tab asks for. This note fixes what rule 14, rule 16 and the table
-> leave open for the web; it changes no numbered rule, and in rule 22 and
-> the earlier notes R03e now means both slices.
+> R03e. R03ea comes first, since R03eb's notice uses the head status that
+> R03ea puts in the web; a build itself can also be asked for through the
+> CLI and MCP. This note fixes what rule 14, rule 16 and the table leave
+> open for the web; it changes no numbered rule, and in rule 22 and the
+> earlier notes R03e now means both slices.
 >
 > - **R03ea, the build in the Jobs tab.**
 >   - The tab gains "Build revision N" beside "Verify revision N", for the
@@ -722,13 +723,23 @@ Roadmap: R03.
 >     with the press rules of 0055 rule 14: a new request key for each
 >     press, the same key for a retry of a lost answer, and its outcome
 >     shown in place.
->   - Above the list, the tab shows the head status of rule 16 from
->     `GET /v1/artifacts/{id}/builds/react-v1`: built, pending, failed with
->     the failure in words and the diagnostics, or none; and the latest
->     build's revision when it is not the head. The status is read when
->     the tab opens and with the list, as 0055 rule 15 reads it again.
+>   - Above the list, a banner shows the head status of rule 16 from
+>     `GET /v1/artifacts/{id}/builds/react-v1`. It names the head revision
+>     ("Revision H, the newest") and says built, pending, failed with the
+>     failure in words and the job that failed, or none, and it names the
+>     latest build's revision when that is not the head.
+>   - The status is read when the tab opens, again on every `job_changed`
+>     and every `revised` change of the artifact, and with the list reads of
+>     0055 rule 15. A `profile_unknown` answer is not read again until the
+>     change feed resets.
+>   - When a build of the shown revision stays queued past 5 seconds, the
+>     tab reads `/v1/background`; when `execution.ready` is false it says
+>     that no execution worker is ready, so the build waits and ends as
+>     `execution_unavailable` after ten minutes.
 >   - A build row of the list shows its file and byte counts once it
->     succeeded, and its diagnostics once it failed with some.
+>     succeeded, and its diagnostics once it failed with some. Diagnostics
+>     are shown there only; the banner shows the failure in words and names
+>     the job.
 >   - Diagnostics are shown as plain text, each with its path, line and
 >     column when it has a location; they come from the bundler and can
 >     quote the artifact's source, so they are never rendered as markup or
@@ -740,16 +751,21 @@ Roadmap: R03.
 >   - Proven by component tests of the status, the build rows and the
 >     diagnostics. The smoke runs against a release build, where the status
 >     and the press answer `profile_unknown`; since no smoke host runs a
->     profile, it gives the tab the pending and failed answers by
->     intercepting the status and the enqueue in the browser.
+>     profile, it gives the tab pending and failed builds, with their rows
+>     and diagnostics, by intercepting the status, the enqueue, the job
+>     list and the job reads in the browser.
 > - **R03eb, the build preview.**
 >   - The page's preview gains a choice between the revision's files and
->     its build. The build choice previews the shown revision's build when
->     it has one; otherwise it previews the latest build with a notice
->     that names that build's revision and the shown revision's status
->     (pending, failed or none), so a failed or newer save never hides the
->     last good build (rule 15). With no build at all, it says so and
->     issues no ticket.
+>     its build.
+>   - When the shown revision is the head, the choice follows the head
+>     status: a built head is previewed; otherwise the latest build, older
+>     than the head, is previewed with a notice that names that build's
+>     revision and the head's status (pending, failed or none), so a failed
+>     or newer save never hides the last good build (rule 15). With no
+>     build at all, it says so and issues no ticket.
+>   - When the shown revision is not the head, the choice asks for a ticket
+>     for that revision's build. On `not_found` it says that this revision
+>     has no build; it never falls back to a newer build.
 >   - The web's request gate learns the build preview route as a read, as
 >     it knows the source preview route.
 >   - `profile_unknown` is shown in place of the build choice's preview.
