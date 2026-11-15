@@ -399,11 +399,7 @@ impl ArtifactStore for SqliteStore {
     fn update_metadata(&self, request: MetadataUpdate<'_>) -> Result<MetadataReceipt, StoreError> {
         self.write(|transaction| {
             // A move to or from the trash is the owner's (decision 0060 rule 3).
-            let need = if request.deleted.is_some() {
-                Need::Own
-            } else {
-                Need::Change
-            };
+            let need = Need::of_metadata(request.deleted.is_some());
             access::admit(transaction, request.artifact, request.request.actor, need)?;
             // A recovery is the one update that reaches the trash.
             let target = artifact_record(transaction, request.artifact)?

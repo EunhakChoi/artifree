@@ -345,15 +345,18 @@ table. `ArtifactService` resolves the caller as owner, member with the role
 the store holds (none in the trash), or nobody: nobody gets `not_found`, a
 member whose role does not allow the operation gets the new
 `ArtifactError::Forbidden`, which HTTP and MCP answer as `403` `forbidden`
-with one body, before the request body is looked at (rule 4). Reads and
+with one body; the service checks the role before it looks at the
+operation's content (rule 4). Reads and
 duplication need a read, commits, restores, title and pin changes and job
 enqueueing need a change, and a move to or from the trash and a purge need
 the owner. Inside the transaction that commits a revision, a file edit, a
-metadata change, a purge, a copy, a data write or a job, the store reads the
+metadata change, a purge, a copy, a data write, a job or a job's cancel, the
+store reads the
 caller's role again before the request key (rules 5 and 17): a write that
 passed the core's check before a downgrade or a revocation commits nothing,
 and a replay of an editor-era key by a viewer is `forbidden`, by a revoked
-member `not_found`. Data and asset spaces stay keyed by (artifact, user), so
+member `not_found`. A member lists and cancels its own jobs only while it is
+a member. Data and asset spaces stay keyed by (artifact, user), so
 a member reaches its own space while it is a member (rule 9); a copy is the
 caller's and copies the caller's own space (rule 2). A running job of a
 revoked member is no longer a change of authority (rule 15's running job):
@@ -367,6 +370,14 @@ member of, with its role (S02e); runtime capabilities offered by role, so a
 viewer's frame is shown `source.write` as not available (S02d, with the
 downgrade's grant removal) — until then a viewer's runtime source write is
 refused by the role check like any other write; and the owner's cancel of a
-member's job (rule 11), with the job reads of the owner (S02d). Rule 11's
+member's job (rule 11), with the job reads of the owner (S02d); cancelling a
+revoked or downgraded member's queued jobs, which until then a worker can
+still claim, and a store-side access read for the replays the service
+answers itself (a write whose type release this server does not know, and a
+copy whose source is gone), both with the revocation (S02d); and the order
+of the HTTP and MCP adapters, which parse and validate a request body before
+the service checks the role, so a viewer's malformed write is answered
+`invalid_request` rather than `403` until the routes are opened to members
+(S02e). Rule 11's
 build sharing needs nothing new: a build is already keyed by artifact,
 revision and profile, and a member reads it through the read check.

@@ -81,6 +81,15 @@ pub enum Need {
     Own,
 }
 
+impl Need {
+    /// What a metadata change needs: the owner, when it names the trash state
+    /// (a move to or from the trash), and a change otherwise.
+    #[must_use]
+    pub fn of_metadata(names_trash: bool) -> Self {
+        if names_trash { Self::Own } else { Self::Change }
+    }
+}
+
 impl Access {
     /// Whether this stand allows what an operation `need`s.
     #[must_use]

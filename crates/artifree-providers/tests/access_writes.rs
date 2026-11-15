@@ -9,7 +9,7 @@ use artifree_domain::AppDataVersion;
 use artifree_domain::access::{AccessVersion, Role};
 use artifree_domain::data::{DataChange, DataPath, DataValue};
 use artifree_domain::identity::{ActorId, RequestKey, UnixMillis, UserLabel};
-use artifree_domain::job::JobKind;
+use artifree_domain::job::{JobId, JobKind};
 use artifree_domain::package::{FileChange, PackagePath};
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::access_store::{AccessChange, AccessRequest, AccessStore};
@@ -20,7 +20,7 @@ use artifree_ports::artifact_store::{
 };
 use artifree_ports::asset_store::{AssetStore, AssetStoreError};
 use artifree_ports::data_store::{DataStore, DataStoreError, DataWrite};
-use artifree_ports::job_store::{JobStore, JobStoreError, NewJob};
+use artifree_ports::job_store::{JobCancel, JobListing, JobStore, JobStoreError, NewJob};
 use artifree_ports::user_store::{NewUser, UserStore};
 use artifree_providers::storage::SqliteStore;
 use artifree_providers::tokens::SqliteTokenStore;
@@ -185,16 +185,41 @@ impl Fixture {
         })
     }
 
-    fn enqueue(&self, by: &ActorId, name: &str) -> Result<(), JobStoreError> {
+    fn enqueue(&self, by: &ActorId, name: &str) -> Result<JobId, JobStoreError> {
         let request_key = key(name);
-        self.store.enqueue_job(NewJob {
-            request: Self::identity(by, &request_key, "job"),
-            artifact: &self.created.artifact.id,
-            revision: SourceRevision(1),
-            kind: JobKind::VerifyRevision,
-            now: UnixMillis(1),
+        Ok(self
+            .store
+            .enqueue_job(NewJob {
+                request: Self::identity(by, &request_key, "job"),
+                artifact: &self.created.artifact.id,
+                revision: SourceRevision(1),
+                kind: JobKind::VerifyRevision,
+                now: UnixMillis(1),
+            })?
+            .job
+            .id)
+    }
+
+    fn cancel(&self, by: &ActorId, name: &str, job: &JobId) -> Result<(), JobStoreError> {
+        let request_key = key(name);
+        self.store.cancel_job(JobCancel {
+            request: Self::identity(by, &request_key, "cancel"),
+            job,
+            now: UnixMillis(2),
         })?;
         Ok(())
+    }
+
+    fn listed(&self, by: &ActorId) -> Result<usize, JobStoreError> {
+        Ok(self
+            .store
+            .list_jobs(JobListing {
+                actor: by,
+                artifact: None,
+                after: None,
+                limit: 10,
+            })?
+            .len())
     }
 
     fn write_data(&self, by: &ActorId, name: &str) -> Result<(), DataStoreError> {
@@ -350,5 +375,28 @@ fn a_member_reaches_its_own_asset_space_while_a_member() -> TestResult {
         f.store.assets(&f.viewer, id),
         Err(AssetStoreError::NotFound)
     ));
+    Ok(())
+}
+
+#[test]
+fn a_revoked_member_neither_lists_nor_cancels_its_job() -> TestResult {
+    let f = Fixture::new()?;
+    let kept = f.enqueue(&f.editor, "editor-kept")?;
+    let left = f.enqueue(&f.editor, "editor-left")?;
+    assert_eq!(f.listed(&f.editor)?, 2);
+    f.cancel(&f.editor, "editor-cancel", &kept)?;
+    f.set_role("revoke-editor", &f.editor, None, f.access)?;
+    // The jobs stay the editor's, unreachable while it is not a member
+    // (decision 0060 rules 4, 9 and 11).
+    assert_eq!(f.listed(&f.editor)?, 0);
+    assert_eq!(
+        f.cancel(&f.editor, "editor-late-cancel", &left),
+        Err(JobStoreError::NotFound)
+    );
+    assert_eq!(
+        f.cancel(&f.editor, "editor-cancel", &kept),
+        Err(JobStoreError::NotFound),
+        "a replay of the cancel is refused too (rule 17)"
+    );
     Ok(())
 }

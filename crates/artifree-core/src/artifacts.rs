@@ -850,12 +850,7 @@ impl<S: ArtifactStore + AccessStore> ArtifactService<S> {
     ) -> Result<MetadataReceipt, ArtifactError> {
         // The store decides the trash: only a recovery reaches it. A move to
         // or from the trash is the owner's (decision 0060 rule 3).
-        let need = if change.deleted.is_some() {
-            Need::Own
-        } else {
-            Need::Change
-        };
-        self.owned(actor, id, need)?;
+        self.owned(actor, id, Need::of_metadata(change.deleted.is_some()))?;
         let mut hasher = Fingerprint::new("update");
         hasher.field(id.as_str().as_bytes());
         hasher.field(&base.0.to_be_bytes());
@@ -1285,9 +1280,9 @@ impl<S: ArtifactStore + AccessStore> ArtifactService<S> {
         record: &ArtifactRecord,
         need: Need,
     ) -> Result<(), ArtifactError> {
-        // The store holds no role for anyone while the artifact is in the
-        // trash, so a member does not reach it there.
-        let role = if record.owner == *actor {
+        // No member reaches the artifact in the trash (the store holds no
+        // role for anyone there), so its role is not looked up.
+        let role = if record.owner == *actor || record.deleted_at.is_some() {
             None
         } else {
             self.store.member_role(&record.id, actor)?
