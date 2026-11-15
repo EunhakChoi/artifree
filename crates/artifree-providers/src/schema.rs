@@ -730,6 +730,7 @@ CREATE TABLE access_requests (
     created_at INTEGER NOT NULL,
     PRIMARY KEY (actor, request_key)
 ) STRICT, WITHOUT ROWID;
+CREATE INDEX access_requests_by_artifact ON access_requests (artifact_id);
 ";
 
 /// Brings the database to [`SCHEMA_VERSION`] in one immediate transaction, or

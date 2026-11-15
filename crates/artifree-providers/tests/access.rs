@@ -6,7 +6,7 @@
 mod common;
 
 use artifree_domain::access::{AccessGeneration, AccessVersion, Role};
-use artifree_domain::identity::{ActorId, RequestKey, UnixMillis, UserLabel};
+use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, UnixMillis, UserLabel};
 use artifree_ports::access_store::{
     AccessChange, AccessReceipt, AccessRequest, AccessStore, AccessStoreError, Member,
 };
@@ -20,10 +20,13 @@ use common::{TempDir, TestResult, actor, create_demo, database_in, digest, key, 
 
 struct Fixture {
     _dir: TempDir,
+    path: std::path::PathBuf,
     store: SqliteStore,
     identity: SqliteTokenStore,
     owner: ActorId,
     created: CommitReceipt,
+    /// A second artifact of the same owner, for keys used across artifacts.
+    other: ArtifactId,
 }
 
 impl Fixture {
@@ -34,12 +37,23 @@ impl Fixture {
         let identity = SqliteTokenStore::open(&path)?;
         let owner = actor("local");
         let created = create_demo(&store, &owner, &key("create"), "Shared", "<h1>one</h1>")?;
+        let other = create_demo(
+            &store,
+            &owner,
+            &key("create-other"),
+            "Other",
+            "<h1>two</h1>",
+        )?
+        .artifact
+        .id;
         Ok(Self {
             _dir: dir,
+            path,
             store,
             identity,
             owner,
             created,
+            other,
         })
     }
 
@@ -367,10 +381,86 @@ fn a_purge_removes_the_members_and_their_retries() -> TestResult {
         fixture.store.access_list(&fixture.created.artifact.id)?,
         None
     );
+    // The access keys' fingerprints are blanked, so nothing of the request
+    // stays behind (decision 0029).
+    let blanked: i64 = rusqlite::Connection::open(&fixture.path)?.query_row(
+        "SELECT count(*) FROM access_requests
+         WHERE artifact_id = ?1 AND fingerprint = zeroblob(32)",
+        [fixture.created.artifact.id.as_str()],
+        |row| row.get(0),
+    )?;
+    assert_eq!(blanked, 1);
     assert_eq!(fixture.generation(&ana)?, AccessGeneration::NEVER);
     assert_eq!(
         fixture.change("grant", &ana, AccessChange::Grant(Role::Viewer), 0),
         Err(AccessStoreError::NotFound)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_revoked_member_who_is_disabled_is_not_granted_again() -> TestResult {
+    let fixture = Fixture::new()?;
+    let ana = fixture.register("Ana", 1)?;
+    fixture.change("grant", &ana, AccessChange::Grant(Role::Viewer), 0)?;
+    fixture.change("revoke", &ana, AccessChange::Revoke, 1)?;
+    fixture
+        .identity
+        .set_disabled(&ana, Some("2026-11-16T00:00:01Z"))?;
+    assert_eq!(
+        fixture.change("again", &ana, AccessChange::Grant(Role::Viewer), 2),
+        Err(AccessStoreError::NotGrantable)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_key_used_on_another_artifact_is_reused_not_replayed() -> TestResult {
+    let fixture = Fixture::new()?;
+    let ana = fixture.register("Ana", 1)?;
+    let other = fixture.other.clone();
+    let request_key = key("shared-key");
+    let request = |artifact| AccessRequest {
+        request: RequestIdentity {
+            actor: &fixture.owner,
+            key: &request_key,
+            fingerprint: RequestFingerprint(digest("the same grant")),
+        },
+        artifact,
+        user: &ana,
+        change: AccessChange::Grant(Role::Viewer),
+        base: AccessVersion(0),
+        now: UnixMillis(1),
+    };
+    fixture
+        .store
+        .change_access(request(&fixture.created.artifact.id))?;
+    assert_eq!(
+        fixture.store.change_access(request(&other)),
+        Err(AccessStoreError::RequestKeyReused)
+    );
+    assert_eq!(fixture.store.member_role(&other, &ana)?, None);
+    Ok(())
+}
+
+#[test]
+fn no_member_has_a_role_while_the_artifact_is_in_the_trash() -> TestResult {
+    let fixture = Fixture::new()?;
+    let ana = fixture.register("Ana", 1)?;
+    fixture.change("grant", &ana, AccessChange::Grant(Role::Editor), 0)?;
+    fixture.trash("trash", 1, true)?;
+    assert_eq!(
+        fixture
+            .store
+            .member_role(&fixture.created.artifact.id, &ana)?,
+        None
+    );
+    fixture.trash("restore", 2, false)?;
+    assert_eq!(
+        fixture
+            .store
+            .member_role(&fixture.created.artifact.id, &ana)?,
+        Some(Role::Editor)
     );
     Ok(())
 }

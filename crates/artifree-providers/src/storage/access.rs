@@ -63,18 +63,26 @@ enum Key {
     Reused,
 }
 
-fn key_of(connection: &Connection, request: RequestIdentity<'_>) -> Result<Key, StoreError> {
-    let used: Option<(Vec<u8>, i64)> = connection
+fn key_of(
+    connection: &Connection,
+    request: RequestIdentity<'_>,
+    artifact: &ArtifactId,
+) -> Result<Key, StoreError> {
+    let used: Option<(Vec<u8>, String, i64)> = connection
         .query_row(
-            "SELECT fingerprint, access_version FROM access_requests
+            "SELECT fingerprint, artifact_id, access_version FROM access_requests
              WHERE actor = ?1 AND request_key = ?2",
             params![request.actor.as_str(), request.key.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(unavailable)?;
-    if let Some((fingerprint, version)) = used {
-        return if fingerprint.as_slice() == request.fingerprint.0.as_slice() {
+    if let Some((fingerprint, used_on, version)) = used {
+        // The same request names the same artifact: a key used on another
+        // artifact is reused even when the rest of the request is the same.
+        return if fingerprint.as_slice() == request.fingerprint.0.as_slice()
+            && used_on == artifact.as_str()
+        {
             Ok(Key::Same(AccessVersion(count(version)?)))
         } else {
             Ok(Key::Reused)
@@ -166,7 +174,7 @@ fn change(
     // found.
     let current = owned_in_place(transaction, request.artifact, request.request.actor)?
         .ok_or(AccessStoreError::NotFound)?;
-    match key_of(transaction, request.request)? {
+    match key_of(transaction, request.request, request.artifact)? {
         Key::Same(version) => {
             return Ok(AccessReceipt {
                 version,
@@ -328,8 +336,21 @@ impl AccessStore for SqliteStore {
         artifact: &ArtifactId,
         user: &ActorId,
     ) -> Result<Option<Role>, StoreError> {
-        let connection = self.connect()?;
-        Ok(member_record(&connection, artifact, user)?.and_then(|(role, _)| role))
+        let mut connection = self.connect()?;
+        // One snapshot: the artifact's state and the record agree.
+        let snapshot = connection.transaction().map_err(unavailable)?;
+        let reachable: bool = snapshot
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM artifacts
+                                WHERE id = ?1 AND purged_at IS NULL AND deleted_at IS NULL)",
+                [artifact.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(unavailable)?;
+        if !reachable {
+            return Ok(None);
+        }
+        Ok(member_record(&snapshot, artifact, user)?.and_then(|(role, _)| role))
     }
 
     fn access_generation(

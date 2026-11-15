@@ -120,6 +120,7 @@ impl From<StoreError> for AccessStoreError {
         match error {
             StoreError::NotFound => Self::NotFound,
             StoreError::RequestKeyReused => Self::RequestKeyReused,
+            StoreError::Unavailable(reason) => Self::Unavailable(reason),
             other => Self::Unavailable(other.to_string()),
         }
     }
@@ -137,7 +138,9 @@ pub trait AccessStore {
     fn access_list(&self, artifact: &ArtifactId) -> Result<Option<AccessList>, StoreError>;
 
     /// The role of `user` on the artifact, `None` when the user is not a
-    /// member (the owner included).
+    /// member (the owner included), and for every member while the artifact
+    /// is in the trash or after it was purged: no member reaches it then
+    /// (0060 rule 4).
     ///
     /// # Errors
     ///
@@ -149,7 +152,8 @@ pub trait AccessStore {
     ) -> Result<Option<Role>, StoreError>;
 
     /// The access generation of `user` on the artifact (0060 rule 16);
-    /// [`AccessGeneration::NEVER`] for a user who was never a member.
+    /// [`AccessGeneration::NEVER`] for a user who was never a member. It is
+    /// read in the trash too, where a move raised it.
     ///
     /// # Errors
     ///
