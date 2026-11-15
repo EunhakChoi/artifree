@@ -452,6 +452,31 @@ impl PreviewTickets {
         }
     }
 
+    /// Invalidates every live ticket that one of `users` holds for
+    /// `artifact`, preview, build preview and runtime view alike (decision
+    /// 0060 rule 15). Their tickets of other artifacts stay. The fences of the
+    /// closed views stay too: they grant nothing, and keep an older
+    /// generation of a view from being issued again.
+    pub(crate) fn revoke_members(&self, users: &[ActorId], artifact: &ArtifactId) {
+        if let Ok(mut registry) = self.registry.lock() {
+            registry
+                .live
+                .retain(|_, ticket| &ticket.artifact != artifact || !users.contains(&ticket.actor));
+        }
+    }
+
+    /// How many live tickets `actor` holds for `artifact`, for tests.
+    #[cfg(test)]
+    pub(crate) fn live_tickets_of(&self, actor: &ActorId, artifact: &ArtifactId) -> usize {
+        self.registry.lock().map_or(usize::MAX, |registry| {
+            registry
+                .live
+                .values()
+                .filter(|ticket| &ticket.actor == actor && &ticket.artifact == artifact)
+                .count()
+        })
+    }
+
     /// Starts a create before its asynchronous artifact lookup.
     pub(crate) fn begin_runtime(
         &self,

@@ -668,6 +668,12 @@ pub(crate) async fn update(
     if receipt.delivery == Delivery::Committed {
         state.feed().committed();
     }
+    // Decision 0060 rule 15: a move to the trash closes what every member
+    // holds of the artifact. The store names them in the committing
+    // transaction; a replay names none, so it closes nothing.
+    if !receipt.trashed_members.is_empty() {
+        state.revoke_members(&receipt.trashed_members, &receipt.artifact.id);
+    }
     Ok(UpdateArtifactResponse {
         artifact: artifact_dto(&receipt.artifact),
         replayed: receipt.delivery == Delivery::Replayed,

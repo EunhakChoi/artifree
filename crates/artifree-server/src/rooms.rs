@@ -95,6 +95,14 @@ impl RoomHub {
         }
     }
 
+    /// Removes the participants of each of `users` in its room of
+    /// `artifact` (decision 0060 rule 15). Their connections stay open.
+    pub(crate) fn leave_members(&self, users: &[ActorId], artifact: &ArtifactId) {
+        if let Ok(mut rooms) = self.rooms.lock() {
+            rooms.leave_rooms(users, artifact);
+        }
+    }
+
     /// The rooms and participants that exist, for tests.
     #[cfg(test)]
     pub(crate) fn counts(&self) -> Option<artifree_core::room::Counts> {

@@ -134,21 +134,9 @@ async fn create_runtime_artifact(
     state: &AppState,
     actor: &ActorId,
 ) -> Result<String, Box<dyn Error>> {
-    let created = operations::create(
-        state,
-        actor.clone(),
-        "runtime-race-key".parse()?,
-        CreateArtifactRequest {
-            title: "Runtime race".into(),
-            artifact_type: None,
-            files: Some(vec![FileUpload {
-                path: "index.html".into(),
-                encoding: ContentEncoding::Utf8,
-                content: "<!doctype html><html><head><!-- artifree-runtime --></head><body>test</body></html>".into(),
-            }]),
-        },
-    ).await.map_err(|error| error.body.message)?;
-    Ok(created.artifact.id)
+    Ok(create_keyed_artifact(state, actor, "runtime-race-key")
+        .await?
+        .to_string())
 }
 
 async fn issue_and_initialize(
@@ -2746,6 +2734,275 @@ fn a_view_create_pending_across_a_disable_and_an_enable_is_refused_and_leaves_no
         .await
         .map_err(|error| error.body.message)?;
         assert_eq!(state.previews().live_tickets(&alice), 1);
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+/// A runtime artifact of `owner` made with request key `key`, so that one
+/// owner can make several.
+async fn create_keyed_artifact(
+    state: &AppState,
+    owner: &ActorId,
+    key: &str,
+) -> Result<ArtifactId, Box<dyn Error>> {
+    let created = operations::create(
+        state,
+        owner.clone(),
+        key.parse()?,
+        CreateArtifactRequest {
+            title: "Runtime race".into(),
+            artifact_type: None,
+            files: Some(vec![FileUpload {
+                path: "index.html".into(),
+                encoding: ContentEncoding::Utf8,
+                content: "<!doctype html><html><head><!-- artifree-runtime --></head><body>test</body></html>".into(),
+            }]),
+        },
+    )
+    .await
+    .map_err(|error| error.body.message)?;
+    Ok(created.artifact.id.parse()?)
+}
+
+/// What one user holds for the test below: a connection and an inbox.
+struct Holder {
+    actor: ActorId,
+    tab: String,
+    connection: std::sync::Arc<crate::runtime_sessions::RuntimeSession>,
+    agent: String,
+}
+
+impl Holder {
+    fn new(state: &AppState, actor: &ActorId) -> Result<Self, Box<dyn Error>> {
+        let tab = operations::open_runtime_session(state, actor, None)
+            .map_err(|error| error.body.message)?
+            .session_id;
+        let connection = state
+            .runtime_sessions()
+            .get(actor, &tab)
+            .map_err(|error| format!("{error:?}"))?;
+        let agent = operations::register_handoff_session(state, actor, "Editor")
+            .map_err(|error| error.body.message)?
+            .session_id;
+        Ok(Self {
+            actor: actor.clone(),
+            tab,
+            connection,
+            agent,
+        })
+    }
+
+    fn scope(artifact: &ArtifactId) -> crate::runtime_sessions::GrantScope {
+        crate::runtime_sessions::GrantScope::new(
+            artifact.clone(),
+            SourceRevision(1),
+            SourceRevision(1),
+        )
+    }
+
+    /// A preview ticket, a room participant, a grant and a handoff delivery
+    /// of `artifact`; returns the delivery.
+    async fn hold(
+        &self,
+        state: &AppState,
+        artifact: &ArtifactId,
+    ) -> Result<String, Box<dyn Error>> {
+        let name = artifact.to_string();
+        operations::preview(
+            state,
+            self.actor.clone(),
+            None,
+            StateGeneration::FIRST,
+            &name,
+            1,
+            PreviewTarget::Source,
+        )
+        .await
+        .map_err(|error| error.body.message)?;
+        rooms::join(
+            state,
+            &self.actor,
+            &self.tab,
+            &name,
+            Ok(join_request("page")),
+        )
+        .await
+        .map_err(|error| error.body.message)?;
+        self.connection
+            .set_grant(
+                Self::scope(artifact),
+                crate::runtime_policy::CapabilitySet::default(),
+                0,
+            )
+            .map_err(|error| format!("{error:?}"))?;
+        let staged = state
+            .handoffs()
+            .stage(
+                &self.actor,
+                &self.tab,
+                &self.connection,
+                &self.agent,
+                artifree_contracts::api::HandoffSelection {
+                    artifact_id: name,
+                    revision: 1,
+                    path: "index.html".into(),
+                    file_sha256: "a".repeat(64),
+                    start: 0,
+                    end: 4,
+                    text: "test".into(),
+                },
+                "Make it clearer".into(),
+            )
+            .map_err(|error| format!("{error:?}"))?;
+        Ok(staged.id)
+    }
+
+    /// Whether the user still holds what [`Self::hold`] made of `artifact`,
+    /// one flag each: ticket, grant, handoff.
+    fn holds(
+        &self,
+        state: &AppState,
+        artifact: &ArtifactId,
+        handoff: &str,
+    ) -> Result<[bool; 3], Box<dyn Error>> {
+        let grant = self
+            .connection
+            .with_grant(&Self::scope(artifact), |version, _| version)
+            .map_err(|error| format!("{error:?}"))?;
+        Ok([
+            state.previews().live_tickets_of(&self.actor, artifact) == 1,
+            grant != 0,
+            state
+                .handoffs()
+                .get(&self.actor, &self.tab, handoff)
+                .is_ok(),
+        ])
+    }
+}
+
+/// Makes `user` a viewer of `artifact`, as the owner's grant would.
+fn grant_viewer(
+    directory: &TestDirectory,
+    owner: &ActorId,
+    artifact: &ArtifactId,
+    user: &ActorId,
+) -> Result<(), Box<dyn Error>> {
+    use artifree_domain::access::{AccessVersion, Role};
+    use artifree_domain::identity::UnixMillis;
+    use artifree_ports::access_store::{AccessChange, AccessRequest, AccessStore};
+    use artifree_ports::artifact_store::{RequestFingerprint, RequestIdentity};
+
+    SqliteStore::open(&directory.0.join("runtime.sqlite3"))?
+        .change_access(AccessRequest {
+            request: RequestIdentity {
+                actor: owner,
+                key: &format!("grant-{artifact}").parse()?,
+                fingerprint: RequestFingerprint([7; 32]),
+            },
+            artifact,
+            user,
+            change: AccessChange::Grant(Role::Viewer),
+            base: AccessVersion(0),
+            now: UnixMillis(1),
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Decision 0060 rule 15: a move to the trash closes, for every member and
+/// that artifact only, its preview tickets, the grants scoped to it on the
+/// member's connections, its room participation and its handoff deliveries
+/// that name it. The member's connection stays open, and what the member
+/// holds of another artifact, and the owner's own of the trashed one, stay.
+#[test]
+fn a_move_to_the_trash_closes_what_a_member_holds_of_that_artifact_only()
+-> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let (owner, ana) = (registered_user(&state, 1)?, registered_user(&state, 2)?);
+        let trashed = create_keyed_artifact(&state, &owner, "create-trashed").await?;
+        let kept = create_keyed_artifact(&state, &owner, "create-kept").await?;
+        grant_viewer(&directory, &owner, &trashed, &ana)?;
+        grant_viewer(&directory, &owner, &kept, &ana)?;
+        let (anas, owners) = (Holder::new(&state, &ana)?, Holder::new(&state, &owner)?);
+        let anas_trashed = anas.hold(&state, &trashed).await?;
+        let anas_kept = anas.hold(&state, &kept).await?;
+        let owners_trashed = owners.hold(&state, &trashed).await?;
+        assert_eq!(state.rooms().counts().map(|counts| counts.rooms), Some(3));
+
+        operations::update(
+            &state,
+            owner.clone(),
+            "trash-shared".parse()?,
+            trashed.as_str(),
+            UpdateArtifactRequest {
+                base_metadata_revision: 1,
+                title: None,
+                pinned: None,
+                deleted: Some(true),
+            },
+        )
+        .await
+        .map_err(|error| error.body.message)?;
+
+        assert_eq!(anas.holds(&state, &trashed, &anas_trashed)?, [false; 3]);
+        assert_eq!(anas.holds(&state, &kept, &anas_kept)?, [true; 3]);
+        assert_eq!(owners.holds(&state, &trashed, &owners_trashed)?, [true; 3]);
+        assert!(
+            state.runtime_sessions().get(&ana, &anas.tab).is_ok(),
+            "the connection stays"
+        );
+        // Ana's room of the kept artifact and the owner's room stay.
+        assert_eq!(state.rooms().counts().map(|counts| counts.rooms), Some(2));
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+/// A replay of a move to the trash names no member, so after a recovery it
+/// closes nothing a member opened again (decision 0060 rule 15).
+#[test]
+fn a_replayed_move_to_the_trash_closes_nothing_after_a_recovery() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let (owner, ana) = (registered_user(&state, 1)?, registered_user(&state, 2)?);
+        let shared = create_keyed_artifact(&state, &owner, "create-shared").await?;
+        grant_viewer(&directory, &owner, &shared, &ana)?;
+        let anas = Holder::new(&state, &ana)?;
+        let trash = |key: &'static str, base: u64, deleted: bool| {
+            let (state, owner, shared) = (&state, owner.clone(), shared.to_string());
+            async move {
+                operations::update(
+                    state,
+                    owner,
+                    key.parse()?,
+                    &shared,
+                    UpdateArtifactRequest {
+                        base_metadata_revision: base,
+                        title: None,
+                        pinned: None,
+                        deleted: Some(deleted),
+                    },
+                )
+                .await
+                .map_err(|error| error.body.message)
+                .map_err(Box::<dyn Error>::from)
+            }
+        };
+        let first = anas.hold(&state, &shared).await?;
+        assert!(!trash("trash-shared", 1, true).await?.replayed);
+        assert_eq!(anas.holds(&state, &shared, &first)?, [false; 3]);
+        trash("recover-shared", 2, false).await?;
+        let again = anas.hold(&state, &shared).await?;
+        assert!(trash("trash-shared", 1, true).await?.replayed);
+        assert_eq!(anas.holds(&state, &shared, &again)?, [true; 3]);
         Ok::<(), Box<dyn Error>>(())
     })
 }

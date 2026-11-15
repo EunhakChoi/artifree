@@ -310,6 +310,23 @@ fn change(
     })
 }
 
+/// The users who hold a role on `artifact` now, ordered by user id.
+pub(super) fn current_members(
+    connection: &Connection,
+    artifact: &ArtifactId,
+) -> Result<Vec<ActorId>, StoreError> {
+    connection
+        .prepare_cached(
+            "SELECT user_id FROM artifact_members
+             WHERE artifact_id = ?1 AND role IS NOT NULL ORDER BY user_id",
+        )
+        .map_err(unavailable)?
+        .query_map([artifact.as_str()], |row| row.get::<_, String>(0))
+        .map_err(unavailable)?
+        .map(|user| user.map_err(unavailable)?.parse().map_err(corrupt))
+        .collect()
+}
+
 /// Raises the generation of every member of the artifact, current or revoked,
 /// in the caller's transaction (decision 0060 rule 16).
 pub(super) fn raise_for_trash(

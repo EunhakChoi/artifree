@@ -278,6 +278,10 @@ pub struct MetadataReceipt {
     pub artifact: ArtifactRecord,
     /// Whether this call handled the request or replayed an earlier one.
     pub delivery: Delivery,
+    /// The members a move to the trash took the artifact from, read in its
+    /// transaction (decision 0060 rule 15), so that what they hold can be
+    /// closed. Empty for any other update and for a replay.
+    pub trashed_members: Vec<ActorId>,
 }
 
 /// The durable result of a purge.
