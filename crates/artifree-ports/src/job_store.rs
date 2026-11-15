@@ -217,7 +217,9 @@ pub struct Claim {
     /// a cancel requested (now cancelled) or on its last attempt (now failed
     /// with [`JobFailure::LeaseExpired`]), and a `run_profile` job whose
     /// profile is not known (now failed with [`JobFailure::ExecutionUnavailable`]),
-    /// in the order they were ended. They are reported so that a worker can
+    /// and a job of a user who may no longer enqueue on its artifact, after a
+    /// revocation or a downgrade to viewer (now cancelled, decision 0060 rule
+    /// 15), in the order they were ended. They are reported so that a worker can
     /// tell its operator about each one.
     pub settled: Vec<JobRecord>,
     /// The claimed job, if one was due after those.
@@ -420,7 +422,8 @@ pub trait JobStore {
     /// [`JobStoreError::Unavailable`].
     fn enqueue_profile_job(&self, request: NewProfileJob<'_>) -> Result<JobReceipt, JobStoreError>;
 
-    /// Cancels a job of the actor. A job that has not started ends as
+    /// Cancels a job of the actor, or, for the artifact's owner, a member's
+    /// job on it (decision 0060 rule 11). A job that has not started ends as
     /// cancelled at once; a running job gets `cancel_requested` and ends as
     /// cancelled when its worker reaches a checkpoint. The same request
     /// replays. A job that ended is [`JobStoreError::Conflict`]. A hidden job

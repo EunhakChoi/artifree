@@ -310,19 +310,20 @@ S02 is complete only with behavioural tests, proven by mutation, for:
 
 S02 is split into slices, each its own pull request, in this order:
 
-| Slice | Rules                 | What it adds                                                                                             | State                                   |
-| ----- | --------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------- |
-| S02a  | 1, 6 and 16 (storage) | Schema 18: `artifact_members`, `access_requests`, `artifacts.access_version`; the `AccessStore` port     | implemented                             |
-| S02b  | 2 to 5, 9, 11, 17     | The core's access and role checks on every artifact operation, read again in the committing transaction  | implemented, except as its section says |
-| S02c  | 13, 14                | Feed delivery to every reader and the access change rows                                                 | implemented                             |
-| S02d  | 15, 16 (memory), 18   | What a revocation, a downgrade and the trash remove, and the confirmations against the access generation | not implemented                         |
-| S02e  | 6 to 8                | `/v1/me`, the access routes, listings with roles, the CLI and the contract                               | not implemented                         |
-| S02f  | 10                    | The declared shared space                                                                                | not implemented                         |
-| S02g  | 12                    | Rooms per artifact                                                                                       | not implemented                         |
-| S02h  | Acceptance (web)      | The web workspace's sharing                                                                              | not implemented                         |
+| Slice | Rules                 | What it adds                                                                                              | State                                   |
+| ----- | --------------------- | --------------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| S02a  | 1, 6 and 16 (storage) | Schema 18: `artifact_members`, `access_requests`, `artifacts.access_version`; the `AccessStore` port      | implemented                             |
+| S02b  | 2 to 5, 9, 11, 17     | The core's access and role checks on every artifact operation, read again in the committing transaction   | implemented, except as its section says |
+| S02c  | 13, 14                | Feed delivery to every reader and the access change rows                                                  | implemented                             |
+| S02d1 | 11, 15 (jobs), 17     | The queued jobs a revocation and a downgrade take, the owner's cancel, and member replays in the store    | implemented                             |
+| S02d2 | 15, 16 (memory), 18   | What a revocation, a downgrade and the trash remove from runtime memory, and the generation confirmations | not implemented                         |
+| S02e  | 6 to 8                | `/v1/me`, the access routes, listings with roles, the CLI and the contract                                | not implemented                         |
+| S02f  | 10                    | The declared shared space                                                                                 | not implemented                         |
+| S02g  | 12                    | Rooms per artifact                                                                                        | not implemented                         |
+| S02h  | Acceptance (web)      | The web workspace's sharing                                                                               | not implemented                         |
 
 Nothing reaches a member's access before S02e exposes the routes, and S02e
-waits for S02b to S02d, so no slice opens an artifact to another user without
+waits for S02b to S02d2, so no slice opens an artifact to another user without
 the checks, the delivery and the revocation that go with it.
 
 **S02a (implemented).** Schema 18 adds `artifact_members` (one row per
@@ -368,14 +369,14 @@ real database (`crates/artifree-providers/tests/access_writes.rs`,
 
 Not in S02b, and moved to the slice named: listing an artifact one is a
 member of, with its role (S02e); runtime capabilities offered by role, so a
-viewer's frame is shown `source.write` as not available (S02d, with the
+viewer's frame is shown `source.write` as not available (S02d2, with the
 downgrade's grant removal) — until then a viewer's runtime source write is
 refused by the role check like any other write; and the owner's cancel of a
-member's job (rule 11), with the job reads of the owner (S02d); cancelling a
+member's job (rule 11) (S02d1); cancelling a
 revoked or downgraded member's queued jobs, which until then a worker can
 still claim, and a store-side access read for the replays the service
 answers itself (a write whose type release this server does not know, and a
-copy whose source is gone), both with the revocation (S02d); and the order
+copy whose source is gone), both with the revocation (S02d1); and the order
 of the HTTP and MCP adapters, which parse and validate a request body before
 the service checks the role, so a viewer's malformed write is answered
 `invalid_request` rather than `403` until the routes are opened to members
@@ -409,3 +410,28 @@ guard is broken. A purge deletes the member records before it records
 `purged`, so no request observes the trash branch of the fan-out; a unit
 test of the store asks it directly. No route makes these rows reachable before S02e, which also wakes
 open streams after an access change.
+
+**S02d1 (implemented).** A revocation, and a role change from editor to
+viewer, end as cancelled the jobs that user queued on the artifact and that
+have not started (queued or scheduled for a retry), in the transaction of the
+access change; a running job ends normally (rule 15). Whatever puts a job back in line
+afterwards (its worker releasing it, a retry, an expired lease) meets the
+claim, which ends as cancelled, without an attempt, a due job whose user is
+neither the owner nor an editor of the artifact, so no new attempt starts for
+a user who may no longer enqueue there. Each cancel is a job
+change, which reaches the user's feed only while it is still a member, so
+for a revoked user the revocation stays the last row. The owner of an
+artifact cancels a member's job on it (rules 3 and 11), and the answer
+carries the job as a member's own cancel does; another member does not find
+it. Listing and reading a job stay the enqueuing user's. The store's
+replay of a stored commit, which the service uses where it answers a retry
+itself (a release this server does not know, a copy whose source is gone),
+reads the caller's access in the same snapshot as the key: a member whose
+role no longer allows a commit gets `forbidden`, a revoked one `not_found`
+(rule 17); the key of a create or a copy names an artifact the caller owns,
+so its replay is unchanged. Behavioural tests over a real database
+(`crates/artifree-providers/tests/revocation_jobs.rs`) fail when each guard
+is broken. What a revocation, a downgrade and the trash remove from runtime
+memory (tickets, views, grants, handoffs, room participation), the
+confirmations against the access generation (rule 16), runtime capabilities
+offered by role, and rule 18's marking are S02d2.

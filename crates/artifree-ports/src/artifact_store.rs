@@ -685,11 +685,15 @@ pub trait ArtifactStore {
     /// identity, without writing anything; `None` when there is none or its
     /// artifact was purged. It lets a copy's retry replay although its source
     /// is gone, and a retry replay before a check that would refuse a new
-    /// request (decision 0059 rule 7).
+    /// request (decision 0059 rule 7). A commit a member made replays only
+    /// while the member's role allows a commit, read in the same snapshot as
+    /// the key (decision 0060 rule 17).
     ///
     /// # Errors
     ///
-    /// [`StoreError::Unavailable`].
+    /// [`StoreError::NotFound`] for a key whose artifact the caller no longer
+    /// reaches, [`StoreError::Forbidden`] for one whose role no longer allows
+    /// a commit, or [`StoreError::Unavailable`].
     fn replay_receipt(
         &self,
         request: RequestIdentity<'_>,
