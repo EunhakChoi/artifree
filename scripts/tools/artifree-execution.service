@@ -1,0 +1,24 @@
+# The execution worker on the supported host (decision 0056 rule 8, decision 0058 rule 21;
+# docs/execution-host.md). Copy it to /etc/systemd/system/. It runs builds in the sandbox, with
+# the tool root that /opt/artifree/current's server names, as the same account as the server and
+# on the same data directory. Delegate=yes gives the worker its own control group, which it must
+# be the only process of: the worker is the unit's own command, with no wrapper. The execution
+# directory is private to the account (mode 0700). The worker opens an existing database only, so
+# until the server has made it the worker exits with status 1 and is restarted. Status 2 is a
+# refused execution directory or control group, which a restart does not change, so it stays
+# stopped.
+[Unit]
+Description=Artifree execution worker
+After=artifree.service
+
+[Service]
+User=artifree
+Group=artifree
+Delegate=yes
+ExecStart=/opt/artifree/current/bin/artifree-server worker run --data-dir /var/lib/artifree/data --execution-dir /var/lib/artifree/execution
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=2
+
+[Install]
+WantedBy=multi-user.target

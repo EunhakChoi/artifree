@@ -264,6 +264,15 @@ export async function buildReleasePackage({
       data: await text('docs/backup-restore.md'),
     },
     { path: paths.server, data: binaryBytes, executable: true },
+    // The root packaging script runs as `sudo tools/package-root.sh`, so it
+    // keeps its executable bit; the lock list and the units are data.
+    ...(await Promise.all(
+      spec.hostFiles.map(async (path) => ({
+        path,
+        data: await text(`scripts/${path}`),
+        executable: path.endsWith('.sh'),
+      })),
+    )),
     {
       path: CLI_PATH,
       data: await cliBundle(root, new Set(npmKeys)),

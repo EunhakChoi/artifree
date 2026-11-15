@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
 import {
+  chmod,
   copyFile,
   mkdir,
   mkdtemp,
   readFile,
   rm,
+  stat,
   symlink,
   writeFile,
 } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
@@ -17,7 +20,7 @@ import {
   buildReleasePackage,
   hostTarget,
 } from '../package-release.mjs';
-import { sha256 } from '../lib/release-layout.mjs';
+import { ROOT_VERSION, sha256 } from '../lib/release-layout.mjs';
 import { elfWithNeeds } from './fixtures/elf.mjs';
 import { licenseTextPath } from '../lib/license-bundle.mjs';
 import { buildServer } from '../lib/server-process.mjs';
@@ -25,6 +28,7 @@ import {
   extract,
   refuses,
   verifyChecksum,
+  verifyExecutionEntryPoints,
   verifyManifest,
   verifyRelease,
 } from '../verify-release.mjs';
@@ -62,7 +66,10 @@ test(
   async () => {
     const built = await pack(join(scratch, 'out-run'));
     const summary = await verifyRelease(built.archive);
-    assert.deepEqual(summary, { revision: 2 });
+    assert.deepEqual(summary, {
+      buildProfiles: target === 'linux-x64' ? ['react-v1'] : [],
+      revision: 2,
+    });
   },
 );
 
@@ -412,6 +419,185 @@ test(
     await assert.rejects(
       verifyManifest(dir),
       /does not list LICENSES\/INDEX.json/,
+    );
+  },
+);
+
+const linuxOnly = {
+  skip:
+    target !== 'linux-x64' && 'the root tools ship in the linux-x64 package',
+};
+
+test(
+  'the linux-x64 package ships the root packaging script and its lock list, and the manifest check requires them',
+  linuxOnly,
+  async () => {
+    const { dir } = await unpacked('root-tools');
+    for (const path of ['tools/package-root.sh', 'tools/react-v1.lock']) {
+      assert.deepEqual(
+        await readFile(join(dir, ...path.split('/'))),
+        await readFile(join(root, 'scripts', ...path.split('/'))),
+        `${path} must be the repository's copy`,
+      );
+    }
+    const mode = (await stat(join(dir, 'tools', 'package-root.sh'))).mode;
+    assert.equal(mode & 0o111, 0o111, 'the script must be executable');
+    assert.equal(
+      (await stat(join(dir, 'tools', 'react-v1.lock'))).mode & 0o111,
+      0,
+      'the lock list is data',
+    );
+
+    const script = join(dir, 'tools', 'package-root.sh');
+    await chmod(script, 0o644);
+    await assert.rejects(
+      verifyManifest(dir),
+      /tools\/package-root.sh is not executable/,
+    );
+    await chmod(script, 0o755);
+    await verifyManifest(dir);
+
+    await rm(join(dir, 'tools', 'react-v1.lock'));
+    await rewriteManifest(dir, (manifest) => {
+      manifest.files = manifest.files.filter(
+        (f) => f.path !== 'tools/react-v1.lock',
+      );
+    });
+    await assert.rejects(
+      verifyManifest(dir),
+      /does not list tools\/react-v1.lock/,
+    );
+  },
+);
+
+test(
+  'the manifest check refuses a tool its target does not ship',
+  linuxOnly,
+  async () => {
+    const { dir } = await unpacked('stray-tool');
+    const bytes = Buffer.from('#!/bin/sh\n');
+    await writeFile(join(dir, 'tools', 'extra.sh'), bytes);
+    await rewriteManifest(dir, (manifest) => {
+      manifest.files.push({
+        path: 'tools/extra.sh',
+        size: bytes.length,
+        sha256: sha256(bytes),
+      });
+    });
+    await assert.rejects(verifyManifest(dir), /must not ship tools\/extra.sh/);
+  },
+);
+
+/**
+ * Writes a shell script that stands in for a server: it prints `version` for
+ * `--version` and runs `body` for anything else.
+ */
+async function fakeServer(name, version, body) {
+  const path = join(scratch, name);
+  await writeFile(
+    path,
+    `#!/bin/sh\nif [ "$1" = --version ]; then echo "artifree-server ${version}"; exit 0; fi\n${body}\n`,
+    { mode: 0o755 },
+  );
+  return path;
+}
+
+test(
+  'the entry-point check tells a server that knows react-v1 from one that knows no profile',
+  { skip: process.platform !== 'linux' && 'the stand-ins are shell scripts' },
+  async () => {
+    const cwd = await mkdtemp(join(scratch, 'entry-cwd-'));
+    const check = (binary, target, version = '1.2.3') =>
+      verifyExecutionEntryPoints({
+        binary,
+        env: { PATH: '' },
+        cwd,
+        manifest: { target, version },
+      });
+    const knowsNone = await fakeServer(
+      'knows-none.sh',
+      '1.2.3',
+      'echo "Execution unavailable. This build knows no execution profile." >&2; exit 2',
+    );
+    assert.deepEqual(check(knowsNone, 'windows-x64'), []);
+    assert.throws(
+      () => check(knowsNone, 'linux-x64'),
+      /bootstrap artifree-fixture-inspection-v1: expected status 70, got 2/,
+    );
+
+    const acceptsAll = await fakeServer('accepts-all.sh', '1.2.3', 'exit 0');
+    assert.throws(
+      () => check(acceptsAll, 'linux-x64'),
+      /bootstrap artifree-fixture-inspection-v1: expected status 70, got 0/,
+    );
+    assert.throws(
+      () => check(acceptsAll, 'windows-x64'),
+      /artifree-server execution: expected status 2, got 0/,
+    );
+
+    // Fails every identity alike, so react-v1's is not served.
+    const knowsNoIdentity = await fakeServer(
+      'knows-no-identity.sh',
+      '1.2.3',
+      'echo "the execution profile identity is unknown" >&2; exit 70',
+    );
+    assert.throws(
+      () => check(knowsNoIdentity, 'linux-x64'),
+      /the input path is not absolute/,
+    );
+
+    const otherVersion = await fakeServer('other.sh', '9.9.9', 'exit 2');
+    assert.throws(
+      () => check(otherVersion, 'windows-x64'),
+      /does not report the manifest version/,
+    );
+
+    const notARootVersion = await fakeServer(
+      'short-version.sh',
+      '1.2',
+      'exit 2',
+    );
+    assert.throws(
+      () => check(notARootVersion, 'linux-x64', '1.2'),
+      /cannot name an execution tool root/,
+    );
+  },
+);
+
+test(
+  'the root-version pattern accepts exactly what the packaging script accepts',
+  { skip: process.platform !== 'linux' && 'the script is a bash script' },
+  () => {
+    const versions = [
+      '0.1.0',
+      '10.20.30',
+      '1.2.3-rc.1',
+      '1.2.3+build.5',
+      '1.2.3-a-b',
+      '1.2',
+      '1.2.3.4',
+      'v1.2.3',
+      '1.2.3-',
+      '1.2.3/x',
+      '1.2.3-rc_1',
+      '',
+    ];
+    // Sourcing the script only defines its functions; its main does not run.
+    const run = spawnSync(
+      'bash',
+      [
+        '-c',
+        'source "$1"; shift; for v in "$@"; do if is_version "$v"; then echo y; else echo n; fi; done',
+        'check',
+        join(root, 'scripts', 'tools', 'package-root.sh'),
+        ...versions,
+      ],
+      { encoding: 'utf8' },
+    );
+    assert.equal(run.status, 0, run.stderr);
+    assert.deepEqual(
+      run.stdout.trim().split('\n'),
+      versions.map((v) => (ROOT_VERSION.test(v) ? 'y' : 'n')),
     );
   },
 );

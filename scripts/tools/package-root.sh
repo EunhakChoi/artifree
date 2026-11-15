@@ -79,8 +79,9 @@ install_launcher() {
     package_fail "bubblewrap $installed is newer than the pinned $BUBBLEWRAP_VERSION; this script does not downgrade it"
   fi
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update
-  apt-get install -y --no-install-recommends "bubblewrap=$BUBBLEWRAP_VERSION"
+  # apt's progress goes to stderr: the script's stdout is the root's path alone.
+  apt-get update >&2
+  apt-get install -y --no-install-recommends "bubblewrap=$BUBBLEWRAP_VERSION" >&2
   install -o root -g root -m 0755 /usr/bin/bwrap "$ROOT/bin/bwrap"
   install_licence /usr/bin/bwrap
 }

@@ -8,7 +8,12 @@ import {
   LICENSE_INDEX_PATH,
   verifyLicenseBundle,
 } from './lib/license-bundle.mjs';
-import { TARGET_LAYOUT, entrypoints, sha256 } from './lib/release-layout.mjs';
+import {
+  ROOT_VERSION,
+  TARGET_LAYOUT,
+  entrypoints,
+  sha256,
+} from './lib/release-layout.mjs';
 import { startServer } from './lib/server-process.mjs';
 import {
   exerciseNewService,
@@ -20,7 +25,8 @@ import {
  * operator would (decision 0025). The archive is unpacked with the platform's
  * own extractor; every file is checked against the manifest; then only files
  * from the unpacked tree are run, with an empty PATH and no repository
- * working directory: start, health, the packaged web page, create and save an
+ * working directory: the server's version and execution entry points
+ * (decision 0058, R03fb), start, health, the packaged web page, create and save an
  * artifact with the packaged CLI, fetch its preview, back up the running
  * server, stop, restart on the same data, restore the backup into a new
  * directory and serve it, and refuse bad startup configuration and restores
@@ -108,15 +114,26 @@ export async function verifyManifest(packageDir) {
     );
     listed.add(file.path);
   }
+  const hostFiles = TARGET_LAYOUT[manifest.target].hostFiles;
   for (const required of [
     expected.server,
     expected.cli,
     `${expected.web}/index.html`,
     LICENSE_INDEX_PATH,
     'THIRD_PARTY_NOTICES.md',
+    ...hostFiles,
   ]) {
     assert.ok(listed.has(required), `The manifest does not list ${required}.`);
   }
+  // A package whose server knows no build profile ships no root tools.
+  const strayTools = [...listed].filter(
+    (path) => path.startsWith('tools/') && !hostFiles.includes(path),
+  );
+  assert.deepEqual(
+    strayTools,
+    [],
+    `The ${manifest.target} package must not ship ${strayTools.join(', ')}.`,
+  );
 
   const found = await walk(packageDir);
   const files = found.files.filter((path) => path !== 'MANIFEST.json');
@@ -145,6 +162,13 @@ export async function verifyManifest(packageDir) {
     assert.equal(bytes.length, file.size, `Size mismatch: ${file.path}`);
     assert.equal(sha256(bytes), file.sha256, `SHA-256 mismatch: ${file.path}`);
   }
+  // An operator runs the root packaging script directly (docs/execution-host.md),
+  // so it must unpack executable; Windows records no such bit.
+  if (process.platform !== 'win32')
+    for (const path of hostFiles.filter((name) => name.endsWith('.sh'))) {
+      const { mode } = await stat(join(packageDir, ...path.split('/')));
+      assert.equal(mode & 0o111, 0o111, `${path} is not executable.`);
+    }
   await verifyLicenseBundle(packageDir);
   return manifest;
 }
@@ -199,6 +223,108 @@ function runMaintenance(binary, env, cwd, args) {
   return JSON.parse(lines[0]);
 }
 
+/** The fixture profile's identity, which no release build knows. */
+const FIXTURE_IDENTITY = 'artifree-fixture-inspection-v1';
+/** The identity of the `react-v1` profile. */
+const REACT_IDENTITY = 'artifree-react-v1';
+/**
+ * Every `execution` entry point (decision 0057 rule 4) and the two admission
+ * modes (decision 0058, R03fa), each with the arguments it is given.
+ */
+const ENTRY_POINTS = [
+  ['execution'],
+  ['execution', 'bootstrap', FIXTURE_IDENTITY],
+  ['execution', 'stub', FIXTURE_IDENTITY, '/nonexistent-input'],
+  ['execution', 'guardian', 'attempt-1-2', '1000', '100'],
+  ['execution', 'namespaces'],
+  ['execution', 'wait'],
+];
+
+/**
+ * Runs the unpacked server with `args` and a closed standard input, and
+ * requires it to end with `status` and exactly one stderr line containing
+ * `words`.
+ */
+function expectEntryFailure({ binary, env, cwd }, args, status, words) {
+  const run = spawnSync(binary, args, {
+    env,
+    cwd,
+    encoding: 'utf8',
+    input: '',
+    timeout: 30_000,
+  });
+  const what = `artifree-server ${args.join(' ')}`;
+  assert.equal(run.error, undefined, `${what} did not run: ${run.error}`);
+  assert.equal(
+    run.status,
+    status,
+    `${what}: expected status ${status}, got ${run.status}; stderr ${run.stderr}`,
+  );
+  const lines = run.stderr.split(/\r?\n/).filter((line) => line !== '');
+  assert.ok(
+    lines.length === 1 && lines[0].includes(words),
+    `${what}: expected one stderr line containing "${words}", got ${JSON.stringify(run.stderr)}`,
+  );
+}
+
+/**
+ * Checks the unpacked server's execution entry points against the build
+ * profiles its target knows (decision 0058, R03fb) and returns them. Every
+ * server reports the manifest's version. The x86_64 Linux server serves
+ * `react-v1`'s entry points and fails the fixture's identity as unknown, and
+ * its version is one the packaging script accepts as a root's version, so
+ * `tools/package-root.sh` prepares the root that this server opens. A server
+ * for any other target refuses every entry point.
+ */
+export function verifyExecutionEntryPoints({ binary, env, cwd, manifest }) {
+  const run = { binary, env, cwd };
+  const version = spawnSync(binary, ['--version'], {
+    env,
+    cwd,
+    encoding: 'utf8',
+    input: '',
+    timeout: 30_000,
+  });
+  assert.equal(
+    version.error,
+    undefined,
+    `--version did not run: ${version.error}`,
+  );
+  assert.equal(version.status, 0, `--version failed: ${version.stderr}`);
+  assert.equal(
+    version.stdout.trim(),
+    `artifree-server ${manifest.version}`,
+    'The server does not report the manifest version.',
+  );
+  const profiles = TARGET_LAYOUT[manifest.target].buildProfiles;
+  if (profiles.length === 0) {
+    for (const args of ENTRY_POINTS)
+      expectEntryFailure(run, args, 2, 'knows no execution profile');
+    return [];
+  }
+  assert.deepEqual(
+    profiles,
+    ['react-v1'],
+    'No check exists for these profiles.',
+  );
+  assert.match(
+    manifest.version,
+    ROOT_VERSION,
+    'The version cannot name an execution tool root.',
+  );
+  const unknown = 'the execution profile identity is unknown';
+  expectEntryFailure(run, ENTRY_POINTS[1], 70, unknown);
+  expectEntryFailure(run, ENTRY_POINTS[2], 70, unknown);
+  // A relative input fails after the identity check and before anything else.
+  expectEntryFailure(
+    run,
+    ['execution', 'stub', REACT_IDENTITY, 'input'],
+    70,
+    'the input path is not absolute',
+  );
+  return profiles;
+}
+
 /**
  * Runs the whole installation check for `archive` (a path to a `.tar.gz` or
  * `.zip` built by package-release.mjs). Returns a short summary object.
@@ -245,7 +371,14 @@ export async function verifyRelease(archive) {
     const backupFile = join(scratch, 'backup.sqlite3');
     const restoredDir = join(scratch, 'restored');
 
-    const summary = {};
+    const summary = {
+      buildProfiles: verifyExecutionEntryPoints({
+        binary,
+        env,
+        cwd: workDir,
+        manifest,
+      }),
+    };
     const first = await serve();
     let artifactId;
     await withServer(first, async () => {
