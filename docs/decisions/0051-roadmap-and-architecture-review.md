@@ -214,6 +214,11 @@ not an implementation, and a later documentation change can reverse it.
   cannot show another user's presence, so the scope of rooms under sharing is
   left to S02s, and R15 exposes only the room that exists today.
 
+> **Note, 2026-11-16 ([0060](0060-access-model.md)).** S02s is that record.
+> It keeps Q4's default, specifies the declared shared space, and makes the
+> room of an artifact shared by its owner and members (0060 rule 12), which
+> R15 will expose once S02 implements it.
+
 ## What this record does not do
 
 It does not move code, change a contract, weaken a check or re-enable Firefox.
