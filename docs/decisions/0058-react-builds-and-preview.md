@@ -905,9 +905,9 @@ Roadmap: R03.
 >       real `/v1/background`.
 >   - Every text that says a release build knows no profile or refuses
 >     `react-v1` changes with R03fa: the README, the inventory, the
->     contract's descriptions (regenerated with `npm run
-generate:contracts`, with the version change the contract checks
->     ask for), the MCP guide and the CLI help. Each names x86_64 Linux as
+>     contract's descriptions (regenerated with
+>     `npm run generate:contracts`, with the version change the contract
+>     checks ask for), the MCP guide and the CLI help. Each names x86_64 Linux as
 >     the build that knows `react-v1`. They do not yet call any host
 >     supported.
 >   - Proven by:
@@ -918,13 +918,13 @@ generate:contracts`, with the version change the contract checks
 >       `--all-features` out of every release build line;
 >     - the enforcement job, whose admission and refusal cases now run the
 >       server's admission modes.
->       The job runs its existing matrix first. Since a root's path comes
->       from the package version, which both builds share, the job then
->       removes that root and its launcher profile with a new verb of its
->       test harness. It packages a fresh root for the server built without
->       the feature with rule 19's script alone. Through that release
->       binary's worker it runs one `react-v1` build of the template to a
->       published build, and one build that fails with diagnostics.
+>   - The enforcement job runs its existing matrix first. Since a root's
+>     path comes from the package version, which both builds share, the
+>     job then removes that root and its launcher profile with a new verb
+>     of its test harness. It packages a fresh root for the server built
+>     without the feature with rule 19's script alone. Through that release
+>     binary's worker it runs one `react-v1` build of the template to a
+>     published build, and one build that fails with diagnostics.
 > - **R03fb, the release archives and the supported host.**
 >   - The clean-install check of the `linux-x64` archive proves three
 >     things: its server serves `react-v1`'s entry points, it fails the
@@ -938,13 +938,21 @@ generate:contracts`, with the version change the contract checks
 >     - the second worker unit with its delegated group (0056 rule 8);
 >     - the readiness that `GET /v1/background` reports;
 >     - the removal of an old root after an upgrade.
->       It says that other hosts, the container image included, are not
->       supported for builds: there an enqueue is accepted or refused as
->       above, and no build runs.
+>   - The documentation says that other hosts are not supported for
+>     builds, but are not prevented from running them: the release build
+>     checks no distribution, so admission alone decides, and an x86_64
+>     Linux host that passes it can run a build, unsupported. The
+>     container image holds no root, so no execution worker is ready
+>     there, and a build ends as `execution_unavailable` (rule 20).
 >   - The README, the roadmap and this record's status line call the host
 >     supported only once R03fb lands.
->   - Proven by the archive checks, and by review of the documentation
->     against the script and the units it describes.
+>   - Proven by the archive checks, by review of the documentation, and by
+>     a clean install that follows the documentation on an Ubuntu 24.04
+>     x86_64 runner. It unpacks the `linux-x64` archive and prepares its
+>     root with rule 19's script. It starts the server and the documented
+>     execution worker unit with its delegated group, sees
+>     `GET /v1/background` report the worker ready, and publishes a
+>     `react-v1` build of the template that the `/b/` route serves.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),
@@ -1221,7 +1229,7 @@ stands.
 | R03ea   | The build in the Jobs tab: the build action, the head status and its diagnostics, and the build rows, after the R03e split note.                                                                                                                                                                                                                                                                                                               | Component tests, and Chromium and Firefox smoke for the request, the pending and failed states and the refusal.                                                                                                                                                                                                                                                            |
 | R03eb   | The build preview: the choice between files and build, and the "latest" notice, after R03ea.                                                                                                                                                                                                                                                                                                                                                   | Component tests, and Chromium and Firefox smoke for the choice, the notice and the refusal. No smoke host runs a profile, so a successful build and its `/b/` preview are proven by component tests and by the enforcement job at the HTTP level.                                                                                                                          |
 | R03fa   | Rule 5, after the R03f split note: the release build for x86_64 Linux compiles the launch and knows `react-v1` only, and admission runs the server's two modes in every build.                                                                                                                                                                                                                                                                 | Release-build tests and the boundary checker; the enforcement job's matrix on the server's admission modes, then one successful and one failing `react-v1` build through the release binary's worker.                                                                                                                                                                      |
-| R03fb   | Rule 21, after R03fa: the archives' entry points, the operator documentation and the supported-host statement.                                                                                                                                                                                                                                                                                                                                 | The archive checks; review of the documentation against the script and units it describes.                                                                                                                                                                                                                                                                                 |
+| R03fb   | Rule 21, after R03fa: the archives' entry points, the operator documentation and the supported-host statement.                                                                                                                                                                                                                                                                                                                                 | The archive checks; a documented clean install on Ubuntu 24.04 x86_64 that publishes a build; review of the documentation.                                                                                                                                                                                                                                                 |
 
 ### What a slice still has to settle
 
