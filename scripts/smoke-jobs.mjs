@@ -692,8 +692,13 @@ async function checkTypeCreate(world) {
     await expect(dialog).toContainText(
       'Every revision must keep index.html, src/main.tsx.',
     );
+    // The title enabled Create, whose opacity eases in; the contrast check
+    // waits for it to settle.
+    const create = dialog.getByRole('button', { name: 'Create' });
+    await expect(create).toBeEnabled();
+    await expect(create).toHaveCSS('opacity', '1');
     await world.checkAccessibility('type-create-dialog', tab);
-    await dialog.getByRole('button', { name: 'Create' }).click();
+    await create.click();
     await expect(dialog).toBeHidden({ timeout: WAIT_MS });
     assert.deepEqual(
       creates,
