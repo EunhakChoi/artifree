@@ -640,7 +640,7 @@ fn schema_eleven_upgrade_adds_assets_and_failed_upgrade_is_atomic() -> TestResul
     let f = Fixture::new()?;
     // A version 11 file has none of the tables of later steps: the asset tables
     // (12), the execution attempts (14), the builds and diagnostics (15), the
-    // readiness rows (16), the type columns (17) and the access tables (18).
+    // readiness rows (16), the type columns (17), the access tables (18) and the access change kinds (19).
     let sql = "DROP TABLE access_requests; DROP TABLE artifact_members; ALTER TABLE artifacts DROP COLUMN access_version; DROP TABLE asset_requests; DROP TABLE assets; DROP TABLE asset_spaces; DROP TABLE asset_ids; DROP TABLE execution_attempts; DROP TABLE build_files; DROP TABLE builds; DROP TABLE job_diagnostics; DROP TABLE execution_workers; ALTER TABLE artifacts DROP COLUMN type_release; ALTER TABLE artifacts DROP COLUMN type_id; PRAGMA user_version=11;";
     f.sql()?.execute_batch(sql)?;
     let reopened = SqliteStore::open(&database_in(f.dir.path()))?;

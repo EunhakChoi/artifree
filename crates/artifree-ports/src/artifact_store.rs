@@ -443,6 +443,58 @@ pub enum ChangeKind {
     /// the actor that owns the job. The artifact's source and metadata did not
     /// change.
     JobChanged,
+    /// The owner made a user who was not a member a member (decision 0060
+    /// rule 14). The row is in the feed of the owner, of every member, and of
+    /// that user. The artifact's source and metadata did not change.
+    AccessGranted,
+    /// The owner changed a member's role. The row is in the feed of the owner
+    /// and of every member.
+    AccessChanged,
+    /// The owner revoked a member. The row is in the feed of the owner, of
+    /// every remaining member, and of the revoked user, whose last row of the
+    /// artifact it is.
+    AccessRevoked,
+}
+
+impl ChangeKind {
+    /// Every kind, in declaration order.
+    const ALL: [Self; 11] = [
+        Self::Created,
+        Self::Revised,
+        Self::MetadataUpdated,
+        Self::Deleted,
+        Self::Recovered,
+        Self::Purged,
+        Self::DataChanged,
+        Self::JobChanged,
+        Self::AccessGranted,
+        Self::AccessChanged,
+        Self::AccessRevoked,
+    ];
+
+    /// The kind's stable snake-case name, the one a store records.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Revised => "revised",
+            Self::MetadataUpdated => "metadata_updated",
+            Self::Deleted => "deleted",
+            Self::Recovered => "recovered",
+            Self::Purged => "purged",
+            Self::DataChanged => "data_changed",
+            Self::JobChanged => "job_changed",
+            Self::AccessGranted => "access_granted",
+            Self::AccessChanged => "access_changed",
+            Self::AccessRevoked => "access_revoked",
+        }
+    }
+
+    /// The kind that [`ChangeKind::as_str`] names `name`, if any.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == name)
+    }
 }
 
 /// One commit as recorded in the change feed.

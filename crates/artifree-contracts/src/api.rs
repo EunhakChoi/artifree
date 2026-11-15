@@ -2159,6 +2159,17 @@ pub enum ChangeKind {
     /// no state: read the job again with `GET /v1/jobs/{id}`. The artifact's
     /// source and metadata did not change.
     JobChanged,
+    /// The artifact's owner made a user a member (decision 0060 rule 14).
+    /// The owner, every member and that user receive it; read the artifact
+    /// again. The source and metadata did not change.
+    AccessGranted,
+    /// The owner changed a member's role. The owner and every member receive
+    /// it; read the artifact again.
+    AccessChanged,
+    /// The owner revoked a member. The owner, every remaining member and the
+    /// revoked user receive it; for the revoked user it is the last change of
+    /// the artifact, which it no longer reaches (`not_found`).
+    AccessRevoked,
 }
 
 /// Summary information for an access token.

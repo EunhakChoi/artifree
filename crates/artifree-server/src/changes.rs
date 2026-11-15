@@ -367,6 +367,9 @@ impl Producer {
                 ChangeKind::Purged => WireKind::Purged,
                 ChangeKind::DataChanged => WireKind::DataChanged,
                 ChangeKind::JobChanged => WireKind::JobChanged,
+                ChangeKind::AccessGranted => WireKind::AccessGranted,
+                ChangeKind::AccessChanged => WireKind::AccessChanged,
+                ChangeKind::AccessRevoked => WireKind::AccessRevoked,
                 // A kind added later is a revision to clients of this
                 // contract: they read the artifact again.
                 _ => WireKind::Revised,
