@@ -41,7 +41,8 @@ export function runCli(packageDir, env, args) {
 
 /**
  * Creates an artifact, saves a second revision, and fetches its preview from
- * a server that is already running and empty. `cliEnv` must name the server
+ * a server that is already running and empty; then lists the type catalog
+ * and creates a `react` artifact from its starter. `cliEnv` must name the server
  * and token. Returns the artifact id and saved revision (2).
  */
 export async function exerciseNewService({
@@ -99,6 +100,27 @@ export async function exerciseNewService({
   assert.equal(frame.status, 200);
   assert.match(await frame.text(), /<p>saved<\/p>/);
   assert.match(frame.headers.get('content-security-policy') ?? '', /sandbox/);
+
+  // The packaged server holds the type catalog, and the packaged CLI creates
+  // a react artifact from its starter (decision 0059, T01aa).
+  const types = await runCli(packageDir, cliEnv, ['type', 'list']);
+  assert.deepEqual(
+    types.types.map(({ name }) => name),
+    ['react-1'],
+  );
+  const typed = await runCli(packageDir, cliEnv, [
+    'artifact',
+    'create',
+    '--title',
+    'Install check (react)',
+    '--type',
+    'react',
+  ]);
+  assert.deepEqual(typed.artifact.type, { id: 'react', release: 1 });
+  assert.deepEqual(
+    typed.revision.files.map(({ path }) => path),
+    ['index.html', 'src/app.css', 'src/main.tsx'],
+  );
   return {
     artifactId,
     revision: saved.revision.revision,

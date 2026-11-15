@@ -199,6 +199,7 @@ const changeEvent = (sequence) =>
     change: 'revised',
     revision: sequence,
     metadata_revision: 1,
+    type: null,
     committed_at_ms: 1,
   })}\n\n`;
 

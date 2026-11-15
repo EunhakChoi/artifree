@@ -60,6 +60,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::schema;
+use artifree_domain::artifact_type::{ArtifactType, TypeRelease};
 use artifree_domain::change::{ChangeSequence, FeedId};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, UnixMillis};
 use artifree_domain::job::JobId;
@@ -250,8 +251,8 @@ impl ArtifactStore for SqliteStore {
             transaction
                 .execute(
                     "INSERT INTO artifacts (id, owner, kind, title, pinned, current_revision,
-                         metadata_revision, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?7)",
+                         metadata_revision, created_at, updated_at, type_id, type_release)
+                     VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?7, ?8, ?9)",
                     params![
                         id.as_str(),
                         request.request.actor.as_str(),
@@ -259,7 +260,9 @@ impl ArtifactStore for SqliteStore {
                         request.title.as_str(),
                         sql_revision(revision)?,
                         sql_metadata(metadata)?,
-                        now.0
+                        now.0,
+                        request.artifact_type.map(|pinned| pinned.id.as_str()),
+                        request.artifact_type.map(|pinned| pinned.release.get())
                     ],
                 )
                 .map_err(unavailable)?;
@@ -462,7 +465,7 @@ impl ArtifactStore for SqliteStore {
         })
     }
 
-    fn replay_create(
+    fn replay_receipt(
         &self,
         request: RequestIdentity<'_>,
     ) -> Result<Option<CommitReceipt>, StoreError> {
@@ -744,8 +747,11 @@ impl ArtifactStore for SqliteStore {
         let mut statement = snapshot
             .prepare(
                 "SELECT c.actor_seq, c.artifact_id, c.kind, c.revision, c.metadata_revision,
-                     c.data_version, c.job_id, c.committed_at
+                     c.data_version, c.job_id, c.committed_at, a.type_id, a.type_release
                  FROM changes c
+                 -- A change row may outlive its artifact row in a file
+                 -- edited elsewhere; it is still sent, untyped.
+                 LEFT JOIN artifacts a ON a.id = c.artifact_id
                  WHERE c.actor = ?2 AND c.actor_seq > ?1
                  ORDER BY c.actor_seq LIMIT ?3",
             )
@@ -767,14 +773,27 @@ impl ArtifactStore for SqliteStore {
                         row.get::<_, Option<i64>>(5)?,
                         row.get::<_, Option<String>>(6)?,
                         row.get::<_, i64>(7)?,
+                        (
+                            row.get::<_, Option<String>>(8)?,
+                            row.get::<_, Option<i64>>(9)?,
+                        ),
                     ))
                 },
             )
             .map_err(unavailable)?;
         let mut changes = Vec::new();
         for row in rows {
-            let (sequence, artifact, kind, revision, metadata, data_version, job_id, committed_at) =
-                row.map_err(unavailable)?;
+            let (
+                sequence,
+                artifact,
+                kind,
+                revision,
+                metadata,
+                data_version,
+                job_id,
+                committed_at,
+                (type_id, type_release),
+            ) = row.map_err(unavailable)?;
             changes.push(ChangeRecord {
                 sequence: stored_sequence(sequence)?,
                 artifact: artifact.parse().map_err(corrupt)?,
@@ -797,6 +816,7 @@ impl ArtifactStore for SqliteStore {
                 job_id: job_id
                     .map(|id| id.parse::<JobId>().map_err(corrupt))
                     .transpose()?,
+                artifact_type: stored_type(type_id.as_deref(), type_release)?,
                 committed_at: UnixMillis(committed_at),
             });
         }
@@ -1400,7 +1420,7 @@ fn snapshot(
     connection
         .query_row(
             "SELECT a.id, a.owner, a.kind, m.title, m.pinned, r.revision, m.metadata_revision,
-                 a.created_at, r.created_at, m.deleted_at
+                 a.created_at, r.created_at, m.deleted_at, a.type_id, a.type_release
              FROM artifacts a
              JOIN revisions r ON r.artifact_id = a.id AND r.revision = ?2
              JOIN metadata_revisions m ON m.artifact_id = a.id AND m.metadata_revision = ?3
@@ -1425,7 +1445,7 @@ fn artifact_record(
     connection
         .query_row(
             "SELECT id, owner, kind, title, pinned, current_revision, metadata_revision,
-                 created_at, updated_at, deleted_at
+                 created_at, updated_at, deleted_at, type_id, type_release
              FROM artifacts WHERE id = ?1 AND purged_at IS NULL",
             [id.as_str()],
             RawArtifact::from_row,
@@ -1441,7 +1461,7 @@ fn artifact_record(
 /// `?7` whether to list the trash. `lower` folds ASCII letters only.
 const LIST_BY_UPDATE: &str = "
 SELECT id, owner, kind, title, pinned, current_revision, metadata_revision, created_at, updated_at,
-    deleted_at
+    deleted_at, type_id, type_release
 FROM artifacts
 WHERE owner = ?1
   AND purged_at IS NULL
@@ -1455,7 +1475,7 @@ LIMIT ?6";
 /// As [`LIST_BY_UPDATE`], by creation time.
 const LIST_BY_CREATION: &str = "
 SELECT id, owner, kind, title, pinned, current_revision, metadata_revision, created_at, updated_at,
-    deleted_at
+    deleted_at, type_id, type_release
 FROM artifacts
 WHERE owner = ?1
   AND purged_at IS NULL
@@ -1564,6 +1584,8 @@ struct RawArtifact {
     created_at: i64,
     updated_at: i64,
     deleted_at: Option<i64>,
+    type_id: Option<String>,
+    type_release: Option<i64>,
 }
 
 impl RawArtifact {
@@ -1579,16 +1601,20 @@ impl RawArtifact {
             created_at: row.get(7)?,
             updated_at: row.get(8)?,
             deleted_at: row.get(9)?,
+            type_id: row.get(10)?,
+            type_release: row.get(11)?,
         })
     }
 
     fn into_record(self) -> Result<ArtifactRecord, StoreError> {
         let kind: ArtifactKind = self.kind.parse().map_err(corrupt)?;
         let title: Title = self.title.parse().map_err(corrupt)?;
+        let artifact_type = stored_type(self.type_id.as_deref(), self.type_release)?;
         Ok(ArtifactRecord {
             id: self.id.parse().map_err(corrupt)?,
             owner: self.owner.parse().map_err(corrupt)?,
             kind,
+            artifact_type,
             title,
             pinned: self.pinned,
             current_revision: stored_revision(self.current_revision)?,
@@ -1597,6 +1623,22 @@ impl RawArtifact {
             created_at: UnixMillis(self.created_at),
             updated_at: UnixMillis(self.updated_at),
         })
+    }
+}
+
+/// An artifact's stored type. The schema keeps the two columns both null or
+/// both set (decision 0059 rule 15); the store checks that again as it reads
+/// them.
+fn stored_type(id: Option<&str>, release: Option<i64>) -> Result<Option<ArtifactType>, StoreError> {
+    match (id, release) {
+        (None, None) => Ok(None),
+        (Some(id), Some(release)) => Ok(Some(ArtifactType {
+            id: id.parse().map_err(corrupt)?,
+            release: u32::try_from(release)
+                .map_err(corrupt)
+                .and_then(|release| TypeRelease::new(release).map_err(corrupt))?,
+        })),
+        _ => Err(corrupt("an artifact has only half of its type")),
     }
 }
 
@@ -1733,6 +1775,7 @@ mod tests {
                     fingerprint: RequestFingerprint([1; 32]),
                 },
                 kind: ArtifactKind::App,
+                artifact_type: None,
                 title: &title,
                 package: &package,
                 source: None,

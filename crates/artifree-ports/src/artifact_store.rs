@@ -8,6 +8,7 @@
 
 use std::fmt;
 
+use artifree_domain::artifact_type::ArtifactType;
 use artifree_domain::change::{ChangeSequence, FeedId};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, UnixMillis};
 use artifree_domain::job::JobId;
@@ -23,6 +24,9 @@ pub struct ArtifactRecord {
     pub owner: ActorId,
     /// Source model family.
     pub kind: ArtifactKind,
+    /// The type and release the artifact was made from, fixed at creation
+    /// (decision 0059 rule 6), or `None` for an untyped artifact.
+    pub artifact_type: Option<ArtifactType>,
     /// Display title.
     pub title: Title,
     /// Whether the owner pinned the artifact.
@@ -87,6 +91,9 @@ pub struct NewArtifact<'a> {
     pub request: RequestIdentity<'a>,
     /// Source model family.
     pub kind: ArtifactKind,
+    /// The type and release recorded for good (decision 0059 rule 5), or
+    /// `None` for an untyped artifact.
+    pub artifact_type: Option<&'a ArtifactType>,
     /// Display title.
     pub title: &'a Title,
     /// Initial source.
@@ -459,6 +466,9 @@ pub struct ChangeRecord {
     /// The job that a [`ChangeKind::JobChanged`] row names: present exactly for
     /// that kind (decision 0055, rule 8).
     pub job_id: Option<JobId>,
+    /// The type and release of the changed artifact, which never change, or
+    /// `None` for an untyped artifact (decision 0059 rule 8).
+    pub artifact_type: Option<ArtifactType>,
     /// Commit time.
     pub committed_at: UnixMillis,
 }
@@ -615,14 +625,16 @@ pub trait ArtifactStore {
     /// [`StoreError::RequestKeyReused`], or [`StoreError::Unavailable`].
     fn update_metadata(&self, request: MetadataUpdate<'_>) -> Result<MetadataReceipt, StoreError>;
 
-    /// The receipt of an earlier create with this retry identity, without
-    /// writing anything; `None` when there is none or its artifact was purged.
-    /// It lets a copy's retry replay although its source is gone.
+    /// The receipt of an earlier create or revision commit with this retry
+    /// identity, without writing anything; `None` when there is none or its
+    /// artifact was purged. It lets a copy's retry replay although its source
+    /// is gone, and a retry replay before a check that would refuse a new
+    /// request (decision 0059 rule 7).
     ///
     /// # Errors
     ///
     /// [`StoreError::Unavailable`].
-    fn replay_create(
+    fn replay_receipt(
         &self,
         request: RequestIdentity<'_>,
     ) -> Result<Option<CommitReceipt>, StoreError>;

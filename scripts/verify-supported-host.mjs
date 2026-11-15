@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
-import { copyFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { runCli } from './lib/service-check.mjs';
@@ -12,20 +11,15 @@ import { runCli } from './lib/service-check.mjs';
  * unpacked, its root is packaged with `tools/package-root.sh`, and the server
  * and the execution worker run as the two documented systemd units. This
  * script then talks to the running server from outside, as an operator
- * would: `GET /v1/background` reports an execution worker ready, a revision
- * of the bundler template is built with `react-v1` through the packaged CLI,
+ * would: `GET /v1/background` reports an execution worker ready, an
+ * artifact is created from the `react` type's starter (decision 0059 rule 4)
+ * and its revision 1 is built with `react-v1` through the packaged CLI,
  * and the build preview on the `/b/` route serves the bundle the build
  * published. Node built-ins only: it runs from a sparse checkout without
  * `npm install`. Throws on the first failure.
  */
 
-/** Files of the bundler template and their paths in the artifact. */
-const TEMPLATE = [
-  ['index.html', 'index.html'],
-  ['main.tsx', 'src/main.tsx'],
-  ['app.css', 'src/app.css'],
-];
-/** The files a build of the template publishes (decision 0058 rule 8). */
+/** The files a build of the starter publishes (decision 0058 rule 8). */
 const PUBLISHED = ['app.css', 'app.js', 'index.html'];
 
 /**
@@ -58,13 +52,12 @@ async function main() {
       package: { type: 'string' },
       server: { type: 'string', default: 'http://127.0.0.1:7410' },
       'token-file': { type: 'string' },
-      template: { type: 'string' },
     },
     strict: true,
   });
   assert.ok(
-    values.package && values['token-file'] && values.template,
-    'Usage: node scripts/verify-supported-host.mjs --package <dir> --token-file <file> --template <dir> [--server <url>]',
+    values.package && values['token-file'],
+    'Usage: node scripts/verify-supported-host.mjs --package <dir> --token-file <file> [--server <url>]',
   );
   const packageDir = resolve(values.package);
   const server = values.server;
@@ -91,96 +84,86 @@ async function main() {
     return background.execution?.ready === true ? true : undefined;
   });
 
-  const scratch = await mkdtemp(join(tmpdir(), 'artifree-host-'));
-  try {
-    const site = join(scratch, 'site');
-    await mkdir(join(site, 'src'), { recursive: true });
-    for (const [from, to] of TEMPLATE)
-      await copyFile(
-        join(resolve(values.template), from),
-        join(site, ...to.split('/')),
-      );
-    const created = await runCli(packageDir, cliEnv, [
-      'artifact',
-      'create',
-      '--title',
-      'Supported host',
-      '--dir',
-      site,
-    ]);
-    const artifactId = created.artifact.id;
-    const queued = await runCli(packageDir, cliEnv, [
+  // No files: revision 1 is the type's starter (decision 0059 rule 5).
+  const created = await runCli(packageDir, cliEnv, [
+    'artifact',
+    'create',
+    '--title',
+    'Supported host',
+    '--type',
+    'react',
+  ]);
+  assert.deepEqual(created.artifact.type, { id: 'react', release: 1 });
+  const artifactId = created.artifact.id;
+  const queued = await runCli(packageDir, cliEnv, [
+    'job',
+    'enqueue',
+    artifactId,
+    '--revision',
+    '1',
+    '--build',
+    'react-v1',
+    '--idempotency-key',
+    `supported-host-${artifactId}`,
+  ]);
+  const job = await until('The build ending', 300_000, async () => {
+    const shown = await runCli(packageDir, cliEnv, [
       'job',
-      'enqueue',
-      artifactId,
-      '--revision',
-      '1',
-      '--build',
-      'react-v1',
-      '--idempotency-key',
-      `supported-host-${artifactId}`,
+      'show',
+      queued.job.id,
     ]);
-    const job = await until('The build ending', 300_000, async () => {
-      const shown = await runCli(packageDir, cliEnv, [
-        'job',
-        'show',
-        queued.job.id,
-      ]);
-      return ['succeeded', 'failed', 'cancelled'].includes(shown.state)
-        ? shown
-        : undefined;
-    });
-    assert.equal(
-      job.state,
-      'succeeded',
-      `The build did not succeed: ${JSON.stringify(job)}`,
-    );
-    assert.equal(job.build?.file_count, PUBLISHED.length);
+    return ['succeeded', 'failed', 'cancelled'].includes(shown.state)
+      ? shown
+      : undefined;
+  });
+  assert.equal(
+    job.state,
+    'succeeded',
+    `The build did not succeed: ${JSON.stringify(job)}`,
+  );
+  assert.equal(job.build?.file_count, PUBLISHED.length);
 
-    const status = await runCli(packageDir, cliEnv, [
-      'artifact',
-      'build-status',
-      artifactId,
-      '--build',
-      'react-v1',
-    ]);
-    assert.equal(status.status, 'built', JSON.stringify(status));
-    assert.equal(status.latest_build_revision, 1);
+  const status = await runCli(packageDir, cliEnv, [
+    'artifact',
+    'build-status',
+    artifactId,
+    '--build',
+    'react-v1',
+  ]);
+  assert.equal(status.status, 'built', JSON.stringify(status));
+  assert.equal(status.latest_build_revision, 1);
 
-    const preview = await runCli(packageDir, cliEnv, [
-      'artifact',
-      'preview',
-      artifactId,
-      '--build',
-      'react-v1',
-    ]);
-    const entry = new URL(preview.url);
-    assert.match(entry.pathname, /^\/b\/[^/]+\/$/, preview.url);
-    const page = await fetch(entry);
-    assert.equal(page.status, 200, 'the build entry');
-    assert.match(await page.text(), /<script type="module" src="\.\/app\.js">/);
-    const script = await fetch(new URL('app.js', entry));
-    assert.equal(script.status, 200, 'the bundle');
-    const bundle = await script.text();
-    // The template's label and React's own code both reach the bundle.
-    assert.match(bundle, /Clicks/);
-    assert.match(bundle, /createRoot|react-dom/);
-    for (const name of PUBLISHED) {
-      const file = await fetch(new URL(name, entry));
-      assert.equal(file.status, 200, `the build's ${name}`);
-    }
-    console.log(
-      JSON.stringify({
-        artifact: artifactId,
-        job: job.id,
-        files: job.build.file_count,
-        bytes: job.build.byte_count,
-        preview: entry.pathname.replace(/[^/]+\/$/, '<ticket>/'),
-      }),
-    );
-  } finally {
-    await rm(scratch, { recursive: true, force: true });
+  const preview = await runCli(packageDir, cliEnv, [
+    'artifact',
+    'preview',
+    artifactId,
+    '--build',
+    'react-v1',
+  ]);
+  const entry = new URL(preview.url);
+  assert.match(entry.pathname, /^\/b\/[^/]+\/$/, preview.url);
+  const page = await fetch(entry);
+  assert.equal(page.status, 200, 'the build entry');
+  assert.match(await page.text(), /<script type="module" src="\.\/app\.js">/);
+  const script = await fetch(new URL('app.js', entry));
+  assert.equal(script.status, 200, 'the bundle');
+  const bundle = await script.text();
+  // The template's label and React's own code both reach the bundle.
+  assert.match(bundle, /Clicks/);
+  assert.match(bundle, /createRoot|react-dom/);
+  for (const name of PUBLISHED) {
+    const file = await fetch(new URL(name, entry));
+    assert.equal(file.status, 200, `the build's ${name}`);
   }
+  console.log(
+    JSON.stringify({
+      artifact: artifactId,
+      job: job.id,
+      files: job.build.file_count,
+      bytes: job.build.byte_count,
+      preview: entry.pathname.replace(/[^/]+\/$/, '<ticket>/'),
+    }),
+  );
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) await main();

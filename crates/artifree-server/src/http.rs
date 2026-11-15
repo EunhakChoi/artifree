@@ -31,10 +31,11 @@ use artifree_contracts::api::{
     RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionList,
     RoomEventReceipt, RoomEventRequest, RoomHeartbeatRequest, RoomJoinRequest, RoomSnapshot,
     RuntimeConnection, RuntimeGrant, SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest,
-    StageHandoffRequest, UnreferencedContent, UpdateArtifactRequest, UpdateArtifactResponse,
-    UpdateDataRequest,
+    StageHandoffRequest, TypeDescriptor, TypeList, TypeReference, UnreferencedContent,
+    UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest,
 };
 use artifree_core::artifacts::{ArtifactError, ArtifactService};
+use artifree_core::catalog::Catalog;
 use artifree_core::jobs::{Clock, SystemClock};
 use artifree_core::parts::{Boundary, ByteRange};
 use artifree_domain::change::ChangeCursor;
@@ -257,11 +258,12 @@ impl AppState {
             return Err("change streams per actor must be at least 1".into());
         }
         let started_at = crate::tokens::iso_now();
+        let catalog = Catalog::builtin().map_err(|error| error.to_string())?;
         Ok(Self {
             shared: Arc::new(Shared {
                 #[cfg(test)]
                 outbox_binding_gate: None,
-                artifacts: ArtifactService::new(store),
+                artifacts: ArtifactService::new(store).with_catalog(catalog),
                 token_store: Arc::new(token_store),
                 token,
                 started_at,
@@ -381,6 +383,11 @@ impl AppState {
 
     pub(crate) fn handoffs(&self) -> &Handoffs {
         &self.shared.handoffs
+    }
+
+    /// The built-in type catalog (decision 0059 rule 1).
+    pub(crate) fn catalog(&self) -> &Catalog {
+        self.shared.artifacts.catalog()
     }
 
     pub(crate) fn settings(&self) -> &Settings {
@@ -572,6 +579,18 @@ fn job_routes() -> Router<AppState> {
         )
 }
 
+/// Routes of the built-in type catalog (decision 0059 rule 11).
+fn type_routes() -> Router<AppState> {
+    Router::new()
+        .route("/v1/types", get(list_types))
+        .route("/v1/types/{id}", get(show_type))
+        .route("/v1/types/{id}/releases/{release}", get(show_type_release))
+        .route(
+            "/v1/types/{id}/releases/{release}/references/{*path}",
+            get(read_type_reference),
+        )
+}
+
 /// Routes of HTTP API v1 and the MCP endpoint mounted behind authentication and limits.
 fn api_v1_routes(state: &AppState) -> Router<AppState> {
     Router::new()
@@ -605,6 +624,7 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
         .route("/v1/artifacts/{id}/data/members", get(read_data_members))
         .route("/v1/data-outbox/binding", get(read_outbox_binding))
         .route("/v1/background", get(show_background))
+        .merge(type_routes())
         .route(
             "/v1/artifacts/{id}/revisions",
             get(list_revisions).post(save_revision),
@@ -1706,6 +1726,48 @@ async fn show_background(
     Authenticated(_): Authenticated,
 ) -> Json<BackgroundStatus> {
     Json(operations::background(&state).await)
+}
+
+/// The current release of each catalog type (decision 0059 rule 11). Any
+/// accepted token may read the catalog: it describes the server.
+async fn list_types(
+    State(state): State<AppState>,
+    Authenticated(_): Authenticated,
+) -> Json<TypeList> {
+    Json(operations::list_types(&state))
+}
+
+/// The current release of one type, with its guide.
+async fn show_type(
+    State(state): State<AppState>,
+    Authenticated(_): Authenticated,
+    path: Result<Path<String>, PathRejection>,
+) -> Result<Json<TypeDescriptor>, ApiError> {
+    let Path(id) = path?;
+    Ok(Json(operations::show_type(&state, &id, None)?))
+}
+
+/// One release of a type, with its guide, so that an older artifact's rules
+/// stay readable.
+async fn show_type_release(
+    State(state): State<AppState>,
+    Authenticated(_): Authenticated,
+    path: Result<Path<(String, String)>, PathRejection>,
+) -> Result<Json<TypeDescriptor>, ApiError> {
+    let Path((id, release)) = path?;
+    Ok(Json(operations::show_type(&state, &id, Some(&release))?))
+}
+
+/// One reference file of a release.
+async fn read_type_reference(
+    State(state): State<AppState>,
+    Authenticated(_): Authenticated,
+    path: Result<Path<(String, String, String)>, PathRejection>,
+) -> Result<Json<TypeReference>, ApiError> {
+    let Path((id, release, reference)) = path?;
+    Ok(Json(operations::type_reference(
+        &state, &id, &release, &reference,
+    )?))
 }
 
 /// Asks to stop a job. The body must be `{}`.

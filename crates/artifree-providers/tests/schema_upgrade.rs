@@ -74,6 +74,7 @@ fn every_released_version_upgrades_to_the_fresh_schema_and_keeps_its_data() -> T
                 fingerprint: RequestFingerprint(OLD_FINGERPRINT),
             },
             kind: ArtifactKind::App,
+            artifact_type: None,
             title: &parsed("Old"),
             package: &common::package(&[("index.html", OLD_BODY)]),
             source: None,

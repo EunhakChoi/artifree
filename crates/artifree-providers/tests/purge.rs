@@ -108,6 +108,7 @@ impl Fixture {
                 fingerprint: RequestFingerprint(digest("copy")),
             },
             kind: ArtifactKind::App,
+            artifact_type: None,
             title: &parsed("Copy"),
             package: &package(&[("index.html", SECOND), ("style.css", "h1{}")]),
             source: Some(CopySource {
@@ -588,7 +589,7 @@ fn a_copy_keeps_its_history_and_bytes_when_the_source_is_purged() -> TestResult 
     // The copy's request still replays, although its source is gone.
     let replay = fixture
         .store
-        .replay_create(RequestIdentity {
+        .replay_receipt(RequestIdentity {
             actor: &fixture.owner,
             key: &key("copy"),
             fingerprint: RequestFingerprint(digest("copy")),
@@ -606,11 +607,11 @@ fn a_copy_keeps_its_history_and_bytes_when_the_source_is_purged() -> TestResult 
 }
 
 #[test]
-fn replay_create_answers_only_for_a_create_whose_artifact_exists() -> TestResult {
+fn replay_receipt_answers_only_for_a_create_whose_artifact_exists() -> TestResult {
     let fixture = Fixture::new()?;
     let created = fixture.artifact()?;
     let replay = |request_key: &RequestKey, fingerprint| {
-        fixture.store.replay_create(RequestIdentity {
+        fixture.store.replay_receipt(RequestIdentity {
             actor: &fixture.owner,
             key: request_key,
             fingerprint: RequestFingerprint(fingerprint),
@@ -630,7 +631,7 @@ fn replay_create_answers_only_for_a_create_whose_artifact_exists() -> TestResult
         "another fingerprint"
     );
     // Another actor's key space is separate.
-    let stranger = fixture.store.replay_create(RequestIdentity {
+    let stranger = fixture.store.replay_receipt(RequestIdentity {
         actor: &actor("someone-else"),
         key: &key("create"),
         fingerprint: RequestFingerprint(digest(FIRST)),

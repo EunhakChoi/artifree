@@ -377,6 +377,10 @@ impl Producer {
             // kind with one (a CHECK of the table), so a copy of the field
             // cannot put a data version on another kind.
             data_version: record.data_version.map(|version| version.0),
+            artifact_type: record
+                .artifact_type
+                .as_ref()
+                .map(crate::operations::type_ref),
             // Present exactly for `job_changed`: the store records no other kind
             // with a job (a CHECK of the table). The change carries no job state
             // (decision 0055, rule 8).

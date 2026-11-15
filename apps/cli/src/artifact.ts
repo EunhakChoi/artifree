@@ -32,6 +32,7 @@ export const ARTIFACT_HELP = `Usage:
   artifree artifact show <id>
   artifree artifact history <id>
   artifree artifact create --title <title> (--dir <dir> | --file <path>...)
+  artifree artifact create --title <title> --type <id> [--dir <dir> | --file <path>...]
   artifree artifact save <id> --base <revision>
       (--dir <dir> | [--put <package-path>=<local-path>]... [--delete <package-path>]...)
   artifree artifact edit <id> --base <revision>
@@ -90,6 +91,15 @@ read first and the request is sent as given. To retry an edit whose answer was
 lost after the artifact moved to the trash, repeat the same command with an
 --expect for every path and the same --idempotency-key: the server then
 returns the original result. Without --expect the retry fails with not_found.
+create --type <id> creates an artifact of a built-in type (artifree type
+list). With neither --dir nor --file its revision 1 is the type's starter;
+with one of them, those files are the whole of revision 1 and must hold the
+type's required paths, or the create is refused with 422 type_requirements
+and one "missing <path>" line per path on stderr. An unknown type is 422
+type_unknown. The artifact keeps its type and release; every save, edit and
+restore must keep the required paths too. An artifact whose release this
+server does not know refuses new commits and copies with 409
+type_release_unknown.
 restore commits the files of an earlier revision, exactly as they were, as
 the next revision; --base names the current revision, as for save.
 duplicate creates an artifact whose revision 1 has the files of that
@@ -337,6 +347,7 @@ async function create(args: string[]): Promise<void> {
     options: {
       ...connectionOptions,
       title: { type: 'string' },
+      type: { type: 'string' },
       dir: { type: 'string' },
       file: { type: 'string', multiple: true },
       'idempotency-key': { type: 'string' },
@@ -347,21 +358,35 @@ async function create(args: string[]): Promise<void> {
   single(positionals, []);
   if (values.title === undefined)
     throw new UsageError('create requires --title <title>.');
-  if ((values.dir === undefined) === (values.file === undefined))
-    throw new UsageError('create requires either --dir or --file, not both.');
-  const files =
-    values.dir === undefined
-      ? await Promise.all((values.file ?? []).map(readNamedFile))
-      : await readDirectory(values.dir);
+  if (values.type === '')
+    throw new UsageError('--type requires a type id; see artifree type list.');
+  if (values.dir !== undefined && values.file !== undefined)
+    throw new UsageError('create takes --dir or --file, not both.');
+  // With a type, no files means the type's starter (decision 0059 rule 13).
+  if (
+    values.type === undefined &&
+    values.dir === undefined &&
+    values.file === undefined
+  )
+    throw new UsageError('create requires either --dir or --file, or --type.');
+  const read =
+    values.dir !== undefined
+      ? await readDirectory(values.dir)
+      : values.file !== undefined
+        ? await Promise.all(values.file.map(readNamedFile))
+        : undefined;
+  const files = read?.map((file) => encodeFile(file.path, file.bytes));
   const client = await connect(values);
   const title = values.title;
+  const type = values.type;
   const result = await mutate(
     values['idempotency-key'] ?? newIdempotencyKey(),
     (idempotencyKey) =>
       client.createArtifact(
         {
           title,
-          files: files.map((file) => encodeFile(file.path, file.bytes)),
+          ...(type === undefined ? {} : { type }),
+          ...(files === undefined ? {} : { files }),
         },
         { idempotencyKey },
       ),

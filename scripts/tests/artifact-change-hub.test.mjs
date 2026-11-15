@@ -78,6 +78,7 @@ function changeEvent(artifactId, kind, extra = {}) {
       artifact_id: artifactId,
       change: kind,
       cursor: CURSOR,
+      type: null,
       committed_at_ms: 1,
       revision: 2,
       metadata_revision: 1,

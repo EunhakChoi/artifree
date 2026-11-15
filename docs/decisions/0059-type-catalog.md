@@ -1,6 +1,10 @@
 # 0059: The type catalog
 
-Date: 2026-11-15. Status: **proposed; nothing of it is implemented**.
+Date: 2026-11-15. Status: **accepted; T01aa (rules 1 to 9, 11, 13 and
+15: the catalog, the `react` type, the release lock, schema 17, the core's
+create and commit checks, the HTTP routes and the CLI, contract 0.32.0) is
+implemented. T01ab (rule 12, MCP), T01b (rule 14, the web) and rule 10
+(owned files) are not.**
 Roadmap: T01a, T01b.
 
 > Builds on [0003](0003-local-html-artifact-slice.md) (packages and

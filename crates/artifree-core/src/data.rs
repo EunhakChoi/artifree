@@ -354,6 +354,7 @@ mod tests {
                     id: id.clone(),
                     owner: owner.clone(),
                     kind: ArtifactKind::App,
+                    artifact_type: None,
                     title: "Demo".parse().unwrap_or_else(|error| panic!("{error}")),
                     pinned: false,
                     current_revision: SourceRevision(1),
@@ -415,7 +416,7 @@ mod tests {
         fn update_metadata(&self, _: MetadataUpdate<'_>) -> Result<MetadataReceipt, StoreError> {
             Err(StoreError::Unavailable("unused".into()))
         }
-        fn replay_create(
+        fn replay_receipt(
             &self,
             _: RequestIdentity<'_>,
         ) -> Result<Option<CommitReceipt>, StoreError> {

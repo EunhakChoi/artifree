@@ -114,6 +114,7 @@ function dataChanged(artifactId, dataVersion, revision = HEAD_REVISION) {
       artifact_id: artifactId,
       change: 'data_changed',
       cursor: CURSOR,
+      type: null,
       committed_at_ms: 1,
       revision,
       metadata_revision: 1,

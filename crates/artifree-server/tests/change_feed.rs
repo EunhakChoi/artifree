@@ -333,6 +333,7 @@ async fn a_stream_starts_at_the_head_and_sends_each_commit_once() -> TestResult 
             "change": "created",
             "revision": 1,
             "metadata_revision": 1,
+            "type": null,
             "committed_at_ms": created["revision"]["created_at_ms"],
         })
     );
@@ -665,6 +666,7 @@ async fn a_data_write_over_http_or_mcp_reaches_the_stream_at_once() -> TestResul
             "change": "data_changed",
             "revision": 2,
             "metadata_revision": 1,
+            "type": null,
             "data_version": 1,
         }),
         "the revisions are the artifact's, and the data version is its own"

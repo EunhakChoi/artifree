@@ -265,9 +265,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          sparse-checkout: |
-            scripts
-            crates/artifree-providers/src/execution/attempt/bundler_template
+          sparse-checkout: scripts
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22.12.0'
@@ -276,7 +274,7 @@ jobs:
           name: release-linux-x64
           path: release
       - name: Install as the operator documentation says and publish a build
-        run: scripts/verify-supported-host.sh release crates/artifree-providers/src/execution/attempt/bundler_template
+        run: scripts/verify-supported-host.sh release
       - name: Show the units' journal
         if: ${{ failure() }}
         run: sudo journalctl --no-pager -u artifree.service -u artifree-execution.service

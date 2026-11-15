@@ -42,6 +42,7 @@ function changeEvent(change, sequence, fields = {}) {
     change,
     revision: 1,
     metadata_revision: 1,
+    type: null,
     committed_at_ms: 1,
     ...fields,
   };

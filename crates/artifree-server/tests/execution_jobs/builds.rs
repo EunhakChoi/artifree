@@ -35,14 +35,11 @@ const OWNER_TOKEN: &str = "00000000000000000000000000000000000000000000000000000
 /// The environment variable that names the build case.
 const BUILD_CASE: &str = "ARTIFREE_BUILD_CASE";
 /// The template's entry document, which loads the bundle as rule 7 requires.
-const INDEX: &[u8] =
-    include_bytes!("../../../artifree-providers/src/execution/attempt/bundler_template/index.html");
+const INDEX: &[u8] = include_bytes!("../../../../types/react/1/starter/index.html");
 /// The template's entry module.
-const MAIN: &[u8] =
-    include_bytes!("../../../artifree-providers/src/execution/attempt/bundler_template/main.tsx");
+const MAIN: &[u8] = include_bytes!("../../../../types/react/1/starter/src/main.tsx");
 /// The template's style sheet.
-const STYLE: &[u8] =
-    include_bytes!("../../../artifree-providers/src/execution/attempt/bundler_template/app.css");
+const STYLE: &[u8] = include_bytes!("../../../../types/react/1/starter/src/app.css");
 /// An entry module that imports a package the root does not hold.
 const BAD_IMPORT: &[u8] = b"import pad from \"left-pad\";\nconsole.log(pad(\"x\", 3));\n";
 /// An entry document that does not load the bundle.

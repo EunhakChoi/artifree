@@ -103,6 +103,7 @@ pub fn create_demo(
             fingerprint: RequestFingerprint(digest(body)),
         },
         kind: ArtifactKind::App,
+        artifact_type: None,
         title: &parsed::<Title>(title),
         package: &package(&[("index.html", body), ("style.css", "h1{}")]),
         source: None,

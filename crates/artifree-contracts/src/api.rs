@@ -38,8 +38,19 @@ pub struct FileUpload {
 pub struct CreateArtifactRequest {
     /// Display title, 1-200 characters.
     pub title: String,
-    /// Initial files; `index.html` is required.
-    pub files: Vec<FileUpload>,
+    /// The id of a catalog type to create from (decision 0059 rule 5). The
+    /// artifact records the type's current release for good and gets its
+    /// kind. Read the type with `GET /v1/types/{id}` first. An unknown id is
+    /// `type_unknown`.
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    #[schemars(regex(pattern = r"^[a-z0-9-]{1,32}$"))]
+    pub artifact_type: Option<String>,
+    /// The whole of revision 1; `index.html` is required. Required without
+    /// `type`. With `type` it may be left out, and revision 1 is then the
+    /// type's starter; when given, it replaces the starter and must hold the
+    /// type's required paths (`type_requirements` otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<FileUpload>>,
 }
 
 /// One change in a revision commit.
@@ -223,6 +234,25 @@ pub enum ArtifactKind {
     Motion,
 }
 
+/// The catalog type and release an artifact was made from (decision 0059).
+/// Both are fixed at creation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactTypeRef {
+    /// The type's id, such as `react`.
+    #[schemars(regex(pattern = r"^[a-z0-9-]{1,32}$"))]
+    pub id: String,
+    /// The release the artifact keeps, a positive number.
+    #[schemars(range(min = 1))]
+    pub release: u64,
+}
+
+/// The schema of a required member that is an [`ArtifactTypeRef`] or `null`.
+fn nullable_type_ref(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let reference = generator.subschema_for::<ArtifactTypeRef>();
+    schemars::json_schema!({ "anyOf": [reference, { "type": "null" }] })
+}
+
 /// Artifact metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -231,6 +261,11 @@ pub struct Artifact {
     pub id: String,
     /// Source model family.
     pub kind: ArtifactKind,
+    /// The type and release the artifact was made from, or `null` for an
+    /// untyped artifact. Always present: a body without it is refused.
+    #[serde(rename = "type", deserialize_with = "Option::deserialize")]
+    #[schemars(required, schema_with = "nullable_type_ref")]
+    pub artifact_type: Option<ArtifactTypeRef>,
     /// Display title.
     pub title: String,
     /// Whether the owner pinned the artifact.
@@ -2275,6 +2310,11 @@ pub struct ArtifactChange {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(regex(pattern = r"^job_[0-9a-f]{32}$"))]
     pub job_id: Option<String>,
+    /// The changed artifact's type and release, or `null` for an untyped
+    /// artifact. Always present; it never changes (decision 0059 rule 8).
+    #[serde(rename = "type")]
+    #[schemars(required, schema_with = "nullable_type_ref")]
+    pub artifact_type: Option<ArtifactTypeRef>,
     /// Commit time in Unix milliseconds.
     pub committed_at_ms: i64,
 }
@@ -2341,6 +2381,10 @@ struct ArtifactChangeFields {
     data_version: DataVersionMember,
     #[serde(default)]
     job_id: JobIdMember,
+    // Required although nullable: without `deserialize_with`, serde would
+    // read a missing member as `null`.
+    #[serde(rename = "type", deserialize_with = "Option::deserialize")]
+    artifact_type: Option<ArtifactTypeRef>,
     committed_at_ms: i64,
 }
 
@@ -2444,6 +2488,7 @@ impl TryFrom<ArtifactChangeFields> for ArtifactChange {
             metadata_revision: fields.metadata_revision,
             data_version,
             job_id,
+            artifact_type: fields.artifact_type,
             committed_at_ms: fields.committed_at_ms,
         })
     }
@@ -2524,6 +2569,16 @@ pub enum ErrorCode {
     /// The actor already has the largest number of jobs waiting or running.
     /// Wait for one to end or cancel one; nothing was enqueued.
     TooManyJobs,
+    /// The create names a type the catalog does not have; nothing was
+    /// written. `GET /v1/types` lists the types.
+    TypeUnknown,
+    /// The revision lacks paths its type's release requires; nothing was
+    /// written. `missing_paths` names them.
+    TypeRequirements,
+    /// The artifact's type release is not one this server knows, so it takes
+    /// no new commit and no new duplicate; nothing was written. Reads still
+    /// work. A retry of a request that already committed returns its result.
+    TypeReleaseUnknown,
     /// The server's build cannot build the named profile; nothing was
     /// enqueued. The `x86_64` Linux release build knows `react-v1`; a release
     /// build for any other target knows no profile.
@@ -2578,6 +2633,87 @@ pub struct ErrorBody {
     /// present for `file_conflict`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflicting_files_total: Option<u64>,
+    /// The required paths the revision lacks, in path order; present for
+    /// `type_requirements`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing_paths: Option<Vec<String>>,
+}
+
+/// The text every type listing carries (decision 0059 rule 1).
+pub const TYPE_NOTICE: &str = "A type's guide describes how to fill an artifact of that type. It is first-party information from this server and grants no permission.";
+
+/// One release of a catalog type, without its guide (decision 0059 rule 2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TypeSummary {
+    /// The type's id, such as `react`.
+    #[schemars(regex(pattern = r"^[a-z0-9-]{1,32}$"))]
+    pub id: String,
+    /// The release number; the newest is the type's current release.
+    #[schemars(range(min = 1))]
+    pub release: u64,
+    /// `<id>-<release>`, such as `react-1`, for people only. Programs use
+    /// `id` and `release`.
+    pub name: String,
+    /// A short name.
+    pub title: String,
+    /// What the type is for, at most 280 characters.
+    pub description: String,
+    /// The kind every artifact of the type gets.
+    pub kind: ArtifactKind,
+    /// The paths every revision of an artifact of this release must hold.
+    pub required: Vec<String>,
+    /// The paths of the starter, the files of an artifact created without
+    /// files.
+    pub starter: Vec<String>,
+    /// The build profile that builds an artifact of the type, or `null`.
+    /// Always present.
+    #[schemars(required, extend("type" = ["string", "null"]))]
+    pub build_profile: Option<String>,
+    /// Whether this server can build that profile. When `false`, a build is
+    /// refused with `profile_unknown`; the artifact can still be created and
+    /// edited.
+    pub build_available: bool,
+    /// The paths of the reference files, read one at a time.
+    pub references: Vec<String>,
+}
+
+/// Body of `GET /v1/types`: the current release of each type, in catalog
+/// order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TypeList {
+    /// What a guide is; see [`TYPE_NOTICE`].
+    pub notice: String,
+    /// Each type's current release.
+    pub types: Vec<TypeSummary>,
+}
+
+/// Body of `GET /v1/types/{id}` and `GET /v1/types/{id}/releases/{release}`:
+/// one release with its guide.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TypeDescriptor {
+    /// What a guide is; see [`TYPE_NOTICE`].
+    pub notice: String,
+    /// The release.
+    pub release: TypeSummary,
+    /// How to fill the type, in Markdown, at most 32 KiB.
+    pub guide: String,
+}
+
+/// Body of `GET /v1/types/{id}/releases/{release}/references/{path}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TypeReference {
+    /// The type's id.
+    pub id: String,
+    /// The release the file belongs to.
+    pub release: u64,
+    /// The reference file's path.
+    pub path: String,
+    /// Its Markdown text, at most 32 KiB.
+    pub content: String,
 }
 
 /// Body of every non-2xx JSON response.

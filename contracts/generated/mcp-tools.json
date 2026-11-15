@@ -111,6 +111,21 @@
                 "type": "string"
               },
               {
+                "const": "type_unknown",
+                "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                "type": "string"
+              },
+              {
+                "const": "type_requirements",
+                "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                "type": "string"
+              },
+              {
+                "const": "type_release_unknown",
+                "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                "type": "string"
+              },
+              {
                 "const": "profile_unknown",
                 "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                 "type": "string"
@@ -220,6 +235,16 @@
           "message": {
             "description": "Human-readable explanation; not a stable contract.",
             "type": "string"
+          },
+          "missing_paths": {
+            "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           }
         },
         "required": [
@@ -388,6 +413,35 @@
                       "description": "Display title.",
                       "type": "string"
                     },
+                    "type": {
+                      "anyOf": [
+                        {
+                          "additionalProperties": false,
+                          "description": "The catalog type and release an artifact was made from (decision 0059).\nBoth are fixed at creation.",
+                          "properties": {
+                            "id": {
+                              "description": "The type's id, such as `react`.",
+                              "pattern": "^[a-z0-9-]{1,32}$",
+                              "type": "string"
+                            },
+                            "release": {
+                              "description": "The release the artifact keeps, a positive number.",
+                              "minimum": 1,
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "release"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "The type and release the artifact was made from, or `null` for an\nuntyped artifact. Always present: a body without it is refused."
+                    },
                     "updated_at_ms": {
                       "description": "Time of the latest source revision in Unix milliseconds; metadata\nupdates do not change it.",
                       "type": "integer"
@@ -396,6 +450,7 @@
                   "required": [
                     "id",
                     "kind",
+                    "type",
                     "title",
                     "pinned",
                     "current_revision",
@@ -534,6 +589,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -643,6 +713,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -757,6 +837,35 @@
                 "description": "Display title.",
                 "type": "string"
               },
+              "type": {
+                "anyOf": [
+                  {
+                    "additionalProperties": false,
+                    "description": "The catalog type and release an artifact was made from (decision 0059).\nBoth are fixed at creation.",
+                    "properties": {
+                      "id": {
+                        "description": "The type's id, such as `react`.",
+                        "pattern": "^[a-z0-9-]{1,32}$",
+                        "type": "string"
+                      },
+                      "release": {
+                        "description": "The release the artifact keeps, a positive number.",
+                        "minimum": 1,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "release"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The type and release the artifact was made from, or `null` for an\nuntyped artifact. Always present: a body without it is refused."
+              },
               "updated_at_ms": {
                 "description": "Time of the latest source revision in Unix milliseconds; metadata\nupdates do not change it.",
                 "type": "integer"
@@ -765,6 +874,7 @@
             "required": [
               "id",
               "kind",
+              "type",
               "title",
               "pinned",
               "current_revision",
@@ -888,6 +998,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -997,6 +1122,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -1160,6 +1295,35 @@
                     "description": "Display title.",
                     "type": "string"
                   },
+                  "type": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": false,
+                        "description": "The catalog type and release an artifact was made from (decision 0059).\nBoth are fixed at creation.",
+                        "properties": {
+                          "id": {
+                            "description": "The type's id, such as `react`.",
+                            "pattern": "^[a-z0-9-]{1,32}$",
+                            "type": "string"
+                          },
+                          "release": {
+                            "description": "The release the artifact keeps, a positive number.",
+                            "minimum": 1,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "release"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The type and release the artifact was made from, or `null` for an\nuntyped artifact. Always present: a body without it is refused."
+                  },
                   "updated_at_ms": {
                     "description": "Time of the latest source revision in Unix milliseconds; metadata\nupdates do not change it.",
                     "type": "integer"
@@ -1168,6 +1332,7 @@
                 "required": [
                   "id",
                   "kind",
+                  "type",
                   "title",
                   "pinned",
                   "current_revision",
@@ -1363,6 +1528,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -1472,6 +1652,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -1670,6 +1860,35 @@
                     "description": "Display title.",
                     "type": "string"
                   },
+                  "type": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": false,
+                        "description": "The catalog type and release an artifact was made from (decision 0059).\nBoth are fixed at creation.",
+                        "properties": {
+                          "id": {
+                            "description": "The type's id, such as `react`.",
+                            "pattern": "^[a-z0-9-]{1,32}$",
+                            "type": "string"
+                          },
+                          "release": {
+                            "description": "The release the artifact keeps, a positive number.",
+                            "minimum": 1,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "release"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The type and release the artifact was made from, or `null` for an\nuntyped artifact. Always present: a body without it is refused."
+                  },
                   "updated_at_ms": {
                     "description": "Time of the latest source revision in Unix milliseconds; metadata\nupdates do not change it.",
                     "type": "integer"
@@ -1678,6 +1897,7 @@
                 "required": [
                   "id",
                   "kind",
+                  "type",
                   "title",
                   "pinned",
                   "current_revision",
@@ -1873,6 +2093,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -1982,6 +2217,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -2193,6 +2438,35 @@
                     "description": "Display title.",
                     "type": "string"
                   },
+                  "type": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": false,
+                        "description": "The catalog type and release an artifact was made from (decision 0059).\nBoth are fixed at creation.",
+                        "properties": {
+                          "id": {
+                            "description": "The type's id, such as `react`.",
+                            "pattern": "^[a-z0-9-]{1,32}$",
+                            "type": "string"
+                          },
+                          "release": {
+                            "description": "The release the artifact keeps, a positive number.",
+                            "minimum": 1,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "release"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The type and release the artifact was made from, or `null` for an\nuntyped artifact. Always present: a body without it is refused."
+                  },
                   "updated_at_ms": {
                     "description": "Time of the latest source revision in Unix milliseconds; metadata\nupdates do not change it.",
                     "type": "integer"
@@ -2201,6 +2475,7 @@
                 "required": [
                   "id",
                   "kind",
+                  "type",
                   "title",
                   "pinned",
                   "current_revision",
@@ -2396,6 +2671,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -2505,6 +2795,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -2640,6 +2940,35 @@
                     "description": "Display title.",
                     "type": "string"
                   },
+                  "type": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": false,
+                        "description": "The catalog type and release an artifact was made from (decision 0059).\nBoth are fixed at creation.",
+                        "properties": {
+                          "id": {
+                            "description": "The type's id, such as `react`.",
+                            "pattern": "^[a-z0-9-]{1,32}$",
+                            "type": "string"
+                          },
+                          "release": {
+                            "description": "The release the artifact keeps, a positive number.",
+                            "minimum": 1,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "release"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The type and release the artifact was made from, or `null` for an\nuntyped artifact. Always present: a body without it is refused."
+                  },
                   "updated_at_ms": {
                     "description": "Time of the latest source revision in Unix milliseconds; metadata\nupdates do not change it.",
                     "type": "integer"
@@ -2648,6 +2977,7 @@
                 "required": [
                   "id",
                   "kind",
+                  "type",
                   "title",
                   "pinned",
                   "current_revision",
@@ -2843,6 +3173,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -2952,6 +3297,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -3102,6 +3457,35 @@
                     "description": "Display title.",
                     "type": "string"
                   },
+                  "type": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": false,
+                        "description": "The catalog type and release an artifact was made from (decision 0059).\nBoth are fixed at creation.",
+                        "properties": {
+                          "id": {
+                            "description": "The type's id, such as `react`.",
+                            "pattern": "^[a-z0-9-]{1,32}$",
+                            "type": "string"
+                          },
+                          "release": {
+                            "description": "The release the artifact keeps, a positive number.",
+                            "minimum": 1,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "release"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The type and release the artifact was made from, or `null` for an\nuntyped artifact. Always present: a body without it is refused."
+                  },
                   "updated_at_ms": {
                     "description": "Time of the latest source revision in Unix milliseconds; metadata\nupdates do not change it.",
                     "type": "integer"
@@ -3110,6 +3494,7 @@
                 "required": [
                   "id",
                   "kind",
+                  "type",
                   "title",
                   "pinned",
                   "current_revision",
@@ -3330,6 +3715,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -3439,6 +3839,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -3589,6 +3999,35 @@
                     "description": "Display title.",
                     "type": "string"
                   },
+                  "type": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": false,
+                        "description": "The catalog type and release an artifact was made from (decision 0059).\nBoth are fixed at creation.",
+                        "properties": {
+                          "id": {
+                            "description": "The type's id, such as `react`.",
+                            "pattern": "^[a-z0-9-]{1,32}$",
+                            "type": "string"
+                          },
+                          "release": {
+                            "description": "The release the artifact keeps, a positive number.",
+                            "minimum": 1,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "release"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The type and release the artifact was made from, or `null` for an\nuntyped artifact. Always present: a body without it is refused."
+                  },
                   "updated_at_ms": {
                     "description": "Time of the latest source revision in Unix milliseconds; metadata\nupdates do not change it.",
                     "type": "integer"
@@ -3597,6 +4036,7 @@
                 "required": [
                   "id",
                   "kind",
+                  "type",
                   "title",
                   "pinned",
                   "current_revision",
@@ -3731,6 +4171,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -3840,6 +4295,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -4069,6 +4534,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -4178,6 +4658,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -4399,6 +4889,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -4508,6 +5013,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -4761,6 +5276,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -4870,6 +5400,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -5063,6 +5603,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -5172,6 +5727,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -5493,6 +6058,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -5602,6 +6182,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -6148,6 +6738,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -6257,6 +6862,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -6754,6 +7369,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -6863,6 +7493,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -7396,6 +8036,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -7505,6 +8160,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -8022,6 +8687,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -8131,6 +8811,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -8354,6 +9044,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -8463,6 +9168,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -8674,6 +9389,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -8783,6 +9513,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -8994,6 +9734,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -9103,6 +9858,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -9309,6 +10074,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -9418,6 +10198,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -9647,6 +10437,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -9756,6 +10561,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -9972,6 +10787,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -10081,6 +10911,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -10313,6 +11153,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -10422,6 +11277,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -10623,6 +11488,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -10732,6 +11612,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -10906,6 +11796,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -11015,6 +11920,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -11307,6 +12222,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -11416,6 +12346,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -11636,6 +12576,21 @@
                         "type": "string"
                       },
                       {
+                        "const": "type_unknown",
+                        "description": "The create names a type the catalog does not have; nothing was\nwritten. `GET /v1/types` lists the types.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_requirements",
+                        "description": "The revision lacks paths its type's release requires; nothing was\nwritten. `missing_paths` names them.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "type_release_unknown",
+                        "description": "The artifact's type release is not one this server knows, so it takes\nno new commit and no new duplicate; nothing was written. Reads still\nwork. A retry of a request that already committed returns its result.",
+                        "type": "string"
+                      },
+                      {
                         "const": "profile_unknown",
                         "description": "The server's build cannot build the named profile; nothing was\nenqueued. The `x86_64` Linux release build knows `react-v1`; a release\nbuild for any other target knows no profile.",
                         "type": "string"
@@ -11745,6 +12700,16 @@
                   "message": {
                     "description": "Human-readable explanation; not a stable contract.",
                     "type": "string"
+                  },
+                  "missing_paths": {
+                    "description": "The required paths the revision lacks, in path order; present for\n`type_requirements`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   }
                 },
                 "required": [

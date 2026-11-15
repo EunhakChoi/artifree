@@ -666,7 +666,7 @@ fn a_change_event_publishes_its_data_version_bounds() -> Result<(), serde_json::
 
     let revised: ArtifactChange = serde_json::from_value(serde_json::json!({
         "cursor": "c.1", "artifact_id": "art_0", "change": "revised",
-        "revision": 1, "metadata_revision": 1, "committed_at_ms": 1
+        "revision": 1, "metadata_revision": 1, "type": null, "committed_at_ms": 1
     }))?;
     assert!(
         serde_json::to_value(&revised)?
@@ -680,7 +680,7 @@ fn a_change_event_publishes_its_data_version_bounds() -> Result<(), serde_json::
 fn change_with(kind: &str, extra: &serde_json::Value) -> Result<ArtifactChange, serde_json::Error> {
     let mut body = serde_json::json!({
         "cursor": "c.1", "artifact_id": "art_0", "change": kind,
-        "revision": 1, "metadata_revision": 1, "committed_at_ms": 1
+        "revision": 1, "metadata_revision": 1, "type": null, "committed_at_ms": 1
     });
     if let (Some(fields), Some(more)) = (body.as_object_mut(), extra.as_object()) {
         fields.extend(

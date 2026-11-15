@@ -536,7 +536,13 @@ async fn create_artifact(
         idempotency_key,
     } = parse(arguments)?;
     let key = operations::request_key("idempotency_key", &idempotency_key)?;
-    operations::create(state, actor, key, CreateArtifactRequest { title, files }).await
+    // The type is T01ab's (decision 0059 rule 12): MCP creates untyped.
+    let request = CreateArtifactRequest {
+        title,
+        artifact_type: None,
+        files: Some(files),
+    };
+    operations::create(state, actor, key, request).await
 }
 
 async fn save_revision(

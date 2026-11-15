@@ -40,6 +40,9 @@ import type {
   SetDataRequest,
   StageHandoffRequest,
   TokenList,
+  TypeDescriptor,
+  TypeList,
+  TypeReference,
   RemoveUnreferencedContentRequest,
   RemoveUnreferencedContentResponse,
   UnreferencedContent,
@@ -104,6 +107,9 @@ import {
   parseRuntimeGrant,
   parseRuntimeView,
   parseTokenList,
+  parseTypeDescriptor,
+  parseTypeList,
+  parseTypeReference,
   parseUnreferencedContent,
   parseUpdate,
 } from './responses.js';
@@ -1215,6 +1221,48 @@ export class ArtifreeClient {
   }
 
   /**
+   * The current release of each catalog type (decision 0059 rule 11). A
+   * guide describes how to fill a type; it grants no permission.
+   */
+  async listTypes(options: ReadOptions = {}): Promise<TypeList> {
+    return this.json('GET', '/v1/types', parseTypeList, {
+      signal: options.signal,
+    });
+  }
+
+  /**
+   * One release of the type `id` with its guide: the current one, or
+   * `release` when given, so that an older artifact's rules stay readable.
+   */
+  async getType(
+    id: string,
+    options: ReadOptions & { readonly release?: number } = {},
+  ): Promise<TypeDescriptor> {
+    const path =
+      options.release === undefined
+        ? `/v1/types/${encodeURIComponent(id)}`
+        : `/v1/types/${encodeURIComponent(id)}/releases/${String(options.release)}`;
+    return this.json('GET', path, parseTypeDescriptor, {
+      signal: options.signal,
+    });
+  }
+
+  /** One reference file of release `release` of the type `id`. */
+  async getTypeReference(
+    id: string,
+    release: number,
+    path: string,
+    options: ReadOptions = {},
+  ): Promise<TypeReference> {
+    return this.json(
+      'GET',
+      `/v1/types/${encodeURIComponent(id)}/releases/${String(release)}/references/${filePath(path)}`,
+      parseTypeReference,
+      { signal: options.signal },
+    );
+  }
+
+  /**
    * One page of jobs, newest first: those of `artifactId`, or, without it,
    * those of every artifact that is not in the trash. Pass `next_page_token`
    * back as `page_token` for the next page.
@@ -2217,6 +2265,7 @@ export class ArtifreeClient {
       currentRevision: failure.current_revision ?? undefined,
       currentMetadataRevision: failure.current_metadata_revision ?? undefined,
       currentDataVersion: failure.current_data_version ?? undefined,
+      missingPaths: failure.missing_paths ?? undefined,
       ...(retryAfter === undefined ? {} : { retryAfterSeconds: retryAfter }),
     });
   }

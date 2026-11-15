@@ -126,11 +126,12 @@ async fn declared_artifact(state: &AppState, actor: &ActorId) -> Result<String, 
         "asset-write-artifact".parse()?,
         CreateArtifactRequest {
             title: "Asset write".into(),
-            files: vec![FileUpload {
+            artifact_type: None,
+            files: Some(vec![FileUpload {
                 path: "index.html".into(),
                 encoding: ContentEncoding::Utf8,
                 content: "<!doctype html><html><head><!-- artifree-runtime --></head><body>test</body></html>".into(),
-            }],
+            }]),
         },
     )
     .await

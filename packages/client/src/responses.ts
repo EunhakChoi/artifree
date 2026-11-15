@@ -4,6 +4,7 @@ import type {
   Artifact,
   ArtifactKind,
   ArtifactList,
+  ArtifactTypeRef,
   BackgroundStatus,
   BuildStatus,
   ChangeKind,
@@ -46,6 +47,10 @@ import type {
   RotateTokenResponse,
   TokenInfo,
   TokenList,
+  TypeDescriptor,
+  TypeList,
+  TypeReference,
+  TypeSummary,
   UnreferencedContent,
   UpdateArtifactResponse,
   WorkerExit,
@@ -100,6 +105,9 @@ const ERROR_CODES: Record<ErrorCode, true> = {
   job_ended: true,
   too_many_jobs: true,
   profile_unknown: true,
+  type_unknown: true,
+  type_requirements: true,
+  type_release_unknown: true,
   content_conflict: true,
   data_conflict: true,
   asset_conflict: true,
@@ -175,9 +183,29 @@ function errorCode(value: unknown): ErrorCode | undefined {
   return typeof value === 'string' && isErrorCode(value) ? value : undefined;
 }
 
+/** A type id as the wire spells it (decision 0059 rule 1). */
+function isTypeId(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-z0-9-]{1,32}$/.test(value);
+}
+
+/**
+ * An artifact's `type`: `null` for an untyped artifact, otherwise its type id
+ * and a release of at least 1. `undefined` when the member is malformed or
+ * missing, since it is always present.
+ */
+function artifactType(value: unknown): ArtifactTypeRef | null | undefined {
+  if (value === null) return null;
+  if (!isRecord(value)) return undefined;
+  const { id, release } = value;
+  return isTypeId(id) && isCount(release) && release >= 1
+    ? { id, release }
+    : undefined;
+}
+
 function artifact(value: unknown): Artifact | undefined {
   if (!isRecord(value)) return undefined;
   const kind = artifactKind(value.kind);
+  const type = artifactType(value.type);
   const {
     id,
     title,
@@ -191,6 +219,7 @@ function artifact(value: unknown): Artifact | undefined {
   if (
     typeof id !== 'string' ||
     kind === undefined ||
+    type === undefined ||
     typeof title !== 'string' ||
     typeof pinned !== 'boolean' ||
     !isCount(current_revision) ||
@@ -204,6 +233,7 @@ function artifact(value: unknown): Artifact | undefined {
   return {
     id,
     kind,
+    type,
     title,
     pinned,
     current_revision,
@@ -711,12 +741,14 @@ export function parseFeedChange(value: unknown): FeedChange | undefined {
     job_id,
     committed_at_ms,
   } = value;
+  const type = artifactType(value.type);
   if (
     !isCursor(cursor) ||
     typeof artifact_id !== 'string' ||
     typeof change !== 'string' ||
     !isCount(number) ||
     !isCount(metadata_revision) ||
+    type === undefined ||
     !isTime(committed_at_ms)
   )
     return undefined;
@@ -725,6 +757,7 @@ export function parseFeedChange(value: unknown): FeedChange | undefined {
     artifact_id,
     revision: number,
     metadata_revision,
+    type,
     committed_at_ms,
   };
   if (!isChangeKind(change)) return { ...feedChange, change: 'unknown' };
@@ -1079,9 +1112,17 @@ export function parseError(value: unknown): ErrorBody | undefined {
     current_revision,
     current_metadata_revision,
     current_data_version,
+    missing_paths,
   } = value.error;
   if (code === undefined || typeof message !== 'string') return undefined;
   const body: ErrorBody = { code, message };
+  if (missing_paths !== undefined && missing_paths !== null) {
+    const paths = list(missing_paths, (path) =>
+      typeof path === 'string' ? path : undefined,
+    );
+    if (paths === undefined) return undefined;
+    body.missing_paths = paths;
+  }
   // The schema allows null as well as absence; both mean "not a conflict".
   for (const [name, count] of [
     ['current_revision', current_revision],
@@ -1175,4 +1216,89 @@ export function parseRotateToken(
   const token = parseTokenInfo(value.token);
   if (token === undefined) return undefined;
   return { secret: value.secret, token };
+}
+
+function strings(value: unknown): string[] | undefined {
+  return list(value, (item) => (typeof item === 'string' ? item : undefined));
+}
+
+function typeSummary(value: unknown): TypeSummary | undefined {
+  if (!isRecord(value)) return undefined;
+  const kind = artifactKind(value.kind);
+  const required = strings(value.required);
+  const starter = strings(value.starter);
+  const references = strings(value.references);
+  const {
+    id,
+    release,
+    name,
+    title,
+    description,
+    build_profile,
+    build_available,
+  } = value;
+  if (
+    !isTypeId(id) ||
+    !isCount(release) ||
+    release < 1 ||
+    typeof name !== 'string' ||
+    typeof title !== 'string' ||
+    typeof description !== 'string' ||
+    kind === undefined ||
+    required === undefined ||
+    starter === undefined ||
+    references === undefined ||
+    (build_profile !== null && typeof build_profile !== 'string') ||
+    typeof build_available !== 'boolean'
+  )
+    return undefined;
+  return {
+    id,
+    release,
+    name,
+    title,
+    description,
+    kind,
+    required,
+    starter,
+    build_profile,
+    build_available,
+    references,
+  };
+}
+
+/** Parses `GET /v1/types` (decision 0059 rule 11). */
+export function parseTypeList(value: unknown): TypeList | undefined {
+  if (!isRecord(value) || typeof value.notice !== 'string') return undefined;
+  const types = list(value.types, typeSummary);
+  return types === undefined ? undefined : { notice: value.notice, types };
+}
+
+/** Parses `GET /v1/types/{id}` and `GET /v1/types/{id}/releases/{release}`. */
+export function parseTypeDescriptor(
+  value: unknown,
+): TypeDescriptor | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.notice !== 'string' ||
+    typeof value.guide !== 'string'
+  )
+    return undefined;
+  const release = typeSummary(value.release);
+  return release === undefined
+    ? undefined
+    : { notice: value.notice, release, guide: value.guide };
+}
+
+/** Parses `GET /v1/types/{id}/releases/{release}/references/{path}`. */
+export function parseTypeReference(value: unknown): TypeReference | undefined {
+  if (!isRecord(value)) return undefined;
+  const { id, release, path, content } = value;
+  return isTypeId(id) &&
+    isCount(release) &&
+    release >= 1 &&
+    typeof path === 'string' &&
+    typeof content === 'string'
+    ? { id, release, path, content }
+    : undefined;
 }

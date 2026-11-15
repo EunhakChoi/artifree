@@ -17,11 +17,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use artifree_domain::AppDataVersion;
+use artifree_domain::artifact_type::TypeId;
 use artifree_domain::change::ChangeSequence;
 use artifree_domain::data::DataError;
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title};
 use artifree_domain::job::JobState;
-use artifree_domain::package::{FileChange, FilePackage, PackageError, PackagePath};
+use artifree_domain::package::{FileChange, FilePackage, FileSet, PackageError, PackagePath};
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
     ArtifactListing, ArtifactRecord, ArtifactStore, ChangePage, CleanupReceipt, CleanupRequest,
@@ -32,6 +33,7 @@ use artifree_ports::artifact_store::{
 };
 use sha2::{Digest, Sha256};
 
+use crate::catalog::{Catalog, Release};
 use crate::listing::{self, ArtifactPage, ListQuery};
 use crate::parts::{self, Boundary, ByteRange, FilePart, RangeError};
 use crate::policy;
@@ -139,6 +141,19 @@ pub enum ArtifactError {
     /// A duplicate's copied assets would exceed the copy's space limits or the
     /// actor's asset limits (decision 0045); nothing was written.
     AssetLimitExceeded,
+    /// The create names a type the catalog does not have (decision 0059
+    /// rule 5); nothing was written.
+    TypeUnknown,
+    /// The revision lacks paths its type's release requires (decision 0059
+    /// rules 5 and 6); nothing was written.
+    TypeRequirements {
+        /// The missing paths, in path order.
+        missing: Vec<PackagePath>,
+    },
+    /// The artifact's type or release is not one this server knows, so it
+    /// takes no new commit and no new duplicate (decision 0059 rule 7);
+    /// nothing was written.
+    TypeReleaseUnknown,
     /// Storage failed. The request may be retried with the same key.
     Unavailable(String),
 }
@@ -197,6 +212,17 @@ impl fmt::Display for ArtifactError {
             ),
             Self::Data(error) => write!(formatter, "{error}"),
             Self::AssetLimitExceeded => formatter.write_str("asset limit exceeded"),
+            Self::TypeUnknown => formatter.write_str("the catalog has no such type"),
+            Self::TypeRequirements { missing } => {
+                formatter.write_str("the revision lacks paths its type requires:")?;
+                for path in missing {
+                    write!(formatter, " {path}")?;
+                }
+                Ok(())
+            }
+            Self::TypeReleaseUnknown => formatter.write_str(
+                "this server does not know the artifact's type release, so it takes no new commit or copy",
+            ),
             Self::Unavailable(reason) => write!(formatter, "storage unavailable: {reason}"),
         }
     }
@@ -279,12 +305,132 @@ pub struct CopyParts {
 #[derive(Debug)]
 pub struct ArtifactService<S> {
     pub(crate) store: S,
+    catalog: Catalog,
 }
 
 impl<S: ArtifactStore> ArtifactService<S> {
-    /// Uses `store` for all durable state.
+    /// Uses `store` for all durable state, with an empty type catalog; see
+    /// [`Self::with_catalog`].
     pub fn new(store: S) -> Self {
-        Self { store }
+        Self {
+            store,
+            catalog: Catalog::empty(),
+        }
+    }
+
+    /// The same service with `catalog` as its types (decision 0059). A server
+    /// passes [`Catalog::builtin`].
+    #[must_use]
+    pub fn with_catalog(self, catalog: Catalog) -> Self {
+        Self { catalog, ..self }
+    }
+
+    /// The types this service creates from and checks commits against.
+    #[must_use]
+    pub fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
+
+    /// Creates an artifact of the type `type_id` owned by `actor` at revision
+    /// 1 (decision 0059 rule 5). Revision 1 is `files` when given, whole, and
+    /// otherwise the current release's starter; either way it must hold the
+    /// release's required paths, `index.html` among them when the release
+    /// requires it, so `files` is a set that may lack it. The artifact gets the release's kind and
+    /// records the type and release for good.
+    ///
+    /// The request's identity covers the type id and the files, or that there
+    /// were none, but not the release: retrying with the same key after the
+    /// catalog gained a release returns the original receipt, which names
+    /// the release it was created with. A retry is replayed before the type
+    /// and its requirements are checked.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::TypeUnknown`], [`ArtifactError::TypeRequirements`],
+    /// [`ArtifactError::InvalidPackage`] when `files` lack an `index.html`
+    /// the release does not require, [`ArtifactError::NotFound`] for the
+    /// retry of a create whose artifact was purged,
+    /// [`ArtifactError::RequestKeyReused`], or [`ArtifactError::Unavailable`].
+    pub fn create_from_type(
+        &self,
+        actor: &ActorId,
+        key: &RequestKey,
+        title: &Title,
+        type_id: &TypeId,
+        files: Option<&FileSet>,
+    ) -> Result<CommitReceipt, ArtifactError> {
+        let mut hasher = Fingerprint::new("create");
+        hasher.field(b"type");
+        hasher.field(type_id.as_str().as_bytes());
+        hasher.field(title.as_str().as_bytes());
+        match files {
+            Some(files) => {
+                hasher.field(b"files");
+                for (path, content) in files.files() {
+                    hasher.put(path, content);
+                }
+            }
+            None => hasher.field(b"no files"),
+        }
+        let request = RequestIdentity {
+            actor,
+            key,
+            fingerprint: hasher.finish(),
+        };
+        let prepared = self
+            .catalog
+            .current(type_id)
+            .ok_or(ArtifactError::TypeUnknown)
+            .and_then(|release| typed_package(release, files).map(|package| (release, package)));
+        let (release, package) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => return self.store.replay_receipt(request)?.ok_or(error),
+        };
+        let artifact_type = release.artifact_type();
+        let receipt = self.store.create_artifact(NewArtifact {
+            request,
+            kind: release.kind,
+            artifact_type: Some(&artifact_type),
+            title,
+            package: package.as_ref().unwrap_or(&release.starter),
+            source: None,
+        })?;
+        Ok(receipt)
+    }
+
+    /// The release whose rules a new commit to or copy of `record` follows:
+    /// `None` for an untyped artifact. An artifact whose release this server
+    /// does not know takes none (decision 0059 rule 7); its error is
+    /// [`ArtifactError::TypeReleaseUnknown`], or not found in the trash, as
+    /// [`checked`] answers.
+    fn pinned_release(&self, record: &ArtifactRecord) -> Result<Option<&Release>, ArtifactError> {
+        match &record.artifact_type {
+            None => Ok(None),
+            Some(pinned) => checked(
+                record,
+                self.catalog
+                    .release(&pinned.id, pinned.release)
+                    .map(Some)
+                    .ok_or(ArtifactError::TypeReleaseUnknown),
+            ),
+        }
+    }
+
+    /// The release of `record` as [`Self::pinned_release`] finds it, or, when
+    /// there is none to follow, the stored receipt of `request` if it has one:
+    /// a retry learns what happened before the refusal (decision 0059 rule 7).
+    fn release_or_replay(
+        &self,
+        record: &ArtifactRecord,
+        request: RequestIdentity<'_>,
+    ) -> Result<Result<Option<&Release>, CommitReceipt>, ArtifactError> {
+        match self.pinned_release(record) {
+            Ok(release) => Ok(Ok(release)),
+            Err(error) => match self.store.replay_receipt(request)? {
+                Some(receipt) => Ok(Err(receipt)),
+                None => Err(error),
+            },
+        }
     }
 
     /// Creates an app artifact owned by `actor` at revision 1.
@@ -318,6 +464,7 @@ impl<S: ArtifactStore> ArtifactService<S> {
                 fingerprint: hasher.finish(),
             },
             kind,
+            artifact_type: None,
             title,
             package,
             source: None,
@@ -335,8 +482,10 @@ impl<S: ArtifactStore> ArtifactService<S> {
     ///
     /// [`ArtifactError::NotFound`] for a missing or inaccessible artifact,
     /// [`ArtifactError::RevisionConflict`] when `base` is not current,
-    /// [`ArtifactError::InvalidPackage`], [`ArtifactError::RequestKeyReused`],
-    /// or [`ArtifactError::Unavailable`].
+    /// [`ArtifactError::InvalidPackage`], [`ArtifactError::TypeRequirements`]
+    /// when the changes delete a path the artifact's release requires,
+    /// whatever the base, [`ArtifactError::TypeReleaseUnknown`],
+    /// [`ArtifactError::RequestKeyReused`], or [`ArtifactError::Unavailable`].
     pub fn save(
         &self,
         actor: &ActorId,
@@ -363,14 +512,25 @@ impl<S: ArtifactStore> ArtifactService<S> {
                 }
             }
         }
-        let fingerprint = hasher.finish();
-        let package = checked(&record, self.saved_package(&record, base, changes))?;
+        let request = RequestIdentity {
+            actor,
+            key,
+            fingerprint: hasher.finish(),
+        };
+        let release = match self.release_or_replay(&record, request)? {
+            Ok(release) => release,
+            Err(replayed) => return Ok(replayed),
+        };
+        // A deleted required path is named before the package is built, which
+        // would refuse a missing `index.html` as a package error instead.
+        let package = checked(
+            &record,
+            keeps(release, changes.iter())
+                .and_then(|()| self.saved_package(&record, base, changes))
+                .and_then(|package| meets(release, &package).map(|()| package)),
+        )?;
         let receipt = self.store.commit_revision(RevisionCommit {
-            request: RequestIdentity {
-                actor,
-                key,
-                fingerprint,
-            },
+            request,
             artifact: id,
             base,
             package: &package,
@@ -390,8 +550,9 @@ impl<S: ArtifactStore> ArtifactService<S> {
     /// [`ArtifactError::NotFound`] for a missing or inaccessible artifact or
     /// revision, [`ArtifactError::RevisionConflict`] when `base` is not
     /// current, [`ArtifactError::InvalidPackage`] when the current revision
-    /// `base` already has those files, [`ArtifactError::RequestKeyReused`], or
-    /// [`ArtifactError::Unavailable`].
+    /// `base` already has those files, [`ArtifactError::TypeRequirements`],
+    /// [`ArtifactError::TypeReleaseUnknown`], [`ArtifactError::RequestKeyReused`],
+    /// or [`ArtifactError::Unavailable`].
     pub fn restore(
         &self,
         actor: &ActorId,
@@ -407,13 +568,24 @@ impl<S: ArtifactStore> ArtifactService<S> {
         hasher.field(&revision.0.to_be_bytes());
         // The store decides in one step whether this is a replay, a stale
         // base, or files the base already has.
-        let package = checked(&record, self.restored_package(&record, base, revision))?;
+        let request = RequestIdentity {
+            actor,
+            key,
+            fingerprint: hasher.finish(),
+        };
+        let release = match self.release_or_replay(&record, request)? {
+            Ok(release) => release,
+            Err(replayed) => return Ok(replayed),
+        };
+        // A revision that passed its release's check once passes again; this
+        // refuses only one the store holds against the rules.
+        let package = checked(
+            &record,
+            self.restored_package(&record, base, revision)
+                .and_then(|package| meets(release, &package).map(|()| package)),
+        )?;
         let receipt = self.store.commit_revision(RevisionCommit {
-            request: RequestIdentity {
-                actor,
-                key,
-                fingerprint: hasher.finish(),
-            },
+            request,
             artifact: id,
             base,
             package: &package,
@@ -446,6 +618,8 @@ impl<S: ArtifactStore> ArtifactService<S> {
     /// [`ArtifactError::InvalidPackage`] for no edit, a path edited twice, a
     /// result that is no valid package, or one that equals the current
     /// revision; [`ArtifactError::FilesChanged`];
+    /// [`ArtifactError::TypeRequirements`] for an edit that deletes a path
+    /// the artifact's release requires; [`ArtifactError::TypeReleaseUnknown`];
     /// [`ArtifactError::RequestKeyReused`]; and
     /// [`ArtifactError::Unavailable`] when the store fails in the commit
     /// itself, whose outcome is then unknown until a retry with the same key
@@ -475,14 +649,22 @@ impl<S: ArtifactStore> ArtifactService<S> {
         for edit in ordered {
             hasher.edit(edit);
         }
-        let fingerprint = hasher.finish();
-        checked(&record, edits_are_possible(&record, base, edits))?;
+        let request = RequestIdentity {
+            actor,
+            key,
+            fingerprint: hasher.finish(),
+        };
+        let release = match self.release_or_replay(&record, request)? {
+            Ok(release) => release,
+            Err(replayed) => return Ok(replayed),
+        };
+        checked(
+            &record,
+            edits_are_possible(&record, base, edits)
+                .and_then(|()| keeps(release, edits.iter().map(|edit| &edit.change))),
+        )?;
         let receipt = self.store.commit_edits(ConditionalCommit {
-            request: RequestIdentity {
-                actor,
-                key,
-                fingerprint,
-            },
+            request,
             artifact: id,
             edits,
         })?;
@@ -565,8 +747,8 @@ impl<S: ArtifactStore> ArtifactService<S> {
     ///
     /// [`ArtifactError::NotFound`] for a missing or inaccessible artifact or
     /// revision, [`ArtifactError::AssetLimitExceeded`] when the copied assets
-    /// do not fit (no key is recorded), [`ArtifactError::RequestKeyReused`], or
-    /// [`ArtifactError::Unavailable`].
+    /// do not fit (no key is recorded), [`ArtifactError::TypeReleaseUnknown`],
+    /// [`ArtifactError::RequestKeyReused`], or [`ArtifactError::Unavailable`].
     pub fn duplicate(
         &self,
         actor: &ActorId,
@@ -609,15 +791,21 @@ impl<S: ArtifactStore> ArtifactService<S> {
             // key is the actor's own, so its copy is replayed; anything else
             // is a source that is missing.
             Err(error @ ArtifactError::NotFound(_)) => {
-                return self.store.replay_create(request)?.ok_or(error);
+                return self.store.replay_receipt(request)?.ok_or(error);
             }
             Err(error) => return Err(error),
         };
+        // The copy keeps the source's type and release (decision 0059 rule 6),
+        // so a release this server does not know takes no new copy (rule 7).
+        if let Err(replayed) = self.release_or_replay(&record, request)? {
+            return Ok(replayed);
+        }
         let package = checked(&record, self.revision_of(&record, revision))?;
         let title = title.cloned().unwrap_or_else(|| record.title.copy_of());
         let receipt = self.store.create_artifact(NewArtifact {
             request,
             kind: record.kind,
+            artifact_type: record.artifact_type.as_ref(),
             title: &title,
             package: &package,
             // The store refuses the copy unless its source is still outside
@@ -1079,6 +1267,70 @@ fn edits_are_possible(
     Ok(())
 }
 
+/// The first revision of a create from `release`: `files` as a package when
+/// given, and `None` for the release's starter. Missing required paths are
+/// refused before a missing `index.html` is (decision 0059 rule 5).
+fn typed_package(
+    release: &Release,
+    files: Option<&FileSet>,
+) -> Result<Option<FilePackage>, ArtifactError> {
+    let Some(files) = files else {
+        return Ok(None);
+    };
+    let missing = release.missing_from(files);
+    if !missing.is_empty() {
+        return Err(ArtifactError::TypeRequirements { missing });
+    }
+    files
+        .clone()
+        .into_package()
+        .map(Some)
+        .map_err(ArtifactError::InvalidPackage)
+}
+
+/// Refuses a package that lacks a path `release` requires (decision 0059
+/// rules 5 and 6); an untyped artifact has no such paths.
+fn meets(release: Option<&Release>, package: &FilePackage) -> Result<(), ArtifactError> {
+    let missing = release
+        .map(|release| release.missing(package))
+        .unwrap_or_default();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(ArtifactError::TypeRequirements { missing })
+    }
+}
+
+/// Refuses changes that delete a path `release` requires. Every revision of
+/// the artifact holds those paths, so changes that delete none keep them all,
+/// whatever their base and also when the head moves before they commit.
+fn keeps<'a>(
+    release: Option<&Release>,
+    changes: impl IntoIterator<Item = &'a FileChange>,
+) -> Result<(), ArtifactError> {
+    let Some(release) = release else {
+        return Ok(());
+    };
+    let deleted: BTreeSet<&PackagePath> = changes
+        .into_iter()
+        .filter_map(|change| match change {
+            FileChange::Delete { path } => Some(path),
+            FileChange::Put { .. } => None,
+        })
+        .collect();
+    let missing: Vec<PackagePath> = release
+        .required
+        .iter()
+        .filter(|path| deleted.contains(path))
+        .cloned()
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(ArtifactError::TypeRequirements { missing })
+    }
+}
+
 /// Whether `after` lists exactly the files of `before` with `edits` applied:
 /// the same paths, and for each its size and digest.
 fn listing_is_as_edited(before: &[FileEntry], after: &[FileEntry], edits: &[FileEdit]) -> bool {
@@ -1209,7 +1461,7 @@ mod tests {
         fn update_metadata(&self, _: MetadataUpdate<'_>) -> Result<MetadataReceipt, StoreError> {
             Err(StoreError::Unavailable("unused".into()))
         }
-        fn replay_create(
+        fn replay_receipt(
             &self,
             _: RequestIdentity<'_>,
         ) -> Result<Option<CommitReceipt>, StoreError> {
@@ -1281,6 +1533,7 @@ mod tests {
                 id: id.clone(),
                 owner: owner.clone(),
                 kind: ArtifactKind::App,
+                artifact_type: None,
                 title: "Demo".parse()?,
                 pinned: false,
                 current_revision: SourceRevision(1),
@@ -1402,6 +1655,7 @@ mod tests {
             id: "art_0123456789abcdef0123456789abcdef".parse()?,
             owner: "owner".parse()?,
             kind: ArtifactKind::App,
+            artifact_type: None,
             title: "Demo".parse()?,
             pinned: false,
             current_revision: SourceRevision(3),
