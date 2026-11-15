@@ -39,7 +39,7 @@ use artifree_core::catalog::Catalog;
 use artifree_core::jobs::{Clock, SystemClock};
 use artifree_core::parts::{Boundary, ByteRange};
 use artifree_domain::change::ChangeCursor;
-use artifree_domain::identity::{ActorId, RequestKey, StateGeneration};
+use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, StateGeneration};
 use artifree_domain::job::ProfileName;
 use artifree_ports::data_store::{OutboxBinding, OutboxFence};
 use artifree_ports::token_store::TokenStore;
@@ -466,6 +466,23 @@ impl AppState {
         self.shared.runtime_sessions.revoke_actor(actor);
         self.shared.rooms.leave_actor(actor);
         self.shared.handoffs.revoke_actor(actor);
+    }
+
+    /// Ends what `actor` holds in memory for `artifact` alone, as revoking
+    /// the member or moving the artifact to the trash does (decision 0060
+    /// rule 15): its preview, build preview and view tickets of the artifact,
+    /// the grants scoped to it on each of its connections, its participation
+    /// in the artifact's room, and its handoff deliveries that name it. The
+    /// connections and change streams stay open, unlike a disable's
+    /// [`Self::revoke_actor`]; the streams carry the change rows. A request
+    /// that passed its access check before this runs may still register
+    /// afterwards: confirming it against the access generation (rule 16) is
+    /// not implemented yet.
+    pub(crate) fn revoke_member(&self, actor: &ActorId, artifact: &ArtifactId) {
+        self.shared.previews.revoke_member(actor, artifact);
+        self.shared.runtime_sessions.revoke_member(actor, artifact);
+        self.shared.rooms.leave_member(actor, artifact);
+        self.shared.handoffs.revoke_member(actor, artifact);
     }
 
     /// Confirms that `actor` is still in the state generation the request

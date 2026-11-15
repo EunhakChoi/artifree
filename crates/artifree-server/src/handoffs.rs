@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use artifree_contracts::api::{AgentSession, Handoff, HandoffSelection, HandoffState};
 use artifree_contracts::mcp::{HandoffReceipt, RegisteredHandoffSession};
 use artifree_core::parts::FilePart;
-use artifree_domain::identity::ActorId;
+use artifree_domain::identity::{ActorId, ArtifactId};
 
 use crate::auth::{AccessToken, hex};
 use crate::runtime_sessions::{RuntimeSession, SessionError};
@@ -172,6 +172,17 @@ impl Handoffs {
         if let Ok(mut registry) = self.state.lock() {
             registry.agents.retain(|_, agent| agent.owner != *actor);
             registry.items.retain(|_, item| item.owner != *actor);
+        }
+    }
+
+    /// Forgets the deliveries of `actor` that name `artifact`, offered or
+    /// not, as a revocation or a move to the trash does (decision 0060 rule
+    /// 15). Its inboxes and its deliveries of other artifacts stay.
+    pub(crate) fn revoke_member(&self, actor: &ActorId, artifact: &ArtifactId) {
+        if let Ok(mut registry) = self.state.lock() {
+            registry.items.retain(|_, item| {
+                item.owner != *actor || item.handoff.selection.artifact_id != artifact.as_str()
+            });
         }
     }
 

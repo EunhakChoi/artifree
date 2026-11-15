@@ -662,11 +662,22 @@ pub(crate) async fn update(
         .map_err(|error| ApiError::unprocessable(format!("title: {error}")))?;
     let change = MetadataChange::new(title, request.pinned, request.deleted)
         .ok_or_else(|| ApiError::unprocessable("give a title, pinned, deleted, or several"))?;
+    let target = id.clone();
     let receipt = state
         .run(move |artifacts| artifacts.update(&actor, &key, &id, base, &change))
         .await?;
     if receipt.delivery == Delivery::Committed {
         state.feed().committed();
+    }
+    // Decision 0060 rule 15: a move to the trash closes what every member
+    // holds of the artifact. A replay closes again, which is harmless.
+    if request.deleted == Some(true) && receipt.artifact.deleted_at.is_some() {
+        let members = state
+            .run(move |artifacts| artifacts.members(&target))
+            .await?;
+        for member in &members {
+            state.revoke_member(member, &receipt.artifact.id);
+        }
     }
     Ok(UpdateArtifactResponse {
         artifact: artifact_dto(&receipt.artifact),
