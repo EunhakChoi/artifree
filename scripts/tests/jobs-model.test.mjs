@@ -36,13 +36,20 @@ const {
   nextBackgroundRead,
   nextOverdueAt,
   overdueJobs,
+  pressBuild,
   pressCancel,
   pressVerify,
   reactionTo,
+  PROFILE_UNKNOWN_TEXT,
+  buildText,
+  headStatusLines,
+  headStatusTitle,
+  locationText,
   refusalText,
   replaceJob,
   seenQueued,
   showsNoWorker,
+  statusAfterFailure,
   upsertJob,
   workerNoticeOf,
   workerText,
@@ -418,6 +425,13 @@ const refusals = [
     refusal: 'job_ended',
   },
   {
+    name: 'a 422 profile_unknown',
+    status: 422,
+    code: 'profile_unknown',
+    message: 'Unknown profile.',
+    refusal: 'profile_unknown',
+  },
+  {
     name: 'a 404 not_found',
     status: 404,
     code: 'not_found',
@@ -600,9 +614,134 @@ const workerNotices = [
 ];
 for (const { name, status, error, expected } of workerNotices) {
   test(`workerNoticeOf: ${name}`, () => {
-    assert.deepEqual(workerNoticeOf(status, error), expected);
+    assert.deepEqual(
+      workerNoticeOf('verify_revision', status, error),
+      expected,
+    );
   });
 }
+
+// Decision 0058, R03ea: a queued build waits for an execution worker, not for
+// the server's worker, so its notice follows `execution.ready` alone.
+const ready = (state, executionReady) => ({
+  ...background(state),
+  execution: { ready: executionReady },
+});
+const buildNotices = [
+  {
+    name: 'no execution worker is ready while the server worker runs',
+    status: ready('running', false),
+    error: undefined,
+    expected: { kind: 'no_execution' },
+  },
+  {
+    name: 'an execution worker is ready while the server worker is stopped',
+    status: ready('stopped', true),
+    error: undefined,
+    expected: undefined,
+  },
+  {
+    name: 'a failed read shows the failure',
+    status: ready('running', true),
+    error: 'Connection refused.',
+    expected: { kind: 'unread', message: 'Connection refused.' },
+  },
+  {
+    name: 'no answer shows no notice',
+    status: undefined,
+    error: undefined,
+    expected: undefined,
+  },
+];
+for (const { name, status, error, expected } of buildNotices) {
+  test(`workerNoticeOf for a build: ${name}`, () => {
+    assert.deepEqual(workerNoticeOf('run_profile', status, error), expected);
+  });
+}
+
+test('pressBuild makes a build press of the revision under a new key', () => {
+  assert.deepEqual(
+    pressBuild(4, () => 'key-1'),
+    { kind: 'build', revision: 4, key: 'key-1' },
+  );
+});
+
+test('statusAfterFailure keeps profile_unknown apart from any other failure', () => {
+  assert.deepEqual(
+    statusAfterFailure(apiError(422, 'profile_unknown', 'Unknown profile.')),
+    { kind: 'profile_unknown' },
+  );
+  assert.deepEqual(
+    statusAfterFailure(apiError(404, 'not_found', 'Not found.')),
+    { kind: 'failed', message: 'Not found.' },
+  );
+});
+
+/** A head status of revision 5 in `status`, with `fields` added. */
+const head = (status, fields = {}) => ({
+  profile: 'react-v1',
+  head_revision: 5,
+  status,
+  ...fields,
+});
+
+// The banner names the head as the newest revision, says its status, the
+// failure in words and the job, and names the latest build when it is older.
+const banners = [
+  {
+    name: 'a built head',
+    status: head('built', { latest_build_revision: 5 }),
+    title: 'Revision 5, the newest: built',
+    lines: [],
+  },
+  {
+    name: 'a pending head with an older build',
+    status: head('pending', { job_id: 'job_x', latest_build_revision: 3 }),
+    title: 'Revision 5, the newest: build pending',
+    lines: ['Job job_x.', 'The latest build is of revision 3.'],
+  },
+  {
+    name: 'a failed head without any build',
+    status: head('failed', {
+      job_id: 'job_x',
+      failure: 'build_failed',
+      diagnostics: [{ message: 'Unexpected token.' }],
+    }),
+    title: 'Revision 5, the newest: build failed',
+    lines: [
+      'The build reported errors.',
+      'Job job_x.',
+      'No revision has a build yet.',
+    ],
+  },
+  {
+    name: 'a head that was never built, with an older build',
+    status: head('none', { latest_build_revision: 4 }),
+    title: 'Revision 5, the newest: not built',
+    lines: ['The latest build is of revision 4.'],
+  },
+];
+for (const { name, status, title, lines } of banners) {
+  test(`the build status banner: ${name}`, () => {
+    assert.equal(headStatusTitle(status), title);
+    assert.deepEqual(headStatusLines(status), lines);
+  });
+}
+
+test('buildText and locationText state a build and a diagnostic position', () => {
+  assert.equal(
+    buildText({ file_count: 1, byte_count: 1 }),
+    '1 file built, 1 byte',
+  );
+  assert.equal(
+    buildText({ file_count: 3, byte_count: 2048 }),
+    '3 files built, 2048 bytes',
+  );
+  assert.equal(
+    locationText({ path: 'src/App.tsx', line: 4, column: 9 }),
+    'src/App.tsx:4:9',
+  );
+});
 
 const endedStates = [
   ['queued', false],
@@ -640,6 +779,14 @@ test('refusalText names job_ended', () => {
     refusalText('job_ended', 'unused'),
     'This job has already ended, so it cannot be cancelled (job_ended).',
   );
+});
+
+test('refusalText names profile_unknown and the profile', () => {
+  assert.equal(
+    refusalText('profile_unknown', 'unused'),
+    'This server cannot build the react-v1 profile (profile_unknown).',
+  );
+  assert.equal(PROFILE_UNKNOWN_TEXT, refusalText('profile_unknown', 'unused'));
 });
 
 test('refusalText shows the server message for any other refusal', () => {

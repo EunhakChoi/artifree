@@ -1,10 +1,14 @@
 /**
  * The words of the Jobs tab on an artifact's page (decision 0055, rules 13 and
- * 14). Plain code without React, so the wording is bundled and tested on its
- * own.
+ * 14, and decision 0058, R03ea). Plain code without React, so the wording is
+ * bundled and tested on its own.
  */
 import type {
   BackgroundStatus,
+  BuildStatus,
+  DiagnosticLocation,
+  HeadBuildStatus,
+  JobBuild,
   JobFailure,
   JobKind,
   JobProblem,
@@ -12,6 +16,8 @@ import type {
   JobState,
   JobVerdict,
 } from '@artifree/contracts';
+import { BUILD_PROFILE } from './jobs-model';
+import type { NamedRefusal, Refusal } from './jobs-model';
 
 /** The name of each kind of job. */
 const KIND_LABELS: Record<JobKind, string> = {
@@ -120,23 +126,91 @@ export function workerText(status: BackgroundStatus): string {
   return `Worker mode: ${status.worker.mode}. Worker state: ${status.worker.state}.`;
 }
 
+/**
+ * What the tab says while the server cannot build the profile: the banner and
+ * a refused "Build revision N" (decision 0058, R03ea).
+ */
+export const PROFILE_UNKNOWN_TEXT = `This server cannot build the ${BUILD_PROFILE} profile (profile_unknown).`;
+
 /** The words of each refusal that has its own words (rule 14). */
-const REFUSAL_TEXT: Record<'too_many_jobs' | 'job_ended', string> = {
+const REFUSAL_TEXT: Record<NamedRefusal, string> = {
   too_many_jobs:
     'Too many jobs are waiting or running (too_many_jobs). Wait for one to end, or cancel one.',
   job_ended:
     'This job has already ended, so it cannot be cancelled (job_ended).',
+  profile_unknown: PROFILE_UNKNOWN_TEXT,
 };
 
 /**
- * The words for a refused request. `too_many_jobs` and `job_ended` have their
- * own words; any other refusal shows the message it came with.
+ * The words for a refused request. `too_many_jobs`, `job_ended` and
+ * `profile_unknown` have their own words; any other refusal shows the message
+ * it came with.
  */
-export function refusalText(
-  refusal: 'too_many_jobs' | 'job_ended' | 'other',
-  message: string,
-): string {
+export function refusalText(refusal: Refusal, message: string): string {
   return refusal === 'other' ? message : REFUSAL_TEXT[refusal];
+}
+
+/** The files and bytes a succeeded build published (decision 0058, R03ea). */
+export function buildText(build: JobBuild): string {
+  const files = build.file_count === 1 ? 'file' : 'files';
+  const bytes = build.byte_count === 1 ? 'byte' : 'bytes';
+  return `${build.file_count} ${files} built, ${build.byte_count} ${bytes}`;
+}
+
+/** Where a build diagnostic points, as `path:line:column`. */
+export function locationText(location: DiagnosticLocation): string {
+  return `${location.path}:${location.line}:${location.column}`;
+}
+
+/**
+ * The notice of a build queued past `QUEUED_NOTICE_MS` while no execution worker
+ * is ready (decision 0058, R03ea).
+ */
+export const NO_EXECUTION_TEXT =
+  'No execution worker is ready, so this build waits';
+
+/** What the notice adds: how a build that keeps waiting ends. */
+export const NO_EXECUTION_DETAIL =
+  'If none becomes ready, the build ends as execution_unavailable after ten minutes.';
+
+/** How the banner names each head status. */
+const HEAD_STATUS_TEXT: Record<HeadBuildStatus, string> = {
+  built: 'built',
+  pending: 'build pending',
+  failed: 'build failed',
+  none: 'not built',
+};
+
+/**
+ * The banner's title: the head revision named as the newest, and its status
+ * (decision 0058, R03ea).
+ */
+export function headStatusTitle(status: BuildStatus): string {
+  return `Revision ${status.head_revision}, the newest: ${HEAD_STATUS_TEXT[status.status]}`;
+}
+
+/**
+ * The banner's sentences after its title: the failure in words, the job that
+ * sets the status, and the latest build's revision when it is not the head.
+ * Diagnostics are shown in the failed build's row only.
+ */
+export function headStatusLines(status: BuildStatus): readonly string[] {
+  const lines: string[] = [];
+  if (status.status === 'failed' && status.failure) {
+    lines.push(failureText(status.failure));
+  }
+  if (typeof status.job_id === 'string') {
+    lines.push(`Job ${status.job_id}.`);
+  }
+  const latest = status.latest_build_revision;
+  if (typeof latest === 'number') {
+    if (latest !== status.head_revision) {
+      lines.push(`The latest build is of revision ${latest}.`);
+    }
+  } else {
+    lines.push('No revision has a build yet.');
+  }
+  return lines;
 }
 
 /** What the tab says when an artifact has no jobs. */

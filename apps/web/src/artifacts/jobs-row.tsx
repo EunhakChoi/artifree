@@ -1,11 +1,18 @@
 /**
- * One job of the artifact page's Jobs tab (decision 0055, rules 13 and 14): its
- * fields, its outcome in words, Cancel with the outcome of its last press, and
- * the notice of a queued job that no worker takes. The row keeps no state of
+ * One job of the artifact page's Jobs tab (decision 0055, rules 13 and 14, and
+ * decision 0058, R03ea): its fields, its outcome in words, a build's counts and
+ * diagnostics, Cancel with the outcome of its last press, and the notice of a
+ * queued job that no worker takes. The row keeps no state of
  * its own; its parent passes in what the tab knows.
  */
 import { useId } from 'react';
-import type { BackgroundStatus, Job, JobResult } from '@artifree/contracts';
+import type {
+  BackgroundStatus,
+  Job,
+  JobDiagnostic,
+  JobKind,
+  JobResult,
+} from '@artifree/contracts';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -23,10 +30,14 @@ import {
   CANCEL_NOTE,
   CANCEL_REQUESTED_TEXT,
   CANCELLED_TEXT,
+  NO_EXECUTION_DETAIL,
+  NO_EXECUTION_TEXT,
   NO_WORKER_TEXT,
+  buildText,
   checkedText,
   failureText,
   kindLabel,
+  locationText,
   moreFindings,
   problemText,
   refusalText,
@@ -82,6 +93,9 @@ export function JobRow(props: JobRowProps) {
           </CardAction>
           <CardDescription>
             <div className="flex flex-wrap gap-x-4 gap-y-1">
+              {typeof job.profile === 'string' ? (
+                <span>Profile {job.profile}</span>
+              ) : null}
               <span>
                 Attempt {job.attempt} of {job.max_attempts}
               </span>
@@ -107,8 +121,16 @@ export function JobRow(props: JobRowProps) {
             {job.state === 'succeeded' && job.result ? (
               <ResultDetails result={job.result} />
             ) : null}
+            {job.state === 'succeeded' && job.build ? (
+              <p>{buildText(job.build)}</p>
+            ) : null}
             {job.state === 'failed' && job.failure ? (
               <p>{failureText(job.failure)}</p>
+            ) : null}
+            {job.state === 'failed' &&
+            job.diagnostics !== undefined &&
+            job.diagnostics.length > 0 ? (
+              <Diagnostics diagnostics={job.diagnostics} />
             ) : null}
             {job.state === 'cancelled' ? <p>{CANCELLED_TEXT}</p> : null}
             {!ended && job.cancel_requested ? (
@@ -116,6 +138,7 @@ export function JobRow(props: JobRowProps) {
             ) : null}
             {job.state === 'queued' && overdue ? (
               <WorkerNotice
+                kind={job.kind}
                 background={background}
                 backgroundError={backgroundError}
               />
@@ -207,8 +230,37 @@ function ResultDetails({ result }: { result: JobResult }) {
   );
 }
 
+/**
+ * A failed build's diagnostics, in their order (decision 0058, R03ea). Their
+ * text comes from the bundler and can quote the artifact's source, so it is
+ * rendered as plain text, never as markup or links.
+ */
+function Diagnostics({
+  diagnostics,
+}: {
+  diagnostics: readonly JobDiagnostic[];
+}) {
+  return (
+    <ul aria-label="Diagnostics" className="flex flex-col gap-1">
+      {diagnostics.map((diagnostic, index) => (
+        // Diagnostics have no identity of their own; their order is fixed.
+        <li key={index} className="break-words">
+          {diagnostic.location ? (
+            <>
+              <code>{locationText(diagnostic.location)}</code>:{' '}
+            </>
+          ) : null}
+          {diagnostic.message}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 /** The props of the notice about a queued job that no worker takes. */
 interface WorkerNoticeProps {
+  /** The kind of the queued job, which says which worker it waits for. */
+  readonly kind: JobKind;
   /** The last answer of `GET /v1/background`, once read. */
   readonly background: BackgroundStatus | undefined;
   /** The failure of the last read of `GET /v1/background`, in words. */
@@ -217,10 +269,15 @@ interface WorkerNoticeProps {
 
 /**
  * The notice of a job queued past `QUEUED_NOTICE_MS` (rule 14): the worker's
- * mode and state when no worker runs, or that the worker could not be read.
+ * mode and state when no worker runs, that no execution worker is ready for a
+ * build (decision 0058, R03ea), or that the worker could not be read.
  */
-function WorkerNotice({ background, backgroundError }: WorkerNoticeProps) {
-  const notice = workerNoticeOf(background, backgroundError);
+function WorkerNotice({
+  kind,
+  background,
+  backgroundError,
+}: WorkerNoticeProps) {
+  const notice = workerNoticeOf(kind, background, backgroundError);
   if (notice === undefined) return null;
   switch (notice.kind) {
     case 'unread':
@@ -235,6 +292,13 @@ function WorkerNotice({ background, backgroundError }: WorkerNoticeProps) {
         <Alert>
           <AlertTitle>{NO_WORKER_TEXT}</AlertTitle>
           <AlertDescription>{workerText(notice.status)}</AlertDescription>
+        </Alert>
+      );
+    case 'no_execution':
+      return (
+        <Alert>
+          <AlertTitle>{NO_EXECUTION_TEXT}</AlertTitle>
+          <AlertDescription>{NO_EXECUTION_DETAIL}</AlertDescription>
         </Alert>
       );
     default: {
