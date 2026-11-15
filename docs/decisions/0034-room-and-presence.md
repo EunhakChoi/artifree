@@ -13,6 +13,11 @@ delivery guarantee. The routes, numbers, identities and errors below are
 Artifree's own decisions. Nothing below is an observation of the original
 product.
 
+> **Note, 2026-11-16 ([0060](0060-access-model.md)).** 0060 rule 12
+> proposes that, once S02 implements sharing, an artifact's room is shared by
+> its owner and members. Until then rooms are keyed by actor and artifact as
+> below, and no numbered rule here changes.
+
 ## Context
 
 Several views of one artifact can be open at once: two browser tabs, a page and
