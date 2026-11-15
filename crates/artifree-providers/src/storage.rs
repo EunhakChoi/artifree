@@ -846,6 +846,9 @@ impl ArtifactStore for SqliteStore {
                     "purged" => ChangeKind::Purged,
                     "data_changed" => ChangeKind::DataChanged,
                     "job_changed" => ChangeKind::JobChanged,
+                    "access_granted" => ChangeKind::AccessGranted,
+                    "access_changed" => ChangeKind::AccessChanged,
+                    "access_revoked" => ChangeKind::AccessRevoked,
                     other => return Err(corrupt(format!("change kind {other}"))),
                 },
                 revision: stored_revision(revision)?,
@@ -1259,25 +1262,98 @@ fn record_change(
     position: Position,
     now: UnixMillis,
 ) -> Result<(), StoreError> {
-    // The change belongs to the artifact's owner (decision 0036). Only the
-    // kinds of a commit to the artifact itself take their feed from here; a
-    // data change names the actor whose space changed ([`record_data_change`]).
-    let owner: String = transaction
+    // A change of the artifact itself reaches everyone who can read it, each
+    // in their own feed (decision 0060 rule 13): the owner, and every current
+    // member while the artifact is outside the trash. The move to the trash
+    // is a member's last row of it, and only the owner hears of it in the
+    // trash (a purge included). A data change names the actor whose space
+    // changed ([`record_data_change`]).
+    for reader in readers(transaction, id, kind == ChangeKind::Deleted)? {
+        append_change(
+            transaction,
+            &reader,
+            id,
+            kind,
+            ChangeDetail::None,
+            position,
+            now,
+        )?;
+    }
+    Ok(())
+}
+
+/// The users who receive a change of the artifact: its owner first, then
+/// every current member in user order, unless the artifact is in the trash
+/// and `entering_trash` is false (decision 0060 rule 13).
+fn readers(
+    transaction: &Transaction<'_>,
+    id: &ArtifactId,
+    entering_trash: bool,
+) -> Result<Vec<String>, StoreError> {
+    let (owner, trashed): (String, bool) = transaction
         .query_row(
-            "SELECT owner FROM artifacts WHERE id = ?1",
+            "SELECT owner, deleted_at IS NOT NULL FROM artifacts WHERE id = ?1",
             [id.as_str()],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(unavailable)?;
-    append_change(
-        transaction,
-        &owner,
-        id,
-        kind,
-        ChangeDetail::None,
-        position,
-        now,
-    )
+    let mut readers = vec![owner];
+    if !trashed || entering_trash {
+        let members: Vec<String> = transaction
+            .prepare(
+                "SELECT user_id FROM artifact_members
+                 WHERE artifact_id = ?1 AND role IS NOT NULL ORDER BY user_id",
+            )
+            .map_err(unavailable)?
+            .query_map([id.as_str()], |row| row.get(0))
+            .map_err(unavailable)?
+            .collect::<Result<_, _>>()
+            .map_err(unavailable)?;
+        readers.extend(members);
+    }
+    Ok(readers)
+}
+
+/// The artifact's current revision and metadata revision.
+fn current_position(
+    transaction: &Transaction<'_>,
+    id: &ArtifactId,
+) -> Result<Position, StoreError> {
+    let (revision, metadata): (i64, i64) = transaction
+        .query_row(
+            "SELECT current_revision, metadata_revision FROM artifacts WHERE id = ?1",
+            [id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(unavailable)?;
+    Ok((stored_revision(revision)?, stored_metadata(metadata)?))
+}
+
+/// Appends an access change of the artifact (decision 0060 rule 14) at its
+/// current position, to every reader of it after the change ([`readers`]) and
+/// to `revoked`, the user a revocation removed, if any.
+fn record_access_change(
+    transaction: &Transaction<'_>,
+    id: &ArtifactId,
+    kind: ChangeKind,
+    revoked: Option<&ActorId>,
+) -> Result<(), StoreError> {
+    let now = commit_time(transaction)?;
+    let position = current_position(transaction, id)?;
+    let mut receivers = readers(transaction, id, false)?;
+    receivers.extend(revoked.map(|user| user.as_str().to_owned()));
+    for receiver in receivers {
+        append_change(
+            transaction,
+            &receiver,
+            id,
+            kind,
+            ChangeDetail::None,
+            position,
+            now,
+        )?;
+    }
+    Ok(())
 }
 
 /// Appends the data change of a write that left `actor`'s space of the
@@ -1294,14 +1370,7 @@ fn record_data_change(
     version: AppDataVersion,
 ) -> Result<(), StoreError> {
     let now = commit_time(transaction)?;
-    let (revision, metadata): (i64, i64) = transaction
-        .query_row(
-            "SELECT current_revision, metadata_revision FROM artifacts WHERE id = ?1",
-            [id.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(unavailable)?;
-    let position = (stored_revision(revision)?, stored_metadata(metadata)?);
+    let position = current_position(transaction, id)?;
     append_change(
         transaction,
         actor.as_str(),
@@ -1392,6 +1461,9 @@ fn append_change(
         ChangeKind::Purged => "purged",
         ChangeKind::DataChanged => "data_changed",
         ChangeKind::JobChanged => "job_changed",
+        ChangeKind::AccessGranted => "access_granted",
+        ChangeKind::AccessChanged => "access_changed",
+        ChangeKind::AccessRevoked => "access_revoked",
         _ => {
             return Err(StoreError::Unavailable(
                 "this store cannot record that change".into(),

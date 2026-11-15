@@ -136,6 +136,9 @@ const CHANGE_KINDS: Record<ChangeKind, true> = {
   purged: true,
   data_changed: true,
   job_changed: true,
+  access_granted: true,
+  access_changed: true,
+  access_revoked: true,
 };
 
 // A record for the same reason as the error codes: a part added later must

@@ -19,7 +19,7 @@ use crate::storage::{random_bytes, unavailable};
 
 /// The schema version this build creates and reads. It is the database's
 /// `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i64 = 18;
+pub const SCHEMA_VERSION: i64 = 19;
 
 // Asset associations and receipts deliberately retain no bytes outside `blobs`.
 const ASSET_SCHEMA: &str = "
@@ -733,6 +733,51 @@ CREATE TABLE access_requests (
 CREATE INDEX access_requests_by_artifact ON access_requests (artifact_id);
 ";
 
+/// Added in schema version 19 (decision 0060 rule 14, slice S02c): the change
+/// kinds `access_granted`, `access_changed` and `access_revoked`. The change
+/// table is rebuilt for its checked kinds; every row keeps its global
+/// sequence, its actor and position in that actor's feed, and every other
+/// column.
+const ACCESS_CHANGE_SCHEMA: &str = "
+CREATE TABLE changes_v19 (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor TEXT NOT NULL,
+    actor_seq INTEGER NOT NULL CHECK (actor_seq >= 1),
+    artifact_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN
+        ('created', 'revised', 'metadata_updated', 'deleted', 'recovered', 'purged',
+         'data_changed', 'job_changed', 'access_granted', 'access_changed',
+         'access_revoked')),
+    revision INTEGER NOT NULL,
+    metadata_revision INTEGER NOT NULL,
+    data_version INTEGER,
+    job_id TEXT,
+    committed_at INTEGER NOT NULL,
+    UNIQUE (actor, actor_seq),
+    FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision),
+    FOREIGN KEY (artifact_id, metadata_revision)
+        REFERENCES metadata_revisions (artifact_id, metadata_revision),
+    FOREIGN KEY (job_id) REFERENCES jobs (id),
+    CHECK ((kind = 'data_changed') = (data_version IS NOT NULL)),
+    CHECK (data_version IS NULL OR data_version >= 1),
+    CHECK ((kind = 'job_changed') = (job_id IS NOT NULL))
+) STRICT;
+INSERT INTO changes_v19 (sequence, actor, actor_seq, artifact_id, kind, revision,
+        metadata_revision, data_version, job_id, committed_at)
+    SELECT sequence, actor, actor_seq, artifact_id, kind, revision, metadata_revision,
+        data_version, job_id, committed_at
+    FROM changes;
+DROP TABLE changes;
+ALTER TABLE changes_v19 RENAME TO changes;
+";
+
+/// The steps that only add tables or columns, by the version they bring.
+const ADDED_TABLES: [(i64, &str); 3] = [
+    (16, PRESENCE_SCHEMA),
+    (17, TYPE_SCHEMA),
+    (18, ACCESS_SCHEMA),
+];
+
 /// Brings the database to [`SCHEMA_VERSION`] in one immediate transaction, or
 /// leaves it as it was. An empty database (version 0, no tables) is created
 /// fresh; an older version is upgraded step by step.
@@ -866,14 +911,13 @@ fn upgrade_steps(connection: &mut Connection) -> Result<(), StoreError> {
             rebuild_jobs(&transaction, schema, step)?;
         }
     }
-    for (step, schema) in [
-        (16, PRESENCE_SCHEMA),
-        (17, TYPE_SCHEMA),
-        (18, ACCESS_SCHEMA),
-    ] {
+    for (step, schema) in ADDED_TABLES {
         if version < step {
             transaction.execute_batch(schema).map_err(unavailable)?;
         }
+    }
+    if version < 19 {
+        rebuild_changes(&transaction, ACCESS_CHANGE_SCHEMA, 19)?;
     }
     // Foreign keys are off for these steps (decision 0057 rule 14), so they are
     // checked here: no table may have more foreign keys that do not resolve

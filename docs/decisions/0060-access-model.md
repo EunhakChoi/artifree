@@ -2,9 +2,10 @@
 
 Date: 2026-11-16. Status: **accepted as S02's design (S02s). S02a (the
 stored part of rules 1, 6 and 16: members, roles, the access version and
-the access generation, schema 18) and S02b (the core's and the store's role
-checks of rules 2 to 5, 9 and 17) are implemented; no route grants a role
-yet, so no request reaches them as a member, and every other rule is not
+the access generation, schema 18), S02b (the core's and the store's role
+checks of rules 2 to 5, 9 and 17) and S02c (the feed of rules 13 and 14,
+schema 19, contract 0.34.0) are implemented; no route grants a role yet, so
+no request reaches them as a member, and every other rule is not
 implemented.**
 Roadmap: S02s, S02.
 
@@ -313,7 +314,7 @@ S02 is split into slices, each its own pull request, in this order:
 | ----- | --------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------- |
 | S02a  | 1, 6 and 16 (storage) | Schema 18: `artifact_members`, `access_requests`, `artifacts.access_version`; the `AccessStore` port     | implemented                             |
 | S02b  | 2 to 5, 9, 11, 17     | The core's access and role checks on every artifact operation, read again in the committing transaction  | implemented, except as its section says |
-| S02c  | 13, 14                | Feed delivery to every reader and the access change rows                                                 | not implemented                         |
+| S02c  | 13, 14                | Feed delivery to every reader and the access change rows                                                 | implemented                             |
 | S02d  | 15, 16 (memory), 18   | What a revocation, a downgrade and the trash remove, and the confirmations against the access generation | not implemented                         |
 | S02e  | 6 to 8                | `/v1/me`, the access routes, listings with roles, the CLI and the contract                               | not implemented                         |
 | S02f  | 10                    | The declared shared space                                                                                | not implemented                         |
@@ -381,3 +382,24 @@ the service checks the role, so a viewer's malformed write is answered
 (S02e). Rule 11's
 build sharing needs nothing new: a build is already keyed by artifact,
 revision and profile, and a member reads it through the read check.
+
+**S02c (implemented).** A change of the artifact itself (created, revised,
+metadata, trash, recovery, purge) is appended, in its transaction, to the
+feed of the owner and of every current member, each with its own
+`actor_seq`; while the artifact is in the trash only the owner's feed gets
+rows, except the move into the trash, which every member gets as its last
+row of the artifact (rule 13). A data change and a job change stay in the
+feed of the user whose space or job it is. Schema 19 rebuilds the change
+table, keeping every row and number, for the new kinds `access_granted`,
+`access_changed` and `access_revoked` (rule 14): the store appends one in
+the transaction of each access change that changes something, to the owner
+and every member after the change and, for a revocation, to the revoked
+user, whose last row of the artifact it is. Contract 0.34.0 adds the three
+kinds to the wire `ChangeKind`; the TypeScript client knows them, and the
+web workspace, which has no sharing yet (S02h), treats them as a change that
+names the artifact's current revision. Behavioural tests over a real
+database (`crates/artifree-providers/tests/access_feed.rs`) fail when each
+guard is broken, except the trash branch of the fan-out: a purge deletes the
+member records before it records `purged`, so no request observes that
+branch. No route makes these rows reachable before S02e, which also wakes
+open streams after an access change.

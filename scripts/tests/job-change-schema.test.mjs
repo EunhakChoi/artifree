@@ -23,7 +23,7 @@ const validate = createAjv().compile({
 const VALID_JOB_ID = 'job_0123456789abcdef0123456789abcdef';
 const UPPERCASE_JOB_ID = 'job_0123456789ABCDEF0123456789ABCDEF';
 
-// The seven kinds other than job_changed, with the members each one requires.
+// The kinds other than job_changed, with the members each one requires.
 const OTHER_KINDS = [
   { kind: 'created', fields: {} },
   { kind: 'revised', fields: {} },
@@ -32,6 +32,9 @@ const OTHER_KINDS = [
   { kind: 'recovered', fields: {} },
   { kind: 'purged', fields: {} },
   { kind: 'data_changed', fields: { data_version: 1 } },
+  { kind: 'access_granted', fields: {} },
+  { kind: 'access_changed', fields: {} },
+  { kind: 'access_revoked', fields: {} },
 ];
 
 /** The members every ArtifactChange has, whatever its kind. */

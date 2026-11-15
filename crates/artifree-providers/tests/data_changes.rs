@@ -405,8 +405,7 @@ fn the_row_is_recorded_after_the_data_row_and_the_key() -> TestResult {
 }
 
 /// A write by a member of the owner's artifact goes to the member's own space
-/// and feed and leaves the owner's head (decision 0060 rule 9; the feed's
-/// delivery to every reader is S02c).
+/// and feed and leaves the owner's head (decision 0060 rules 9 and 13).
 #[test]
 fn a_write_by_another_actor_goes_to_that_actors_feed_and_not_the_owners() -> TestResult {
     let fixture = Fixture::new()?;
@@ -420,13 +419,15 @@ fn a_write_by_another_actor_goes_to_that_actors_feed_and_not_the_owners() -> Tes
         Role::Viewer,
     )?;
     let owner_head = fixture.head(&owner)?;
-    assert_eq!(fixture.head(&other)?, ChangeSequence(0));
+    // The grant is the member's first row (decision 0060 rule 14).
+    let other_head = fixture.head(&other)?;
+    assert_eq!(other_head, ChangeSequence(1));
 
     let receipt = fixture.write_as(&other, "theirs", 0, &set("a", "1")?)?;
     assert_eq!(receipt.version, AppDataVersion(1));
 
     assert_eq!(fixture.data_changes(&other)?, [(1, 2, 1)]);
-    assert_eq!(fixture.head(&other)?, ChangeSequence(1));
+    assert_eq!(fixture.head(&other)?, ChangeSequence(other_head.0 + 1));
     assert_eq!(
         fixture.head(&owner)?,
         owner_head,
@@ -440,7 +441,7 @@ fn a_write_by_another_actor_goes_to_that_actors_feed_and_not_the_owners() -> Tes
     // follows the owner's numbering.
     fixture.write("mine", 0, &set("b", "1")?)?;
     assert_eq!(fixture.head(&owner)?, ChangeSequence(owner_head.0 + 1));
-    assert_eq!(fixture.head(&other)?, ChangeSequence(1));
+    assert_eq!(fixture.head(&other)?, ChangeSequence(other_head.0 + 1));
     Ok(())
 }
 

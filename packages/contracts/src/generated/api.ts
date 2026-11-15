@@ -216,7 +216,17 @@ export type ErrorCode =
  * still means the artifact changed: read it again.
  */
 export type ChangeKind =
-  'created' | 'revised' | 'metadata_updated' | 'deleted' | 'recovered' | 'purged' | 'data_changed' | 'job_changed';
+  | 'created'
+  | 'revised'
+  | 'metadata_updated'
+  | 'deleted'
+  | 'recovered'
+  | 'purged'
+  | 'data_changed'
+  | 'job_changed'
+  | 'access_granted'
+  | 'access_changed'
+  | 'access_revoked';
 /**
  * Version of a source export manifest.
  */

@@ -21,7 +21,7 @@ use artifree_domain::identity::{ActorId, ArtifactId};
 use artifree_ports::access_store::{
     AccessChange, AccessList, AccessReceipt, AccessRequest, AccessStore, AccessStoreError, Member,
 };
-use artifree_ports::artifact_store::{Delivery, RequestIdentity, StoreError};
+use artifree_ports::artifact_store::{ChangeKind, Delivery, RequestIdentity, StoreError};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use super::{SqliteStore, corrupt, key_used_elsewhere, unavailable};
@@ -266,6 +266,15 @@ fn change(
                 params![request.artifact.as_str(), stored(next)?],
             )
             .map_err(unavailable)?;
+        // Decision 0060 rule 14: the change is a row of its own, to everyone
+        // who can read the artifact now and, for a revocation, to the user
+        // who no longer can.
+        let (kind, revoked) = match (stored_role, role) {
+            (None, _) => (ChangeKind::AccessGranted, None),
+            (Some(_), Some(_)) => (ChangeKind::AccessChanged, None),
+            (Some(_), None) => (ChangeKind::AccessRevoked, Some(request.user)),
+        };
+        super::record_access_change(transaction, request.artifact, kind, revoked)?;
         AccessVersion(next)
     };
     transaction

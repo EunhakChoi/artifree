@@ -443,6 +443,17 @@ pub enum ChangeKind {
     /// the actor that owns the job. The artifact's source and metadata did not
     /// change.
     JobChanged,
+    /// The owner made a user who was not a member a member (decision 0060
+    /// rule 14). The row is in the feed of the owner, of every member, and of
+    /// that user. The artifact's source and metadata did not change.
+    AccessGranted,
+    /// The owner changed a member's role. The row is in the feed of the owner
+    /// and of every member.
+    AccessChanged,
+    /// The owner revoked a member. The row is in the feed of the owner, of
+    /// every remaining member, and of the revoked user, whose last row of the
+    /// artifact it is.
+    AccessRevoked,
 }
 
 /// One commit as recorded in the change feed.
