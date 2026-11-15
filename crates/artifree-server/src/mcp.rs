@@ -32,6 +32,7 @@ use artifree_contracts::mcp::{
 };
 use artifree_core::artifacts::ArtifactError;
 use artifree_core::parts::{Boundary, ByteRange};
+use artifree_domain::artifact_type::TypeRelease;
 use artifree_domain::identity::{ActorId, StateGeneration};
 use axum::Router;
 use axum::extract::State;
@@ -563,11 +564,15 @@ fn get_type(state: &AppState, arguments: GetTypeArguments) -> Result<TypeResult,
         release,
         path,
     } = arguments;
-    let release = release.map(|release| release.to_string());
+    let release = release
+        .map(|release| TypeRelease::new(release.get()))
+        .transpose()
+        .map_err(|error| ApiError::invalid(format!("release: {error}")))?;
     match path {
-        None => operations::show_type(state, &type_id, release.as_deref()).map(TypeResult::Release),
-        Some(path) => operations::type_reference(state, &type_id, release.as_deref(), &path)
-            .map(TypeResult::Reference),
+        None => operations::show_type(state, &type_id, release).map(TypeResult::Release),
+        Some(path) => {
+            operations::type_reference(state, &type_id, release, &path).map(TypeResult::Reference)
+        }
     }
 }
 

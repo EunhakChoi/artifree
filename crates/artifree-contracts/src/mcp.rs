@@ -8,7 +8,7 @@
 //! shape only: the server validates every value again.
 
 use std::fmt;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 
 use schemars::generate::SchemaSettings;
 use schemars::transform::RecursiveTransform;
@@ -102,7 +102,8 @@ pub struct GetTypeArguments {
     /// A release of the type; by default its current release. An artifact's
     /// `type.release` names the release whose rules it follows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub release: Option<NonZeroU64>,
+    #[schemars(range(min = 1, max = 4_294_967_295_u32))]
+    pub release: Option<NonZeroU32>,
     /// A reference file of that release, one of its `references`; without
     /// it the release and its guide are returned.
     #[serde(default, skip_serializing_if = "Option::is_none")]

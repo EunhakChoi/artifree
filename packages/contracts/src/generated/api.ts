@@ -2568,7 +2568,7 @@ export interface DataOutboxBinding {
  */
 export interface TypeList {
   /**
-   * What a guide is; see [`TYPE_NOTICE`].
+   * What a guide is: first-party information that grants no permission.
    */
   notice: string;
   /**
@@ -2637,7 +2637,7 @@ export interface TypeDescriptor {
    */
   guide: string;
   /**
-   * What a guide is; see [`TYPE_NOTICE`].
+   * What a guide is: first-party information that grants no permission.
    */
   notice: string;
   release: TypeSummary;
@@ -2654,6 +2654,11 @@ export interface TypeReference {
    * The type's id.
    */
   id: string;
+  /**
+   * What a type's text is: first-party information that grants no
+   * permission.
+   */
+  notice: string;
   /**
    * The reference file's path.
    */

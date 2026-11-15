@@ -775,7 +775,7 @@ async fn job_requests_that_cannot_be_served_get_the_http_error_codes() -> TestRe
 }
 
 #[tokio::test]
-async fn the_job_tools_say_what_they_change() -> TestResult {
+async fn the_job_and_type_tools_say_what_they_change() -> TestResult {
     let harness = Harness::new();
     let (_, body) = harness.post(rpc(Some(TOKEN), &list_tools())?).await?;
     let listed: Value = serde_json::from_slice(&body)?;
@@ -2105,14 +2105,28 @@ async fn agents_read_the_type_catalog() -> TestResult {
         "{reference}"
     );
     assert_eq!(reference["structuredContent"]["release"], 1);
+    assert_eq!(
+        reference["structuredContent"]["notice"], listed["structuredContent"]["notice"],
+        "a reference file carries the notice too"
+    );
     for unknown in [
         json!({ "type_id": "slides" }),
+        json!({ "type_id": "React" }),
         json!({ "type_id": "react", "release": 2 }),
         json!({ "type_id": "react", "path": "nothing.md" }),
+        json!({ "type_id": "react", "release": 2, "path": "layout-example.md" }),
     ] {
         let refused = harness.call("get_type", unknown.clone()).await?;
         assert_eq!(error_code(&refused), "not_found", "{unknown}: {refused}");
     }
+    // A release no type can have is a malformed argument, not a missing one.
+    let malformed = harness
+        .call(
+            "get_type",
+            json!({ "type_id": "react", "release": 4_294_967_296_u64 }),
+        )
+        .await?;
+    assert_eq!(error_code(&malformed), "invalid_request", "{malformed}");
 
     Ok(())
 }
@@ -2155,13 +2169,16 @@ async fn agents_create_from_a_type_with_the_http_semantics() -> TestResult {
         lacking["structuredContent"]["error"]["missing_paths"],
         json!(["index.html", "src/main.tsx"])
     );
-    let unknown = harness
-        .call(
-            "create_artifact",
-            json!({ "title": "App", "type": "slides", "idempotency_key": "type-create-3" }),
-        )
-        .await?;
-    assert_eq!(error_code(&unknown), "type_unknown");
+    // An id that is not a type's, malformed ones included, is unknown.
+    for (key, type_id) in [("type-create-3", "slides"), ("type-create-5", "React")] {
+        let unknown = harness
+            .call(
+                "create_artifact",
+                json!({ "title": "App", "type": type_id, "idempotency_key": key }),
+            )
+            .await?;
+        assert_eq!(error_code(&unknown), "type_unknown", "{type_id}: {unknown}");
+    }
     let untyped = harness
         .call(
             "create_artifact",

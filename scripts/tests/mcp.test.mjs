@@ -824,6 +824,54 @@ test('Results conform to the API contract in both eras', async () => {
   }
 });
 
+test('Type tools and a typed create pass the SDK output checks in both eras', async () => {
+  for (const era of Object.keys(ERAS)) {
+    await withClient(async (client) => {
+      // The SDK checks each structured result against the tool's
+      // outputSchema, both get_type forms included.
+      const listed = await ok(client, 'list_types', {});
+      assert.deepEqual(
+        listed.types.map((type) => type.id),
+        ['react'],
+      );
+      const release = await ok(client, 'get_type', { type_id: 'react' });
+      assert.equal(release.release.release, 1);
+      assert.match(release.guide, /src\/main\.tsx/);
+      const reference = await ok(client, 'get_type', {
+        type_id: 'react',
+        release: 1,
+        path: 'layout-example.md',
+      });
+      assert.equal(reference.path, 'layout-example.md');
+      assert.equal(reference.notice, listed.notice);
+      const created = await ok(client, 'create_artifact', {
+        title: `Typed ${era}`,
+        type: 'react',
+        idempotency_key: freshKey(),
+      });
+      assert.deepEqual(created.artifact.type, { id: 'react', release: 1 });
+      const error = await refused(
+        client,
+        'create_artifact',
+        {
+          title: 'Lacking',
+          type: 'react',
+          files: [utf8('index.html', '<p>x</p>')],
+          idempotency_key: freshKey(),
+        },
+        'type_requirements',
+      );
+      assert.deepEqual(error.missing_paths, ['src/main.tsx']);
+      await refused(
+        client,
+        'get_type',
+        { type_id: 'react', release: 2 },
+        'not_found',
+      );
+    }, era);
+  }
+});
+
 test('Job tools conform to the contract, share HTTP semantics, and report errors in both eras', async () => {
   const validate = createAjv().compile(apiSchema);
   for (const era of Object.keys(ERAS)) {

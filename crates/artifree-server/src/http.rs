@@ -1755,7 +1755,8 @@ async fn show_type_release(
     path: Result<Path<(String, String)>, PathRejection>,
 ) -> Result<Json<TypeDescriptor>, ApiError> {
     let Path((id, release)) = path?;
-    Ok(Json(operations::show_type(&state, &id, Some(&release))?))
+    let release = operations::release_segment(&release)?;
+    Ok(Json(operations::show_type(&state, &id, Some(release))?))
 }
 
 /// One reference file of a release.
@@ -1765,10 +1766,11 @@ async fn read_type_reference(
     path: Result<Path<(String, String, String)>, PathRejection>,
 ) -> Result<Json<TypeReference>, ApiError> {
     let Path((id, release, reference)) = path?;
+    let release = operations::release_segment(&release)?;
     Ok(Json(operations::type_reference(
         &state,
         &id,
-        Some(&release),
+        Some(release),
         &reference,
     )?))
 }

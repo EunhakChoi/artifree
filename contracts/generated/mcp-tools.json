@@ -1170,7 +1170,7 @@
             "description": "Body of `GET /v1/types`: the current release of each type, in catalog\norder.",
             "properties": {
               "notice": {
-                "description": "What a guide is; see [`TYPE_NOTICE`].",
+                "description": "What a guide is: first-party information that grants no permission.",
                 "type": "string"
               },
               "types": {
@@ -1577,6 +1577,7 @@
           },
           "release": {
             "description": "A release of the type; by default its current release. An artifact's\n`type.release` names the release whose rules it follows.",
+            "maximum": 4294967295,
             "minimum": 1,
             "type": [
               "integer",
@@ -1608,7 +1609,7 @@
                     "type": "string"
                   },
                   "notice": {
-                    "description": "What a guide is; see [`TYPE_NOTICE`].",
+                    "description": "What a guide is: first-party information that grants no permission.",
                     "type": "string"
                   },
                   "release": {
@@ -1740,6 +1741,10 @@
                     "description": "The type's id.",
                     "type": "string"
                   },
+                  "notice": {
+                    "description": "What a type's text is: first-party information that grants no\npermission.",
+                    "type": "string"
+                  },
                   "path": {
                     "description": "The reference file's path.",
                     "type": "string"
@@ -1751,6 +1756,7 @@
                   }
                 },
                 "required": [
+                  "notice",
                   "id",
                   "release",
                   "path",

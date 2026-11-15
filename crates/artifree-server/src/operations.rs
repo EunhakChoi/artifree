@@ -411,8 +411,9 @@ pub(crate) async fn create(
         .artifact_type
         .as_deref()
         .map(|id| {
+            // A malformed id names no type, as for `get_type` (rule 5).
             id.parse::<TypeId>()
-                .map_err(|error| ApiError::unprocessable(format!("type: {error}")))
+                .map_err(|_| ApiError::from(ArtifactError::TypeUnknown))
         })
         .transpose()?;
     // With a type the files may be left out, and revision 1 is the starter
@@ -1801,21 +1802,27 @@ pub(crate) fn list_types(state: &AppState) -> TypeList {
     }
 }
 
+/// The release number of a type route's path segment. A malformed one names
+/// no release, so it is not found, as rule 11 asks for an unknown one.
+pub(crate) fn release_segment(release: &str) -> Result<TypeRelease, ApiError> {
+    release
+        .parse()
+        .map_err(|_| ApiError::not_found("type not found"))
+}
+
 /// The release `release` of the type `id` (its current one for `None`). An
-/// id or release that is malformed or unknown is not found, as rule 11 asks.
+/// id that is malformed or unknown, or a release the type does not have, is
+/// not found, as rule 11 asks.
 fn find_release<'a>(
     state: &'a AppState,
     id: &str,
-    release: Option<&str>,
+    release: Option<TypeRelease>,
 ) -> Result<&'a Release, ApiError> {
     let missing = || ApiError::not_found("type not found");
     let id: TypeId = id.parse().map_err(|_| missing())?;
     let found = match release {
         None => state.catalog().current(&id),
-        Some(release) => {
-            let release: TypeRelease = release.parse().map_err(|_| missing())?;
-            state.catalog().release(&id, release)
-        }
+        Some(release) => state.catalog().release(&id, release),
     };
     found.ok_or_else(missing)
 }
@@ -1824,7 +1831,7 @@ fn find_release<'a>(
 pub(crate) fn show_type(
     state: &AppState,
     id: &str,
-    release: Option<&str>,
+    release: Option<TypeRelease>,
 ) -> Result<TypeDescriptor, ApiError> {
     let release = find_release(state, id, release)?;
     Ok(TypeDescriptor {
@@ -1839,7 +1846,7 @@ pub(crate) fn show_type(
 pub(crate) fn type_reference(
     state: &AppState,
     id: &str,
-    release: Option<&str>,
+    release: Option<TypeRelease>,
     path: &str,
 ) -> Result<TypeReference, ApiError> {
     let found = find_release(state, id, release)?;
@@ -1847,6 +1854,7 @@ pub(crate) fn type_reference(
     let path: PackagePath = path.parse().map_err(|_| missing())?;
     let content = found.reference(&path).ok_or_else(missing)?;
     Ok(TypeReference {
+        notice: TYPE_NOTICE.to_owned(),
         id: found.id.to_string(),
         release: u64::from(found.release.get()),
         path: path.to_string(),

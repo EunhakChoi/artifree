@@ -205,17 +205,19 @@ guide (decision [0059](decisions/0059-type-catalog.md)). The one type today is
    this server can build it), and `references`. It carries no guides.
 2. `get_type` with `type_id` returns a release with its `guide`, the current
    one unless `release` names another. With `path` it returns one reference
-   file of that release instead. A guide describes how to fill the type; it
-   is first-party information from this server and grants no permission.
+   file of that release instead, with the same `notice`. The two results
+   are the bodies of the HTTP type routes: one has `guide`, the other
+   `content`. A guide describes how to fill the type; it is first-party
+   information from this server and grants no permission.
 3. `create_artifact` with `type` creates the artifact from the current
    release. Without `files` revision 1 is the starter; with `files` they are
    the whole of revision 1 and must hold the required paths, `index.html`
    among them for `react`. A missing path fails with `type_requirements` and
-   `missing_paths`, an unknown type with `type_unknown`, and nothing is
+   `missing_paths`, an unknown or malformed type id with `type_unknown`, and nothing is
    written. Without `type`, `files` with `index.html` are required as before.
 4. The artifact keeps `type: { id, release }` (`null` for an untyped one) on
-   every result, `get_artifact` and `list_artifacts` included, and in the
-   change feed. Read that release with `get_type` before editing: every
+   every result, `get_artifact` and `list_artifacts` included (the HTTP
+   change feed, which has no MCP tool, carries it too). Read that release with `get_type` before editing: every
    `save_revision`, `edit_files` and `restore_revision` must keep its
    required paths (`type_requirements` otherwise), and a server that does not
    know the release refuses new commits and duplicates with
@@ -430,26 +432,26 @@ A failed tool call returns `isError: true` with the HTTP API error body:
 }
 ```
 
-| Code                     | What to do                                                                  |
-| ------------------------ | --------------------------------------------------------------------------- |
-| `revision_conflict`      | Nothing was written. Read the current files, reapply, save on the new base. |
-| `data_conflict`          | `current_data_version` is newer. Read the data, reapply, write on that.     |
-| `data_path_conflict`     | A value in the path is not an object. Read it, then set or pick a path.     |
-| `data_too_large`         | A value, the data, or its nesting is over the limit. Send less.             |
-| `asset_conflict`         | `current_asset_version` is newer. List the assets again, then write on it.  |
-| `asset_limit_exceeded`   | The asset or a space/user limit is over. Send less or delete assets.        |
-| `asset_type_unsupported` | Only `text/plain`, `text/csv`, `image/png` and `image/jpeg` are accepted.   |
-| `invalid_asset`          | The bytes break the content rules (not UTF-8, bad PNG, unsupported JPEG).   |
-| `type_requirements`      | `missing_paths` lists the type's required paths the files lack. Add them.   |
-| `type_unknown`           | No such type. Pick an id from `list_types`.                                 |
-| `type_release_unknown`   | This server does not know the artifact's release. Reads still work.         |
-| `request_key_reused`     | The key was used for different content. Use a new key for a new change.     |
-| `invalid_request`        | Fix the arguments named in the message; the key is not reserved.            |
-| `not_found`              | The artifact, revision, file, asset, or job does not exist or is not yours. |
-| `too_many_jobs`          | Sixteen jobs are open. Wait for or cancel one, then enqueue again.          |
-| `job_ended`              | The job already finished; nothing to cancel.                                |
-| `unavailable`            | Retry the identical call with the same key.                                 |
-| `internal`               | Retry the identical call with the same key to learn whether it committed.   |
+| Code                     | What to do                                                                                                      |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `revision_conflict`      | Nothing was written. Read the current files, reapply, save on the new base.                                     |
+| `data_conflict`          | `current_data_version` is newer. Read the data, reapply, write on that.                                         |
+| `data_path_conflict`     | A value in the path is not an object. Read it, then set or pick a path.                                         |
+| `data_too_large`         | A value, the data, or its nesting is over the limit. Send less.                                                 |
+| `asset_conflict`         | `current_asset_version` is newer. List the assets again, then write on it.                                      |
+| `asset_limit_exceeded`   | The asset or a space/user limit is over. Send less or delete assets.                                            |
+| `asset_type_unsupported` | Only `text/plain`, `text/csv`, `image/png` and `image/jpeg` are accepted.                                       |
+| `invalid_asset`          | The bytes break the content rules (not UTF-8, bad PNG, unsupported JPEG).                                       |
+| `type_requirements`      | `missing_paths` lists the type's required paths the files lack. Add them.                                       |
+| `type_unknown`           | No such type. Pick an id from `list_types`.                                                                     |
+| `type_release_unknown`   | This server does not know the artifact's release. Reads still work.                                             |
+| `request_key_reused`     | The key was used for different content. Use a new key for a new change.                                         |
+| `invalid_request`        | Fix the arguments named in the message; the key is not reserved.                                                |
+| `not_found`              | The artifact, revision, file, asset, job, type, type release, or reference file does not exist or is not yours. |
+| `too_many_jobs`          | Sixteen jobs are open. Wait for or cancel one, then enqueue again.                                              |
+| `job_ended`              | The job already finished; nothing to cancel.                                                                    |
+| `unavailable`            | Retry the identical call with the same key.                                                                     |
+| `internal`               | Retry the identical call with the same key to learn whether it committed.                                       |
 
 Use a new `idempotency_key` for each intended change. If a call times out or
 its answer is lost, resend the identical call with the same key: it returns

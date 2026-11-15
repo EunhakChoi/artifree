@@ -1293,12 +1293,13 @@ export function parseTypeDescriptor(
 /** Parses `GET /v1/types/{id}/releases/{release}/references/{path}`. */
 export function parseTypeReference(value: unknown): TypeReference | undefined {
   if (!isRecord(value)) return undefined;
-  const { id, release, path, content } = value;
-  return isTypeId(id) &&
+  const { notice, id, release, path, content } = value;
+  return typeof notice === 'string' &&
+    isTypeId(id) &&
     isCount(release) &&
     release >= 1 &&
     typeof path === 'string' &&
     typeof content === 'string'
-    ? { id, release, path, content }
+    ? { notice, id, release, path, content }
     : undefined;
 }

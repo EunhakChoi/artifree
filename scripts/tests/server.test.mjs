@@ -420,6 +420,7 @@ test('CLI reads the type catalog, creates from a type, and keeps its required pa
     );
     assert.equal(reference.release, 1);
     assert.match(reference.content, /createRoot/);
+    assert.match(reference.notice, /grants no permission/);
     const unknown = typeCli(['show', 'slides']);
     assert.equal(unknown.status, 1);
     assert.match(unknown.stderr, /^error\[not_found\]/);
