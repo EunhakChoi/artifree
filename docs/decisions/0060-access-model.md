@@ -59,7 +59,9 @@ schema. S02 implements it, possibly in several pull requests.
    `editor` or `viewer`. A user is a member at most once per artifact; changing
    the role replaces the grant. The owner is never a member of their own
    artifact. An artifact has at most 31 members (0036's 32 users, less the
-   owner).
+   owner). In this record "member" means a user granted access to an
+   artifact; it is unrelated to the data member names of 0040 and to the
+   `members[]` of a room in 0034.
 2. **What a grant is not.** A grant is not part of a revision or a metadata
    revision. Restoring an older revision or metadata revision never changes who
    has access. Duplicating an artifact creates a new artifact owned by the user
@@ -71,7 +73,8 @@ schema. S02 implements it, possibly in several pull requests.
    | Find it in listings; read the artifact, revisions, files, history, export, type; preview; build status and build preview | yes   | yes    | yes                   |
    | Duplicate it (rule 2)                                                                                                    | yes   | yes    | yes                   |
    | Commit source (save, per-file edits, restore as a new revision); change title or pin                                     | yes   | yes    | no                    |
-   | Enqueue a job on it (verify, build); cancel one's own job                                                                | yes   | yes    | no                    |
+   | Enqueue a job on it (verify, build)                                                                                      | yes   | yes    | no                    |
+   | Cancel a job on it: one's own (any role, rule 11), or any member's (owner)                                               | yes   | own    | own                   |
    | Read and write one's own data and asset space (rule 9)                                                                   | yes   | yes    | yes                   |
    | Read the shared space (rule 10)                                                                                          | yes   | yes    | yes                   |
    | Write the shared space                                                                                                   | yes   | yes    | if declared `members` |
@@ -81,6 +84,17 @@ schema. S02 implements it, possibly in several pull requests.
    The pin is artifact metadata, as now, so an editor's pin is seen by every
    member. A per-user pin is not part of S02.
 
+   Runtime surfaces follow the same table. A connection, a preview or build
+   preview ticket, a runtime view, a room join and a handoff that names the
+   artifact are open to every role. Of the runtime capabilities (0020),
+   `source.write` is granted only to owner and editors; `metadata.read`,
+   `source.read`, `source.download` and the `data.*` and `assets.*`
+   capabilities on the caller's own space are granted to every role; on the
+   shared space reads are granted to every role and writes as rule 10's
+   declaration says. A capability the role does not allow is shown as not
+   available and is never granted; asking for it is not an error, and every
+   runtime call checks the current role again (0020 rule 4).
+
 4. **Refusals.** A user who is neither owner nor member, and every user while
    the artifact is in the trash except its owner, gets the answer an unknown
    name gets (0036 item 6, unchanged): `404`, the same body. A member who asks
@@ -88,9 +102,15 @@ schema. S02 implements it, possibly in several pull requests.
    and one body for every such case. The order is authentication, then the
    artifact's access (`404`), then the role (`403`), then the request body, so a
    viewer learns nothing about a write's body by sending it.
-5. **The write path is unchanged.** Every source and metadata change by any
-   member goes through `ArtifactService` with a base revision and an idempotency
-   key, as now. Two members who commit on the same base conflict exactly as two
+5. **The write path is unchanged, and access is checked where the write
+   commits.** Every source and metadata change by any member goes through
+   `ArtifactService` with a base revision and an idempotency key, as now. The
+   caller's access and role, and for the shared space its declaration (rule
+   10), are read again inside the transaction that commits a source, metadata,
+   data, asset, job or access change, so a write that passed its checks before
+   a revoke, a downgrade or a move to the trash commits nothing after it and
+   answers as rule 4 does at that moment. Unlike 0036 item 5's late writes to a
+   user's own data, a late write into another user's artifact is not kept. Two members who commit on the same base conflict exactly as two
    tabs of one user do (`revision_conflict`, `file_conflict`,
    `metadata_conflict`). `created_by` records the member who committed, and the
    history shows that user's label to everyone who can read the artifact.
@@ -101,20 +121,29 @@ schema. S02 implements it, possibly in several pull requests.
    - `GET /v1/me`: the caller's user id and label, so a user can hand their id
      to an owner. It names no artifact and is open to every authenticated user.
    - `GET /v1/artifacts/{id}/access`: the owner (id and label), each member
-     (id, label, role, and whether the user is disabled), and the artifact's
-     `access_version`. Owner and members may read it.
+     (id, label, role), and the artifact's `access_version`. Owner and members
+     may read it; only the owner's answer also says which members are
+     disabled.
    - `PUT /v1/artifacts/{id}/access/{user_id}` with `{ "role": … }` and
      `DELETE /v1/artifacts/{id}/access/{user_id}`: owner only. Each takes the
      `access_version` it was based on and an idempotency key in the owner's key
      space; a stale base is `409` with code `access_conflict`, and each change
-     raises `access_version` by one. A user id that is not registered, is
-     disabled, or is the owner is `invalid_request` with one message for all
-     three, so the route does not tell a disabled user from an unknown one.
-     Revoking a user who is not a member is `404`.
+     raises `access_version` by one. Granting to a user id that is not
+     registered, is disabled, or is the owner is `invalid_request` with one
+     message for all three, so the route does not tell a disabled user from an
+     unknown one; changing the role of an existing member who is disabled is
+     allowed (rule 18). Revoking a user who is not a member is `404`.
+   - **Who may call the grant routes.** As `RequirePurge` does for purge (0036
+     item 13): the owner's bootstrap token, when the owner is the owner
+     profile, and a token issued to a user other than the owner profile; a
+     token issued to the owner profile is the agent credential of 0029 and is
+     refused with `403` before the key, the identifier or the body is read. No
+     MCP tool grants or revokes. **The cost is the same as 0036 item 13's:** a
+     user other than the owner profile has no other credential, and the server
+     cannot tell a person's token from an agent's, so an agent holding such a
+     user's token can share that user's artifacts over HTTP or the CLI.
      The CLI gets `artifree artifact access list|grant|revoke` and `artifree me`.
-     No MCP tool grants or revokes, by the same reasoning as 0036 item 3: an agent
-     acting for a user does not widen who can reach that user's work. MCP read
-     tools report the caller's role.
+     MCP read tools report the caller's role.
 7. **Listings.** `GET /v1/artifacts` lists the caller's own artifacts and those
    they are a member of, each with the caller's role and the owner's id and
    label; a filter selects owned or shared ones. The trash lists only the
@@ -145,7 +174,9 @@ schema. S02 implements it, possibly in several pull requests.
     `asset_version` conditions and key replay rules as a user's space; its
     request keys are in the key space of the user who sent the write, and its
     budgets are charged to that user. The declaration is read from the
-    artifact's **head** revision when a request is decided: removing it from
+    artifact's **head** revision inside the transaction that commits the write
+    (rule 5), so a write never lands under a policy the head no longer has:
+    removing it from
     the head makes the shared space unreachable (`404` on its routes) but keeps
     it, and declaring it again reaches it again. Routes and capabilities name
     the shared space explicitly (for example `space=shared`); nothing reaches it
@@ -154,56 +185,76 @@ schema. S02 implements it, possibly in several pull requests.
 11. **Builds belong to the artifact.** A build is keyed by artifact, revision
     and profile, so a build published by any member's job is the artifact's
     build, read by everyone who can read the artifact. The job that produced it
-    stays the job of the user who enqueued it, and only that user lists,
-    reads and cancels it.
+    stays the job of the user who enqueued it, and only that user lists and
+    reads it; that user and the artifact's owner may cancel it.
 12. **Rooms are per artifact.** The room of an artifact is shared by its owner
     and every member who joins it. A participant is identified by facts the
     server issues: the user id and label of the joining connection and a tab
     number the room hands out; a frame's own value never sets "this is me" or
-    "same tab". The room's cap of participants is per room; the room budget
-    (0034) stays charged per user. Nothing about a room is persisted, as now.
+    "same tab". The room keeps its cap of 16 participants (0034), and no user
+    holds more than 4 of them, so one member cannot fill the room; 4 of the 16
+    places are kept for the owner. The room budget (0034) stays charged per
+    user. Nothing about a room is persisted, as now.
 
 ### Change delivery
 
 13. **Each change reaches each user who can read it.** A change to an artifact's
-    source, metadata, trash state, purge or shared space is written, in the same
-    transaction as the change, into the feed of the owner and of every current
-    member, each with its own `actor_seq`, so no user sees another user's
-    numbering or a gap. A change to a user's own space and a job change reach
-    only that user. A user whose access ends receives no later change of that
-    artifact; rows they already received stay in their feed.
+    source, metadata or shared space is written, in the same transaction as the
+    change, into the feed of the owner and of every current member, each with
+    its own `actor_seq`, so no user sees another user's numbering or a gap. A
+    change to a user's own space and a job change reach only that user. A user
+    whose access ends receives no later change of that artifact; rows they
+    already received stay in their feed. The trash follows from rule 4: the
+    move to the trash (`deleted`) reaches the owner and every member, and is a
+    member's last row of the artifact; while it is in the trash only the owner
+    receives its rows, including `purged`; a restore (`recovered`) reaches the
+    owner and every member, and is a member's first row after the trash.
 14. **Access changes are changes.** Granting, changing and revoking a role write
     one row each, of new kinds `access_granted`, `access_changed` and
-    `access_revoked`, to the affected user's feed and to the owner's. A client
-    that holds an open view of the artifact learns from them that its role
-    changed.
+    `access_revoked`, to the owner, to every current member (who can all read
+    the member list, rule 6) and to the user whose access was revoked. A
+    client that holds an open view of the artifact learns from them that its
+    role or the member list changed.
 
 ### Revocation and its races
 
-15. **What revocation closes.** Revoking a member closes for that user and that
-    artifact (and only it), and the artifact moving to the trash closes for
-    every member, as 0036 item 4 does for a disabled user: preview and build
-    preview tickets, runtime views
-    and runtime connections (closed and forgotten, with their grants and
-    handoff offers), room participation, and handoff items that name the
-    artifact. Change streams are per user and stay open; they carry the
-    `access_revoked` row. A role change from editor to viewer closes that user's
-    runtime connections to the artifact, so the next connection is granted
-    within the narrower role. Queued jobs of a revoked user on that artifact are
+15. **What revocation closes.** Revoking a member removes, for that user and
+    that artifact only, and the artifact moving to the trash removes for every
+    member: preview and build preview tickets and runtime views of the
+    artifact; on each of the user's runtime connections, the grants scoped to
+    the artifact and the handoff offers that name it (a connection is per user
+    and may hold grants for other artifacts, which stay); the user's
+    participation in the artifact's room; and handoff items that name the
+    artifact. A connection itself is not closed by a revocation, unlike 0036
+    item 4's disable. Change streams are per user and stay open; they carry the
+    `access_revoked` row. Queued jobs of the revoked user on that artifact are
     cancelled; a running one ends normally, and the build it publishes is the
     artifact's (rule 11).
+    **A role change from editor to viewer** removes less: on each of the
+    user's runtime connections, the artifact's grants of capabilities a viewer
+    is not granted (rule 3: `source.write`, and shared-space writes when the
+    declaration is `editors`); and the user's queued jobs on the artifact,
+    since a viewer may not enqueue. Tickets, views, room participation,
+    handoffs and the other grants stay. A role change from viewer to editor
+    removes nothing.
 16. **Registering after a revocation is closed by confirming after.** Each
-    (artifact, member) has an `access_generation`, raised in the same statement
-    that grants, changes the role of, or revokes the member, and when the
-    artifact moves to or leaves the trash. Each registration that 0036 item 5
+    (artifact, user) that was ever a member has an `access_generation`, raised
+    in the same statement that grants, changes the role of, or revokes the
+    member, and when the artifact moves to or leaves the trash. It only grows:
+    a revocation keeps the (artifact, user) record with no role, and a later
+    grant raises the kept value, so a registration that saw an earlier grant
+    never matches a later one. Only purge removes the record. Each registration that 0036 item 5
     confirms after registering is confirmed for the artifact it names against
     the generation the request saw, and a mismatch is answered and cleaned up as
     a revocation. What is tied to a runtime connection stays checked under the
     connection's lock (0036 item 5).
 17. **Key replay checks access first.** A request key's stored answer is
     returned only after the caller's current access and role allow the
-    operation again: a revoked user replaying a create's or commit's key gets
-    the `404` of rule 4, and a viewer replaying an editor-era key gets `403`.
+    operation again: a revoked user replaying the key of a commit, metadata
+    change, data or asset write or job on the artifact gets the `404` of rule
+    4, and a viewer replaying an editor-era key gets `403`. Creating and
+    duplicating make an artifact the caller owns, so their replays are
+    unchanged.
     Nothing about the stored answer is revealed by either.
 18. **A disabled member stays a member.** Disabling a user (0036 item 4) keeps
     their grants; nothing they hold authenticates while they are disabled, and
@@ -220,22 +271,32 @@ S02 is complete only with behavioural tests, proven by mutation, for:
   label in history;
 - grant, role change and revoke with a stale `access_version`, a replayed key,
   and an unknown, disabled or owner user id (one answer);
-- revocation and downgrade closing each item of rule 15 over HTTP, MCP and an
-  open frame, with a held registration raced across a revoke and a re-grant
-  (rule 16), in Chromium and Firefox for the web parts;
+- a revocation removing each item rule 15 lists for it, and a downgrade
+  removing exactly the items rule 15 lists for a downgrade and keeping the
+  rest, over HTTP, MCP and an open frame, with a connection that also holds
+  another artifact's grant keeping it; with a held registration raced across a
+  revoke and a re-grant not matching (rule 16); in Chromium and Firefox for the web parts;
 - per-user spaces kept across revoke and re-grant, and the shared space's
   declaration, write policy and head-revision rule;
 - feed delivery to each member with its own numbering, no delivery after
   revocation, and the access change rows;
-- a room seen by two users with server-issued identity;
-- key replay after revocation and after downgrade.
+- a room seen by two users with server-issued identity, and one user's
+  participant limit;
+- key replay after revocation and after downgrade;
+- a write held past a revoke, a downgrade and a change of the shared space's
+  declaration committing nothing (rule 5);
+- the web workspace: the owner shares, changes a role and revokes from the
+  artifact's page; a member sees the artifact under a shared filter with
+  their role, and the page offers only what the role allows; in Chromium and
+  Firefox.
 
 ## Not part of this record
 
 - Public or anonymous links, published addresses and a public viewer (S03).
 - Groups, invitations, access requests, ownership transfer, per-file or
   per-path permissions, comments, and notifications outside the change feed.
-- MCP tools that grant or revoke, and a web screen for users.
+- Roles other than owner, editor and viewer; MCP tools that grant or revoke;
+  and a web screen for managing users.
 - A per-user pin, and moving an artifact's own space between users.
 - Any statement about network isolation of previews (0003, unchanged).
 
