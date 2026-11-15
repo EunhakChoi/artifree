@@ -345,7 +345,8 @@ migration.
   execution worker sharing the database was seen within five minutes,
   decision 0058 rule 20), and job changes are in the
   change feed (`job_changed`, R01bb), and the web shows an artifact's jobs in
-  a Jobs tab (R01bc); no scheduler exists. Builds, the execution supervisor
+  a Jobs tab (R01bc), which also asks for builds and shows the head build
+  status (decision 0058, R03ea); no scheduler exists. Builds, the execution supervisor
   and automatic purge need the same scheduler, clock and supervision (R01b).
 - **Application logic in the server crate.** The runtime sessions, policy,
   source and asset modules, preview tickets and handoffs are state machines
