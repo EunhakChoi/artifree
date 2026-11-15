@@ -262,8 +262,8 @@ pub struct Artifact {
     /// Source model family.
     pub kind: ArtifactKind,
     /// The type and release the artifact was made from, or `null` for an
-    /// untyped artifact. Always present.
-    #[serde(rename = "type")]
+    /// untyped artifact. Always present: a body without it is refused.
+    #[serde(rename = "type", deserialize_with = "Option::deserialize")]
     #[schemars(required, schema_with = "nullable_type_ref")]
     pub artifact_type: Option<ArtifactTypeRef>,
     /// Display title.
@@ -2381,7 +2381,9 @@ struct ArtifactChangeFields {
     data_version: DataVersionMember,
     #[serde(default)]
     job_id: JobIdMember,
-    #[serde(rename = "type")]
+    // Required although nullable: without `deserialize_with`, serde would
+    // read a missing member as `null`.
+    #[serde(rename = "type", deserialize_with = "Option::deserialize")]
     artifact_type: Option<ArtifactTypeRef>,
     committed_at_ms: i64,
 }

@@ -567,7 +567,7 @@ export interface Artifact {
   title: string;
   /**
    * The type and release the artifact was made from, or `null` for an
-   * untyped artifact. Always present.
+   * untyped artifact. Always present: a body without it is refused.
    */
   type: ArtifactTypeRef | null;
   /**

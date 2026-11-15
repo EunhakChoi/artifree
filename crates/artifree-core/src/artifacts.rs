@@ -22,7 +22,7 @@ use artifree_domain::change::ChangeSequence;
 use artifree_domain::data::DataError;
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title};
 use artifree_domain::job::JobState;
-use artifree_domain::package::{FileChange, FilePackage, PackageError, PackagePath};
+use artifree_domain::package::{FileChange, FilePackage, FileSet, PackageError, PackagePath};
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
     ArtifactListing, ArtifactRecord, ArtifactStore, ChangePage, CleanupReceipt, CleanupRequest,
@@ -332,9 +332,10 @@ impl<S: ArtifactStore> ArtifactService<S> {
     }
 
     /// Creates an artifact of the type `type_id` owned by `actor` at revision
-    /// 1 (decision 0059 rule 5). Revision 1 is `package` when given, whole,
-    /// and otherwise the current release's starter; either way it must hold
-    /// the release's required paths. The artifact gets the release's kind and
+    /// 1 (decision 0059 rule 5). Revision 1 is `files` when given, whole, and
+    /// otherwise the current release's starter; either way it must hold the
+    /// release's required paths, `index.html` among them when the release
+    /// requires it, so `files` is a set that may lack it. The artifact gets the release's kind and
     /// records the type and release for good.
     ///
     /// The request's identity covers the type id and the files, or that there
@@ -346,25 +347,26 @@ impl<S: ArtifactStore> ArtifactService<S> {
     /// # Errors
     ///
     /// [`ArtifactError::TypeUnknown`], [`ArtifactError::TypeRequirements`],
-    /// [`ArtifactError::NotFound`] for the retry of a create whose artifact
-    /// was purged, [`ArtifactError::RequestKeyReused`], or
-    /// [`ArtifactError::Unavailable`].
+    /// [`ArtifactError::InvalidPackage`] when `files` lack an `index.html`
+    /// the release does not require, [`ArtifactError::NotFound`] for the
+    /// retry of a create whose artifact was purged,
+    /// [`ArtifactError::RequestKeyReused`], or [`ArtifactError::Unavailable`].
     pub fn create_from_type(
         &self,
         actor: &ActorId,
         key: &RequestKey,
         title: &Title,
         type_id: &TypeId,
-        package: Option<&FilePackage>,
+        files: Option<&FileSet>,
     ) -> Result<CommitReceipt, ArtifactError> {
         let mut hasher = Fingerprint::new("create");
         hasher.field(b"type");
         hasher.field(type_id.as_str().as_bytes());
         hasher.field(title.as_str().as_bytes());
-        match package {
-            Some(package) => {
+        match files {
+            Some(files) => {
                 hasher.field(b"files");
-                for (path, content) in package.files() {
+                for (path, content) in files.files() {
                     hasher.put(path, content);
                 }
             }
@@ -379,10 +381,7 @@ impl<S: ArtifactStore> ArtifactService<S> {
             .catalog
             .current(type_id)
             .ok_or(ArtifactError::TypeUnknown)
-            .and_then(|release| {
-                let package = package.unwrap_or(&release.starter);
-                meets(Some(release), package).map(|()| (release, package))
-            });
+            .and_then(|release| typed_package(release, files).map(|package| (release, package)));
         let (release, package) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => return self.store.replay_receipt(request)?.ok_or(error),
@@ -393,7 +392,7 @@ impl<S: ArtifactStore> ArtifactService<S> {
             kind: release.kind,
             artifact_type: Some(&artifact_type),
             title,
-            package,
+            package: package.as_ref().unwrap_or(&release.starter),
             source: None,
         })?;
         Ok(receipt)
@@ -483,8 +482,10 @@ impl<S: ArtifactStore> ArtifactService<S> {
     ///
     /// [`ArtifactError::NotFound`] for a missing or inaccessible artifact,
     /// [`ArtifactError::RevisionConflict`] when `base` is not current,
-    /// [`ArtifactError::InvalidPackage`], [`ArtifactError::RequestKeyReused`],
-    /// or [`ArtifactError::Unavailable`].
+    /// [`ArtifactError::InvalidPackage`], [`ArtifactError::TypeRequirements`]
+    /// when the changes delete a path the artifact's release requires,
+    /// whatever the base, [`ArtifactError::TypeReleaseUnknown`],
+    /// [`ArtifactError::RequestKeyReused`], or [`ArtifactError::Unavailable`].
     pub fn save(
         &self,
         actor: &ActorId,
@@ -520,9 +521,12 @@ impl<S: ArtifactStore> ArtifactService<S> {
             Ok(release) => release,
             Err(replayed) => return Ok(replayed),
         };
+        // A deleted required path is named before the package is built, which
+        // would refuse a missing `index.html` as a package error instead.
         let package = checked(
             &record,
-            self.saved_package(&record, base, changes)
+            keeps(release, changes.iter())
+                .and_then(|()| self.saved_package(&record, base, changes))
                 .and_then(|package| meets(release, &package).map(|()| package)),
         )?;
         let receipt = self.store.commit_revision(RevisionCommit {
@@ -546,8 +550,9 @@ impl<S: ArtifactStore> ArtifactService<S> {
     /// [`ArtifactError::NotFound`] for a missing or inaccessible artifact or
     /// revision, [`ArtifactError::RevisionConflict`] when `base` is not
     /// current, [`ArtifactError::InvalidPackage`] when the current revision
-    /// `base` already has those files, [`ArtifactError::RequestKeyReused`], or
-    /// [`ArtifactError::Unavailable`].
+    /// `base` already has those files, [`ArtifactError::TypeRequirements`],
+    /// [`ArtifactError::TypeReleaseUnknown`], [`ArtifactError::RequestKeyReused`],
+    /// or [`ArtifactError::Unavailable`].
     pub fn restore(
         &self,
         actor: &ActorId,
@@ -613,6 +618,8 @@ impl<S: ArtifactStore> ArtifactService<S> {
     /// [`ArtifactError::InvalidPackage`] for no edit, a path edited twice, a
     /// result that is no valid package, or one that equals the current
     /// revision; [`ArtifactError::FilesChanged`];
+    /// [`ArtifactError::TypeRequirements`] for an edit that deletes a path
+    /// the artifact's release requires; [`ArtifactError::TypeReleaseUnknown`];
     /// [`ArtifactError::RequestKeyReused`]; and
     /// [`ArtifactError::Unavailable`] when the store fails in the commit
     /// itself, whose outcome is then unknown until a retry with the same key
@@ -653,7 +660,8 @@ impl<S: ArtifactStore> ArtifactService<S> {
         };
         checked(
             &record,
-            edits_are_possible(&record, base, edits).and_then(|()| keeps(release, edits)),
+            edits_are_possible(&record, base, edits)
+                .and_then(|()| keeps(release, edits.iter().map(|edit| &edit.change))),
         )?;
         let receipt = self.store.commit_edits(ConditionalCommit {
             request,
@@ -739,8 +747,8 @@ impl<S: ArtifactStore> ArtifactService<S> {
     ///
     /// [`ArtifactError::NotFound`] for a missing or inaccessible artifact or
     /// revision, [`ArtifactError::AssetLimitExceeded`] when the copied assets
-    /// do not fit (no key is recorded), [`ArtifactError::RequestKeyReused`], or
-    /// [`ArtifactError::Unavailable`].
+    /// do not fit (no key is recorded), [`ArtifactError::TypeReleaseUnknown`],
+    /// [`ArtifactError::RequestKeyReused`], or [`ArtifactError::Unavailable`].
     pub fn duplicate(
         &self,
         actor: &ActorId,
@@ -1259,6 +1267,27 @@ fn edits_are_possible(
     Ok(())
 }
 
+/// The first revision of a create from `release`: `files` as a package when
+/// given, and `None` for the release's starter. Missing required paths are
+/// refused before a missing `index.html` is (decision 0059 rule 5).
+fn typed_package(
+    release: &Release,
+    files: Option<&FileSet>,
+) -> Result<Option<FilePackage>, ArtifactError> {
+    let Some(files) = files else {
+        return Ok(None);
+    };
+    let missing = release.missing_from(files);
+    if !missing.is_empty() {
+        return Err(ArtifactError::TypeRequirements { missing });
+    }
+    files
+        .clone()
+        .into_package()
+        .map(Some)
+        .map_err(ArtifactError::InvalidPackage)
+}
+
 /// Refuses a package that lacks a path `release` requires (decision 0059
 /// rules 5 and 6); an untyped artifact has no such paths.
 fn meets(release: Option<&Release>, package: &FilePackage) -> Result<(), ArtifactError> {
@@ -1272,16 +1301,19 @@ fn meets(release: Option<&Release>, package: &FilePackage) -> Result<(), Artifac
     }
 }
 
-/// Refuses edits that delete a path `release` requires. Every revision of the
-/// artifact holds those paths, so edits that delete none keep them all, also
-/// when the head moves before they commit.
-fn keeps(release: Option<&Release>, edits: &[FileEdit]) -> Result<(), ArtifactError> {
+/// Refuses changes that delete a path `release` requires. Every revision of
+/// the artifact holds those paths, so changes that delete none keep them all,
+/// whatever their base and also when the head moves before they commit.
+fn keeps<'a>(
+    release: Option<&Release>,
+    changes: impl IntoIterator<Item = &'a FileChange>,
+) -> Result<(), ArtifactError> {
     let Some(release) = release else {
         return Ok(());
     };
-    let deleted: BTreeSet<&PackagePath> = edits
-        .iter()
-        .filter_map(|edit| match &edit.change {
+    let deleted: BTreeSet<&PackagePath> = changes
+        .into_iter()
+        .filter_map(|change| match change {
             FileChange::Delete { path } => Some(path),
             FileChange::Put { .. } => None,
         })

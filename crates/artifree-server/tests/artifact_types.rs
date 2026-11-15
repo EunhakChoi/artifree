@@ -10,7 +10,7 @@ use artifree_core::artifacts::{ArtifactError, ArtifactService, CopyParts};
 use artifree_core::catalog::{Catalog, Release};
 use artifree_domain::artifact_type::{ArtifactType, TypeId, TypeRelease};
 use artifree_domain::identity::{ActorId, RequestKey, Title};
-use artifree_domain::package::{FileChange, FilePackage, PackagePath};
+use artifree_domain::package::{FileChange, FilePackage, FileSet, PackagePath};
 use artifree_domain::{ArtifactKind, SourceRevision};
 use artifree_ports::artifact_store::{CommitReceipt, Delivery, FileEdit, FileExpectation};
 use artifree_providers::storage::SqliteStore;
@@ -45,6 +45,15 @@ fn package(files: &[(&str, &str)]) -> Result<FilePackage, Box<dyn std::error::Er
         parsed.push((path.parse::<PackagePath>()?, content.as_bytes().to_vec()));
     }
     Ok(FilePackage::new(parsed)?)
+}
+
+/// The files a typed create uploads, which may lack `index.html`.
+fn files(files: &[(&str, &str)]) -> Result<FileSet, Box<dyn std::error::Error>> {
+    let mut parsed = Vec::new();
+    for (path, content) in files {
+        parsed.push((path.parse::<PackagePath>()?, content.as_bytes().to_vec()));
+    }
+    Ok(FileSet::new(parsed)?)
 }
 
 /// Release `number` of the type `app`, requiring `required`, whose starter
@@ -163,19 +172,19 @@ fn files_are_the_whole_first_revision_and_must_hold_the_required_paths() -> Test
     let artifacts = service(&directory.database(), catalog(&[&["src/main.tsx"]])?)?;
     let owner: ActorId = "owner".parse()?;
     let title: Title = "Typed".parse()?;
-    let files = package(&[("index.html", "<p>own</p>"), ("src/main.tsx", "own")])?;
+    let own = files(&[("index.html", "<p>own</p>"), ("src/main.tsx", "own")])?;
     let receipt = artifacts.create_from_type(
         &owner,
         &"type-key-1".parse()?,
         &title,
         &app_type()?,
-        Some(&files),
+        Some(&own),
     )?;
     // The starter is not merged in.
     assert_eq!(paths(&receipt), ["index.html", "src/main.tsx"]);
     assert!(pinned(&receipt, 1)?);
 
-    let lacking = package(&[("index.html", "<p>own</p>")])?;
+    let lacking = files(&[("index.html", "<p>own</p>")])?;
     let refused = artifacts.create_from_type(
         &owner,
         &"type-key-2".parse()?,
@@ -227,7 +236,7 @@ fn a_retried_create_replays_its_release_after_the_catalog_gains_one() -> TestRes
     assert!(pinned(&replayed, 1)?);
     // The same files sent again also replay, though release 2 would refuse
     // them.
-    let files = package(&[("index.html", "<p>own</p>"), ("src/main.tsx", "own")])?;
+    let files = files(&[("index.html", "<p>own</p>"), ("src/main.tsx", "own")])?;
     let with_files_key: RequestKey = "type-key-2".parse()?;
     let before = service(&directory.database(), catalog(&[&["src/main.tsx"]])?)?.create_from_type(
         &owner,
@@ -305,6 +314,75 @@ fn every_commit_keeps_the_required_paths() -> TestResult {
     )?;
     assert_eq!(saved.revision.revision, SourceRevision(2));
     assert!(pinned(&saved, 1)?);
+    Ok(())
+}
+
+/// A release that requires `index.html` names it as a missing path, as any
+/// other, in a create's files and in a save or edit that deletes it, rather
+/// than refusing the package for lacking its entry document.
+#[test]
+fn a_required_index_html_is_named_as_a_missing_path() -> TestResult {
+    let directory = TempDir::new("entry")?;
+    let artifacts = service(
+        &directory.database(),
+        catalog(&[&["index.html", "src/main.tsx"]])?,
+    )?;
+    let owner: ActorId = "owner".parse()?;
+    let title: Title = "Typed".parse()?;
+    let refused = artifacts.create_from_type(
+        &owner,
+        &"type-key-1".parse()?,
+        &title,
+        &app_type()?,
+        Some(&files(&[("notes.txt", "n")])?),
+    );
+    assert_eq!(refused, Err(missing(&["index.html", "src/main.tsx"])?));
+    let created =
+        artifacts.create_from_type(&owner, &"type-key-2".parse()?, &title, &app_type()?, None)?;
+    let id = created.artifact.id;
+    let entry = PackagePath::entry();
+    let refused = artifacts.save(
+        &owner,
+        &"type-key-3".parse()?,
+        &id,
+        SourceRevision(1),
+        vec![FileChange::Delete {
+            path: entry.clone(),
+        }],
+    );
+    assert_eq!(refused, Err(missing(&["index.html"])?));
+    // The refusal does not depend on the base: rebasing would not help.
+    artifacts.save(
+        &owner,
+        &"type-key-4".parse()?,
+        &id,
+        SourceRevision(1),
+        vec![FileChange::Delete {
+            path: "starter.css".parse()?,
+        }],
+    )?;
+    let stale = artifacts.save(
+        &owner,
+        &"type-key-5".parse()?,
+        &id,
+        SourceRevision(1),
+        vec![FileChange::Delete { path: entry }],
+    );
+    assert_eq!(stale, Err(missing(&["index.html"])?));
+    // A release that does not require it refuses files without it as a
+    // package, as an untyped create does.
+    let lenient = service(&directory.database(), catalog(&[&["src/main.tsx"]])?)?;
+    let refused = lenient.create_from_type(
+        &owner,
+        &"type-key-6".parse()?,
+        &title,
+        &app_type()?,
+        Some(&files(&[("src/main.tsx", "m")])?),
+    );
+    assert!(
+        matches!(refused, Err(ArtifactError::InvalidPackage(_))),
+        "{refused:?}"
+    );
     Ok(())
 }
 

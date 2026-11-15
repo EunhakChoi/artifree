@@ -125,27 +125,6 @@ function currentAssetVersionOf(error: ArtifreeApiError): number | undefined {
   return version;
 }
 
-// Read from the unchecked body like the asset version, and printed only when
-// every entry is a string.
-function missingPathsOf(error: ArtifreeApiError): string[] {
-  if (error.code !== 'type_requirements') return [];
-  const body = error.body;
-  if (typeof body !== 'object' || body === null || !('error' in body))
-    return [];
-  const detail = body.error;
-  if (
-    typeof detail !== 'object' ||
-    detail === null ||
-    !('missing_paths' in detail) ||
-    !Array.isArray(detail.missing_paths)
-  )
-    return [];
-  const paths: unknown[] = detail.missing_paths;
-  return paths.every((path) => typeof path === 'string')
-    ? paths.filter((path) => typeof path === 'string')
-    : [];
-}
-
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args[0] === 'artifact') await runArtifact(args.slice(1));
@@ -175,7 +154,8 @@ try {
     const currentAssetVersion = currentAssetVersionOf(error);
     if (currentAssetVersion !== undefined)
       console.error(`current_asset_version=${currentAssetVersion}`);
-    for (const path of missingPathsOf(error)) console.error(`missing ${path}`);
+    for (const path of error.missingPaths ?? [])
+      console.error(`missing ${path}`);
     if (error instanceof FileConflictError) {
       for (const file of error.files)
         console.error(

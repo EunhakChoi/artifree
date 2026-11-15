@@ -29,17 +29,28 @@ async function filesUnder(dir, prefix = '') {
   return found.sort();
 }
 
-/** The release directories under `typesDir`, as sorted `<id>/<release>`. */
-async function releaseDirectories(typesDir) {
+/**
+ * The entries under each type directory of `typesDir`, as sorted
+ * `<id>/<release>`: `releases` are directories, `strays` anything else.
+ */
+async function typeEntries(typesDir) {
   const releases = [];
+  const strays = [];
   for (const type of await readdir(typesDir, { withFileTypes: true })) {
     if (!type.isDirectory()) continue;
-    for (const release of await readdir(join(typesDir, type.name), {
+    for (const entry of await readdir(join(typesDir, type.name), {
       withFileTypes: true,
     }))
-      releases.push(`${type.name}/${release.name}`);
+      (entry.isDirectory() ? releases : strays).push(
+        `${type.name}/${entry.name}`,
+      );
   }
-  return releases.sort();
+  return { releases: releases.sort(), strays: strays.sort() };
+}
+
+/** The release directories under `typesDir`, as sorted `<id>/<release>`. */
+async function releaseDirectories(typesDir) {
+  return (await typeEntries(typesDir)).releases;
 }
 
 /** `{ path: sha256 }` of every file of one release directory. */
@@ -72,7 +83,9 @@ async function readLock(typesDir) {
 export async function checkReleases(typesDir) {
   const lock = await readLock(typesDir);
   const problems = [];
-  const present = await releaseDirectories(typesDir);
+  const { releases: present, strays } = await typeEntries(typesDir);
+  for (const stray of strays)
+    problems.push(`${stray} is not a directory; a type holds only releases.`);
   for (const release of present) {
     if (!/^[a-z0-9-]{1,32}\/[1-9][0-9]*$/.test(release)) {
       problems.push(`${release} is not a <type id>/<release> directory.`);

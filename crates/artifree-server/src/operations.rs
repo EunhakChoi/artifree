@@ -48,7 +48,7 @@ use artifree_domain::job::{
     BuildDiagnostic, JobFailure, JobId, JobKind, JobState, Problem, ProfileName, is_public_job,
 };
 use artifree_domain::package::{
-    ENTRY_PATH, FileChange, FilePackage, MAX_CHANGES, MAX_FILES, PackagePath,
+    ENTRY_PATH, FileChange, FilePackage, FileSet, MAX_CHANGES, MAX_FILES, PackagePath,
 };
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
@@ -176,37 +176,17 @@ impl ApiError {
         conflict.body.conflicting_files_total = Some(total as u64);
         conflict
     }
-}
 
-impl ApiError {
-    /// The contract error of a command the type catalog refused (decision
-    /// 0059 rules 5 to 7).
-    fn type_refusal(error: ArtifactError, message: String) -> Self {
-        match error {
-            ArtifactError::TypeUnknown => Self::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                ErrorCode::TypeUnknown,
-                message,
-            ),
-            ArtifactError::TypeRequirements { missing } => {
-                let mut refused = Self::new(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    ErrorCode::TypeRequirements,
-                    message,
-                );
-                refused.body.missing_paths =
-                    Some(missing.iter().map(ToString::to_string).collect());
-                refused
-            }
-            ArtifactError::TypeReleaseUnknown => {
-                Self::new(StatusCode::CONFLICT, ErrorCode::TypeReleaseUnknown, message)
-            }
-            _ => Self::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorCode::Internal,
-                message,
-            ),
-        }
+    /// A `type_requirements` refusal that names the `missing` paths (decision
+    /// 0059 rules 5 and 6).
+    fn missing_paths(missing: &[PackagePath], message: String) -> Self {
+        let mut refused = Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::TypeRequirements,
+            message,
+        );
+        refused.body.missing_paths = Some(missing.iter().map(ToString::to_string).collect());
+        refused
     }
 }
 
@@ -251,9 +231,15 @@ impl From<ArtifactError> for ApiError {
                 ErrorCode::ProfileUnknown,
                 message,
             ),
-            error @ (ArtifactError::TypeUnknown
-            | ArtifactError::TypeRequirements { .. }
-            | ArtifactError::TypeReleaseUnknown) => Self::type_refusal(error, message),
+            ArtifactError::TypeUnknown => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                ErrorCode::TypeUnknown,
+                message,
+            ),
+            ArtifactError::TypeRequirements { missing } => Self::missing_paths(&missing, message),
+            ArtifactError::TypeReleaseUnknown => {
+                Self::new(StatusCode::CONFLICT, ErrorCode::TypeReleaseUnknown, message)
+            }
             ArtifactError::OutboxBindingChanged => Self::new(
                 StatusCode::CONFLICT,
                 ErrorCode::OutboxBindingChanged,
@@ -432,10 +418,10 @@ pub(crate) async fn create(
     // With a type the files may be left out, and revision 1 is the starter
     // (decision 0059 rule 5); without one they are required, as before.
     let receipt = if let Some(type_id) = artifact_type {
-        let package = request.files.map(upload_package).transpose()?;
+        let files = request.files.map(upload_files).transpose()?;
         state
             .run(move |artifacts| {
-                artifacts.create_from_type(&actor, &key, &title, &type_id, package.as_ref())
+                artifacts.create_from_type(&actor, &key, &title, &type_id, files.as_ref())
             })
             .await?
     } else {
@@ -452,6 +438,14 @@ pub(crate) async fn create(
 
 /// The package of a create's uploaded files.
 fn upload_package(uploads: Vec<FileUpload>) -> Result<FilePackage, ApiError> {
+    upload_files(uploads)?
+        .into_package()
+        .map_err(|error| ApiError::unprocessable(format!("files: {error}")))
+}
+
+/// The uploaded files of a typed create, which may lack `index.html`: the
+/// type's required paths are checked first (decision 0059 rule 5).
+fn upload_files(uploads: Vec<FileUpload>) -> Result<FileSet, ApiError> {
     too_many("files", uploads.len(), MAX_FILES)?;
     let mut files = Vec::with_capacity(uploads.len());
     for (
@@ -469,7 +463,7 @@ fn upload_package(uploads: Vec<FileUpload>) -> Result<FilePackage, ApiError> {
             decode(&format!("files[{index}].content"), encoding, content)?,
         ));
     }
-    FilePackage::new(files).map_err(|error| ApiError::unprocessable(format!("files: {error}")))
+    FileSet::new(files).map_err(|error| ApiError::unprocessable(format!("files: {error}")))
 }
 
 pub(crate) async fn save(

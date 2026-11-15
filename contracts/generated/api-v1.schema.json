@@ -148,7 +148,7 @@
               "type": "null"
             }
           ],
-          "description": "The type and release the artifact was made from, or `null` for an\nuntyped artifact. Always present."
+          "description": "The type and release the artifact was made from, or `null` for an\nuntyped artifact. Always present: a body without it is refused."
         },
         "updated_at_ms": {
           "description": "Time of the latest source revision in Unix milliseconds; metadata\nupdates do not change it.",

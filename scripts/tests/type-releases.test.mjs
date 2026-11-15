@@ -77,3 +77,16 @@ test('an unlisted release directory is refused until it is added, and a locked o
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('a file where a release directory belongs is reported, not read as a release', async () => {
+  const dir = await copyOfTypes();
+  try {
+    await writeFile(join(dir, 'react/2'), 'not a release\n');
+    assert.deepEqual(await checkReleases(dir), [
+      'react/2 is not a directory; a type holds only releases.',
+      'A published release never changes (decision 0059 rule 3): put a change in a new release directory.',
+    ]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

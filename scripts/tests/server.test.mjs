@@ -473,6 +473,19 @@ test('CLI reads the type catalog, creates from a type, and keeps its required pa
     ]);
     assert.equal(deleting.status, 1);
     assert.match(deleting.stderr, /^error\[type_requirements\]/);
+    // A required index.html is named like any other path, not refused as a
+    // package without its entry document.
+    const entry = cli(server, [
+      'save',
+      id,
+      '--base',
+      '1',
+      '--delete',
+      'index.html',
+    ]);
+    assert.equal(entry.status, 1);
+    assert.match(entry.stderr, /^error\[type_requirements\]/);
+    assert.match(entry.stderr, /^missing index\.html$/m);
     assert.equal(json(cli(server, ['show', id])).current_revision, 1);
     // Without --type, files are still required.
     assert.equal(cli(server, ['create', '--title', 'Plain']).status, 2);

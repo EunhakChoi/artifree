@@ -14,7 +14,7 @@ use artifree_domain::ArtifactKind;
 use artifree_domain::artifact_type::{ArtifactType, TypeId, TypeRelease};
 use artifree_domain::identity::InvalidValue;
 use artifree_domain::job::ProfileName;
-use artifree_domain::package::{FilePackage, PackagePath};
+use artifree_domain::package::{FilePackage, FileSet, PackagePath};
 
 use crate::jobs::require_build_profile;
 
@@ -72,9 +72,21 @@ impl Release {
     /// The required paths that `package` lacks, in path order.
     #[must_use]
     pub fn missing(&self, package: &FilePackage) -> Vec<PackagePath> {
+        self.missing_where(|path| package.file(path).is_none())
+    }
+
+    /// The required paths that `files` lack, in path order. Unlike a package,
+    /// a file set may lack `index.html`, so a release that requires it names
+    /// it here.
+    #[must_use]
+    pub fn missing_from(&self, files: &FileSet) -> Vec<PackagePath> {
+        self.missing_where(|path| files.file(path).is_none())
+    }
+
+    fn missing_where(&self, absent: impl Fn(&PackagePath) -> bool) -> Vec<PackagePath> {
         self.required
             .iter()
-            .filter(|path| package.file(path).is_none())
+            .filter(|path| absent(path))
             .cloned()
             .collect()
     }

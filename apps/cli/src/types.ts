@@ -1,7 +1,6 @@
 import { parseArgs } from 'node:util';
-import { ArtifreeClient } from '@artifree/client';
 import { UsageError } from './errors.js';
-import { resolveConnection } from './profiles.js';
+import { connect, connectionOptions } from './tokens.js';
 
 export const TYPE_HELP = `Usage:
   artifree type list
@@ -24,33 +23,6 @@ server can build the type's profile. Create from a type with
 artifree artifact create --title <title> --type <id>. Results are JSON on
 stdout; an unknown type, release or reference is 404 not_found.
 `;
-
-const connectionOptions = {
-  server: { type: 'string' },
-  token: { type: 'string' },
-  'token-file': { type: 'string' },
-  profile: { type: 'string' },
-  'profile-file': { type: 'string' },
-} as const;
-
-type Connection = {
-  server?: string | undefined;
-  token?: string | undefined;
-  'token-file'?: string | undefined;
-  profile?: string | undefined;
-  'profile-file'?: string | undefined;
-};
-
-async function connect(values: Connection): Promise<ArtifreeClient> {
-  const { server, token } = await resolveConnection({
-    server: values.server,
-    token: values.token,
-    tokenFile: values['token-file'],
-    profile: values.profile,
-    profileFile: values['profile-file'],
-  });
-  return new ArtifreeClient({ baseUrl: server, accessToken: token });
-}
 
 function print(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
