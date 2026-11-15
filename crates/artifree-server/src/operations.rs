@@ -1834,14 +1834,15 @@ pub(crate) fn show_type(
     })
 }
 
-/// One reference file of a release (decision 0059 rule 11).
+/// One reference file of a release (decision 0059 rule 11), of the current
+/// release for `None`.
 pub(crate) fn type_reference(
     state: &AppState,
     id: &str,
-    release: &str,
+    release: Option<&str>,
     path: &str,
 ) -> Result<TypeReference, ApiError> {
-    let found = find_release(state, id, Some(release))?;
+    let found = find_release(state, id, release)?;
     let missing = || ApiError::not_found("reference not found");
     let path: PackagePath = path.parse().map_err(|_| missing())?;
     let content = found.reference(&path).ok_or_else(missing)?;

@@ -24,10 +24,11 @@ use artifree_contracts::mcp::{
     self, AcknowledgeHandoffArguments, ArtifactArguments, BuildStatusArguments, CancelJobArguments,
     CreateArtifactArguments, DeleteAssetArguments, DeleteDataArguments, DuplicateArtifactArguments,
     EditFilesArguments, EnqueueJobArguments, FileArguments, FileContent, GetDataArguments,
-    JobArguments, ListAssetsArguments, ListJobsArguments, PollHandoffArguments, PreviewArguments,
-    ReadAssetArguments, ReadAssetResponse, RegisterHandoffSessionArguments,
-    RestoreRevisionArguments, RevisionArguments, SaveRevisionArguments, SetDataArguments,
-    ToolDefinition, UpdateArtifactArguments, UpdateDataArguments, UploadAssetArguments,
+    GetTypeArguments, JobArguments, ListAssetsArguments, ListJobsArguments, ListTypesArguments,
+    PollHandoffArguments, PreviewArguments, ReadAssetArguments, ReadAssetResponse,
+    RegisterHandoffSessionArguments, RestoreRevisionArguments, RevisionArguments,
+    SaveRevisionArguments, SetDataArguments, ToolDefinition, TypeResult, UpdateArtifactArguments,
+    UpdateDataArguments, UploadAssetArguments,
 };
 use artifree_core::artifacts::ArtifactError;
 use artifree_core::parts::{Boundary, ByteRange};
@@ -217,6 +218,14 @@ pub(crate) async fn dispatch(
             .await
         }
         "create_artifact" => json(create_artifact(state, actor, arguments)).await,
+        "list_types" => {
+            json(async {
+                let ListTypesArguments {} = parse(arguments)?;
+                Ok(operations::list_types(state))
+            })
+            .await
+        }
+        "get_type" => json(async { get_type(state, parse(arguments)?) }).await,
         "save_revision" => json(save_revision(state, actor, arguments)).await,
         "edit_files" => json(edit_files(state, actor, arguments)).await,
         "restore_revision" => json(restore_revision(state, actor, arguments)).await,
@@ -532,17 +541,34 @@ async fn create_artifact(
 ) -> Result<CommitResponse, ApiError> {
     let CreateArtifactArguments {
         title,
+        artifact_type,
         files,
         idempotency_key,
     } = parse(arguments)?;
     let key = operations::request_key("idempotency_key", &idempotency_key)?;
-    // The type is T01ab's (decision 0059 rule 12): MCP creates untyped.
+    // The same request as `POST /v1/artifacts` (decision 0059 rule 12).
     let request = CreateArtifactRequest {
         title,
-        artifact_type: None,
-        files: Some(files),
+        artifact_type,
+        files,
     };
     operations::create(state, actor, key, request).await
+}
+
+/// `get_type`: the routes of decision 0059 rule 11 in one tool, as rule 12
+/// asks. A `path` without a `release` reads the current release's file.
+fn get_type(state: &AppState, arguments: GetTypeArguments) -> Result<TypeResult, ApiError> {
+    let GetTypeArguments {
+        type_id,
+        release,
+        path,
+    } = arguments;
+    let release = release.map(|release| release.to_string());
+    match path {
+        None => operations::show_type(state, &type_id, release.as_deref()).map(TypeResult::Release),
+        Some(path) => operations::type_reference(state, &type_id, release.as_deref(), &path)
+            .map(TypeResult::Reference),
+    }
 }
 
 async fn save_revision(

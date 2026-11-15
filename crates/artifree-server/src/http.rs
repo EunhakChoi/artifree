@@ -1766,7 +1766,10 @@ async fn read_type_reference(
 ) -> Result<Json<TypeReference>, ApiError> {
     let Path((id, release, reference)) = path?;
     Ok(Json(operations::type_reference(
-        &state, &id, &release, &reference,
+        &state,
+        &id,
+        Some(&release),
+        &reference,
     )?))
 }
 

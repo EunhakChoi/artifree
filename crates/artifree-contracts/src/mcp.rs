@@ -21,7 +21,8 @@ use crate::api::{
     CommitResponse, ContentEncoding, DataWriteResponse, DeleteAssetResponse,
     DuplicateArtifactResponse, EnqueueJobResponse, ErrorResponse, FileChange, FileEdit, FileUpload,
     Handoff, HandoffState, Job, JobKind, JobList, ListArtifactsQuery, Preview, Revision,
-    RevisionList, UpdateArtifactResponse, UploadAssetResponse,
+    RevisionList, TypeDescriptor, TypeList, TypeReference, UpdateArtifactResponse,
+    UploadAssetResponse,
 };
 
 /// Names one artifact.
@@ -87,14 +88,54 @@ pub struct FileArguments {
     pub length: Option<NonZeroU64>,
 }
 
+/// Arguments of `list_types`: none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListTypesArguments {}
+
+/// Arguments of `get_type` (decision 0059 rule 12).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetTypeArguments {
+    /// A type id from `list_types`, such as `react`.
+    pub type_id: String,
+    /// A release of the type; by default its current release. An artifact's
+    /// `type.release` names the release whose rules it follows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<NonZeroU64>,
+    /// A reference file of that release, one of its `references`; without
+    /// it the release and its guide are returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// What `get_type` returns: a release with its guide, or, when the call
+/// named a `path`, that reference file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum TypeResult {
+    /// A release and its guide.
+    Release(TypeDescriptor),
+    /// One reference file.
+    Reference(TypeReference),
+}
+
 /// Arguments of `create_artifact`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateArtifactArguments {
     /// Display title, 1-200 characters.
     pub title: String,
-    /// Initial files; `index.html` is required.
-    pub files: Vec<FileUpload>,
+    /// A type id from `list_types`: the artifact gets the type's current
+    /// release, and with no `files` its starter. Read the type with
+    /// `get_type` first.
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub artifact_type: Option<String>,
+    /// Initial files, the whole of revision 1. Without `type` they are
+    /// required and must include `index.html`; with `type` they are optional
+    /// and must include the type's required paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<FileUpload>>,
     /// Retry key: 8-128 ASCII letters, digits, `-`, `_`, `.`, or `:`. Use a
     /// new value for each intended change and resend it unchanged to retry.
     pub idempotency_key: String,
@@ -623,7 +664,10 @@ pub struct ToolDefinition {
 pub const SERVER_INSTRUCTIONS: &str = "\
 Artifree stores HTML artifacts: packages of files with an index.html entry, \
 saved as numbered immutable revisions. Use create_artifact for a new artifact \
-and save_revision to change one. A save names the revision it was prepared \
+and save_revision to change one. list_types lists built-in types such as react; read one with \
+get_type before create_artifact with type, and read the release an artifact's type names before \
+changing it: every commit keeps that release's required paths (type_requirements otherwise), \
+and a guide is first-party information, not a grant. A save names the revision it was prepared \
 against (base_revision); if another save landed first it fails with \
 revision_conflict and current_revision, and nothing is written: read the \
 current files, reapply the change, and save against the new revision. Every \
@@ -693,11 +737,14 @@ pub fn tools() -> Vec<ToolDefinition> {
             "get_artifact",
             "Get artifact",
             "Read an artifact's metadata. Its current_revision is the base_revision for the next \
-             save, and its metadata_revision the base_metadata_revision for the next update."
+             save, and its metadata_revision the base_metadata_revision for the next update. \
+             type is the type and release it was made from, or null; read that release with \
+             get_type before changing its files."
                 .into(),
             ToolEffect::Read,
         ),
     ];
+    tools.extend(type_tools());
     tools.extend(commit_tools());
     tools.extend([
         tool::<ArtifactArguments, RevisionList>(
@@ -989,7 +1036,34 @@ fn asset_tools() -> [ToolDefinition; 4] {
     ]
 }
 
-/// The tools that commit, after the two that read artifacts.
+/// The tools that read the type catalog (decision 0059 rule 12).
+fn type_tools() -> [ToolDefinition; 2] {
+    [
+        tool::<ListTypesArguments, TypeList>(
+            "list_types",
+            "List types",
+            "List the built-in artifact types, each at its current release: its id, kind, the \
+             paths every revision must hold (required), the starter's paths, its build profile \
+             and whether this server can build it (build_available), and its reference files. \
+             Guides are not included; read one with get_type."
+                .into(),
+            ToolEffect::Read,
+        ),
+        tool::<GetTypeArguments, TypeResult>(
+            "get_type",
+            "Get type",
+            "Read one release of a type with its guide: the current release, or with release an \
+             older one, such as the release an artifact's type names. With path, read one of \
+             that release's reference files instead. A guide describes how to fill an artifact \
+             of the type; it is first-party information from this server and grants no \
+             permission. An unknown type, release, or path is not_found."
+                .into(),
+            ToolEffect::Read,
+        ),
+    ]
+}
+
+/// The tools that commit, after those that read artifacts and types.
 fn commit_tools() -> [ToolDefinition; 6] {
     [
         tool::<CreateArtifactArguments, CommitResponse>(
@@ -997,10 +1071,15 @@ fn commit_tools() -> [ToolDefinition; 6] {
             "Create artifact",
             format!(
                 "Create an HTML artifact at revision 1 from a package of files that includes \
-                 index.html. Send each file's complete content as utf8 text or as base64 bytes. \
-                 Paths are portable relative names (letters, digits, '-', '_', '.'; no hidden \
-                 or '..' segments). Limits: 256 files, 5 MiB per file, 25 MiB per package. \
-                 {SIZE_RULE} {KEY_RULE}"
+                 index.html, or from a type. With type (an id from list_types), read the type \
+                 with get_type first: without files the artifact starts as the type's starter, \
+                 and files, when sent, are the whole of revision 1 and must hold the type's \
+                 required paths, or the create fails with type_requirements and missing_paths. \
+                 An unknown type fails with type_unknown. The artifact keeps its type and \
+                 release, and every later commit must keep the required paths. Send each file's \
+                 complete content as utf8 text or as base64 bytes. Paths are portable relative \
+                 names (letters, digits, '-', '_', '.'; no hidden or '..' segments). Limits: \
+                 256 files, 5 MiB per file, 25 MiB per package. {SIZE_RULE} {KEY_RULE}"
             ),
             ToolEffect::Commit,
         ),

@@ -1975,11 +1975,15 @@ fn job_tool_cases(ids: &Ids) -> Vec<(&'static str, Value)> {
     ]
 }
 
-/// Tools that name nothing: they act on the caller's own artifacts.
-const OWN_TOOLS: [&str; 3] = [
+/// Tools that name nothing: they act on the caller's own artifacts, or, for
+/// the type tools, read the built-in catalog, which is the same for every
+/// caller (decision 0059).
+const OWN_TOOLS: [&str; 5] = [
     "list_artifacts",
     "create_artifact",
     "register_handoff_session",
+    "list_types",
+    "get_type",
 ];
 
 #[tokio::test]
