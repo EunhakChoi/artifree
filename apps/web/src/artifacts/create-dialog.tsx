@@ -3,7 +3,12 @@ import type { FormEvent } from 'react';
 import { PlusIcon } from 'lucide-react';
 import { newIdempotencyKey } from '@artifree/client';
 import type { ArtifreeClient } from '@artifree/client';
-import type { Artifact, CreateArtifactRequest } from '@artifree/contracts';
+import type {
+  Artifact,
+  CreateArtifactRequest,
+  TypeList,
+  TypeSummary,
+} from '@artifree/contracts';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import {
@@ -16,10 +21,20 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog';
-import { Field, FieldGroup, FieldLabel } from '@/components/ui/field';
+import {
+  Field,
+  FieldDescription,
+  FieldGroup,
+  FieldLabel,
+} from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
+import {
+  NativeSelect,
+  NativeSelectOption,
+} from '@/components/ui/native-select';
 import { Textarea } from '@/components/ui/textarea';
-import { describeFailure } from './use-request';
+import { describeFailure, useRequest } from './use-request';
+import type { RequestState } from './use-request';
 
 const STARTER = `<!doctype html>
 <html lang="en">
@@ -40,7 +55,13 @@ interface CreateDialogProps {
   onCreated: (artifact: Artifact) => void;
 }
 
-/** Creates an artifact with a single `index.html`. */
+/** The choice of what revision 1 starts from: one `index.html`. */
+const HTML_START = '';
+
+/**
+ * Creates an artifact with a single `index.html`, or from a built-in type
+ * with the type's starter as revision 1 (decision 0059 rules 5 and 14).
+ */
 export function CreateDialog({
   client,
   disabled,
@@ -49,6 +70,16 @@ export function CreateDialog({
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState('');
   const [html, setHtml] = useState(STARTER);
+  // A type id, or HTML_START for one index.html.
+  const [start, setStart] = useState(HTML_START);
+  // The catalog is read each time the dialog opens; without it only the
+  // index.html start is offered.
+  const types = useRequest<TypeList>(open ? 'types' : undefined, (signal) =>
+    client.listTypes({ signal }),
+  );
+  const offered: readonly TypeSummary[] =
+    types.status === 'ready' ? types.value.types : [];
+  const chosen = offered.find((type) => type.id === start);
   const [pending, setPending] = useState(false);
   const [failure, setFailure] = useState<string>();
   // The last request sent and its key. Sending the same content again reuses
@@ -63,10 +94,13 @@ export function CreateDialog({
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
-    const request: CreateArtifactRequest = {
-      title: title.trim(),
-      files: [{ path: 'index.html', encoding: 'utf8', content: html }],
-    };
+    const request: CreateArtifactRequest =
+      chosen === undefined
+        ? {
+            title: title.trim(),
+            files: [{ path: 'index.html', encoding: 'utf8', content: html }],
+          }
+        : { title: title.trim(), type: chosen.id };
     const body = JSON.stringify(request);
     const key = attempt?.body === body ? attempt.key : newIdempotencyKey();
     setAttempt({ body, key });
@@ -79,6 +113,7 @@ export function CreateDialog({
       setOpen(false);
       setTitle('');
       setHtml(STARTER);
+      setStart(HTML_START);
       setAttempt(undefined);
       onCreated(result.artifact);
     } catch (error: unknown) {
@@ -111,8 +146,9 @@ export function CreateDialog({
           <DialogHeader>
             <DialogTitle>New HTML artifact</DialogTitle>
             <DialogDescription>
-              Saved as revision 1 with one <code>index.html</code>. Agents can
-              add more files through the API or CLI.
+              Saved as revision 1, with one <code>index.html</code> or with the
+              starter files of a built-in type. Agents can add more files
+              through the API or CLI.
             </DialogDescription>
           </DialogHeader>
           <FieldGroup>
@@ -130,18 +166,39 @@ export function CreateDialog({
               />
             </Field>
             <Field>
-              <FieldLabel htmlFor="new-html">index.html</FieldLabel>
-              <Textarea
-                id="new-html"
-                variant="code"
-                className="max-h-64"
-                spellCheck={false}
-                readOnly={pending}
-                aria-busy={pending}
-                value={html}
-                onChange={(event) => edit(() => setHtml(event.target.value))}
-              />
+              <FieldLabel htmlFor="new-start">Start from</FieldLabel>
+              <NativeSelect
+                id="new-start"
+                disabled={pending}
+                value={chosen === undefined ? HTML_START : chosen.id}
+                onChange={(event) => edit(() => setStart(event.target.value))}
+              >
+                <NativeSelectOption value={HTML_START}>
+                  One index.html
+                </NativeSelectOption>
+                {offered.map((type) => (
+                  <NativeSelectOption key={type.id} value={type.id}>
+                    {type.title} ({type.id}, release {type.release})
+                  </NativeSelectOption>
+                ))}
+              </NativeSelect>
+              <TypeNote types={types} chosen={chosen} />
             </Field>
+            {chosen === undefined ? (
+              <Field>
+                <FieldLabel htmlFor="new-html">index.html</FieldLabel>
+                <Textarea
+                  id="new-html"
+                  variant="code"
+                  className="max-h-64"
+                  spellCheck={false}
+                  readOnly={pending}
+                  aria-busy={pending}
+                  value={html}
+                  onChange={(event) => edit(() => setHtml(event.target.value))}
+                />
+              </Field>
+            ) : null}
           </FieldGroup>
           {failure === undefined ? null : (
             <Alert variant="destructive">
@@ -162,5 +219,42 @@ export function CreateDialog({
         </form>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/**
+ * What the chosen start means: a type's description, starter, required files
+ * and whether this server builds it; or, for one index.html, why no type is
+ * offered when the catalog could not be read.
+ */
+function TypeNote({
+  types,
+  chosen,
+}: {
+  readonly types: RequestState<TypeList>;
+  readonly chosen: TypeSummary | undefined;
+}) {
+  if (chosen === undefined) {
+    if (types.status === 'loading')
+      return <FieldDescription>Reading the built-in types…</FieldDescription>;
+    if (types.status === 'error')
+      return (
+        <FieldDescription>
+          The built-in types could not be read ({types.message}); one index.html
+          can still be created.
+        </FieldDescription>
+      );
+    return null;
+  }
+  return (
+    <FieldDescription>
+      {chosen.description} Starts with {chosen.starter.join(', ')}. Every
+      revision must keep {chosen.required.join(', ')}.{' '}
+      {chosen.build_profile === null
+        ? null
+        : chosen.build_available
+          ? `Built with the ${chosen.build_profile} profile from the Jobs tab.`
+          : `This server cannot build the ${chosen.build_profile} profile; the artifact can still be created and edited.`}
+    </FieldDescription>
   );
 }

@@ -71,6 +71,8 @@ const WORDS = {
   previewNotice:
     'Showing the build of revision 1, the latest build. Revision 2, the newest, has a build pending.',
   previewMissing: 'Revision 1 has no build.',
+  typeOption: 'React app (react, release 1)',
+  typeBadge: 'Type react, release 1',
 };
 
 /** The build profile the tab asks for (decision 0058, rule 14). */
@@ -97,6 +99,7 @@ const RUNNERS = {
   'preview-build-unknown': checkPreviewBuildUnknown,
   'preview-build-notice': checkPreviewBuildNotice,
   'preview-build-missing': checkPreviewBuildMissing,
+  'type-create': checkTypeCreate,
   contract: checkContract,
 };
 
@@ -634,6 +637,150 @@ async function checkBuildQueued(world) {
     await opened.context.close();
     // The build would wait for its claim deadline; it is ended so that it
     // counts against no other check's open jobs.
+    if (queued !== undefined)
+      await api(world.server, 'POST', `/v1/jobs/${queued.id}/cancel`, {});
+  }
+}
+
+/**
+ * The web workspace creates a react artifact from its type (decision 0059
+ * rule 14, T01b): the dialog offers the type the server lists, hides the
+ * index.html field for it, and creates revision 1 from the starter with no
+ * files sent. The artifact's page shows its type. On the x86_64 Linux release
+ * build "Build revision 1" queues a real react-v1 build, which waits since no
+ * smoke host runs an execution worker; the build preview is then shown with
+ * the status, the ticket and the build page intercepted, as the other build
+ * preview cases do.
+ */
+async function checkTypeCreate(world) {
+  const title = `Typed app ${randomUUID().slice(0, 8)}`;
+  const context = await world.browser.newContext();
+  let queued;
+  try {
+    const tab = await context.newPage();
+    tab.setDefaultTimeout(WAIT_MS);
+    const log = watch(tab, world.origin, '', world.server.content_origin);
+    const creates = [];
+    tab.on('request', (request) => {
+      if (
+        request.method() === 'POST' &&
+        new URL(request.url()).pathname === '/v1/artifacts'
+      )
+        creates.push(request.postDataJSON());
+    });
+    await tab.goto(world.origin);
+    const workspace = tab.locator('#artifacts');
+    await workspace.getByLabel('Access token').fill(world.server.token);
+    await workspace.getByRole('button', { name: 'Connect' }).click();
+    await workspace.getByRole('button', { name: 'New artifact' }).click();
+    const dialog = tab.getByRole('dialog', { name: 'New HTML artifact' });
+    await dialog.getByLabel('Title').fill(title);
+    const start = dialog.getByLabel('Start from');
+    await expect(
+      start.getByRole('option', { name: WORDS.typeOption }),
+    ).toBeAttached({ timeout: WAIT_MS });
+    await start.selectOption({ label: WORDS.typeOption });
+    await expect(dialog.getByLabel('index.html')).toHaveCount(0);
+    await expect(dialog).toContainText(
+      'Every revision must keep index.html, src/main.tsx.',
+    );
+    await world.checkAccessibility('type-create-dialog', tab);
+    await dialog.getByRole('button', { name: 'Create' }).click();
+    await expect(dialog).toBeHidden({ timeout: WAIT_MS });
+    assert.deepEqual(
+      creates,
+      [{ title, type: 'react' }],
+      'The dialog sent the type and no files.',
+    );
+    await expect(
+      workspace.getByRole('heading', { name: title, exact: true }),
+    ).toBeVisible({ timeout: WAIT_MS });
+    await expect(
+      workspace.getByText(WORDS.typeBadge, { exact: true }),
+    ).toBeVisible();
+
+    const listed = await api(
+      world.server,
+      'GET',
+      `/v1/artifacts?q=${encodeURIComponent(title)}`,
+    );
+    assert.equal(listed.artifacts.length, 1, 'One artifact was created.');
+    const [artifact] = listed.artifacts;
+    assert.deepEqual(artifact.type, { id: 'react', release: 1 });
+    const revision = await api(
+      world.server,
+      'GET',
+      `/v1/artifacts/${artifact.id}/revisions/1`,
+    );
+    assert.deepEqual(
+      revision.files.map((file) => file.path),
+      ['index.html', 'src/app.css', 'src/main.tsx'],
+      'Revision 1 is the starter.',
+    );
+
+    const tabs = workspace.getByRole('tablist', { name: 'Artifact views' });
+    if (process.platform === 'linux' && process.arch === 'x64') {
+      await tabs.getByRole('tab', { name: 'Jobs', exact: true }).click();
+      const jobsPanel = workspace.getByRole('tabpanel', {
+        name: 'Jobs',
+        exact: true,
+      });
+      await jobsPanel
+        .getByRole('button', { name: 'Build revision 1', exact: true })
+        .click();
+      await expect(
+        jobRow(jobsPanel, 'Build 1').getByText('Queued', { exact: true }),
+      ).toBeVisible({ timeout: WAIT_MS });
+      [queued] = await jobsOf(world.server, artifact.id);
+      assert.equal(queued?.profile, PROFILE, 'A react-v1 build was queued.');
+    } else {
+      process.stderr.write(
+        `jobs: type-create queues no build on ${process.platform}-${process.arch}\n`,
+      );
+    }
+
+    // No smoke host runs an execution worker, so the built state and its page
+    // are given in the browser.
+    const state = {
+      status: {
+        profile: PROFILE,
+        head_revision: 1,
+        status: 'built',
+        latest_build_revision: 1,
+      },
+      tickets: [1],
+      asked: [],
+    };
+    await interceptBuildPreview(tab, world.server, artifact.id, state);
+    await tabs.getByRole('tab', { name: 'Preview', exact: true }).click();
+    const panel = workspace.getByRole('tabpanel', {
+      name: 'Preview',
+      exact: true,
+    });
+    await showBuild(panel);
+    await expect(
+      panel
+        .frameLocator('iframe[title^="Build preview of"]')
+        .getByText('The intercepted build'),
+    ).toBeVisible({ timeout: WAIT_MS });
+    assert.deepEqual(state.asked, [1], 'The tickets asked for.');
+    // The artifact opens on its source preview, whose index.html loads
+    // ./app.js, a file only the build has. Chromium logs that 404 from the
+    // content origin, which counts as the preview's own message; Firefox
+    // reports it as a blocked cross-origin read logged by the workspace page,
+    // so it is set apart here too, and only for that file of the source preview.
+    const sourcePreview = `${world.server.content_origin}/p/`;
+    log.unexpected = log.unexpected.filter(
+      (text) =>
+        !(
+          text.includes('Cross-Origin Request Blocked') &&
+          text.includes(sourcePreview) &&
+          text.includes('/app.js.')
+        ),
+    );
+    assertCalm(log, world.browser, { refused: [], cuts: 0 });
+  } finally {
+    await context.close();
     if (queued !== undefined)
       await api(world.server, 'POST', `/v1/jobs/${queued.id}/cancel`, {});
   }
