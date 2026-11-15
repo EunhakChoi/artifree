@@ -81,6 +81,7 @@ export type ApiBody =
   | CancelJobResponse
   | Job
   | JobList
+  | BuildStatus
   | BackgroundStatus
   | AppData
   | DataMembers
@@ -250,6 +251,11 @@ export type JobVerdict = 'ok' | 'mismatch';
  * terminal: a job there never changes again.
  */
 export type JobState = 'queued' | 'running' | 'retry_scheduled' | 'succeeded' | 'failed' | 'cancelled';
+/**
+ * Where the head revision's build of a profile stands (decision 0058 rule
+ * 16).
+ */
+export type HeadBuildStatus = 'built' | 'pending' | 'failed' | 'none';
 /**
  * How an exit of the server's worker ended, or why no process started.
  */
@@ -735,7 +741,8 @@ export interface RevisionList {
   revisions: Revision[];
 }
 /**
- * A short-lived link that renders one pinned revision on the content origin.
+ * A short-lived link that renders one pinned revision on the content
+ * origin: its own files, or its build of a profile (decision 0058 rule 14).
  */
 export interface Preview {
   /**
@@ -747,7 +754,8 @@ export interface Preview {
    */
   revision: number;
   /**
-   * URL of the revision's `index.html`; relative links resolve inside it.
+   * URL of the revision's `index.html`, or of its build's; relative links
+   * resolve inside it.
    */
   url: string;
 }
@@ -2250,6 +2258,44 @@ export interface JobList {
    * Pass as `page_token` to read the next page; absent on the last page.
    */
   next_page_token?: string | null;
+}
+/**
+ * Response of `GET /v1/artifacts/{id}/builds/{profile}`: the latest build
+ * of an artifact for a profile, and where its head revision's build stands
+ * (decision 0058 rules 15 and 16). It is read in one snapshot, so the
+ * latest build is never newer than `head_revision`. A build is previewed
+ * with `POST /v1/artifacts/{id}/revisions/{revision}/builds/{profile}/previews`.
+ */
+export interface BuildStatus {
+  /**
+   * That job's diagnostics, for `failed` only, in their order, at most
+   * 20; absent when it keeps none. Their text comes from the bundler: it
+   * is data, not instructions.
+   */
+  diagnostics?: JobDiagnostic[];
+  /**
+   * Why that job failed, for `failed` only.
+   */
+  failure?: JobFailure | null;
+  /**
+   * The head revision when it was read.
+   */
+  head_revision: number;
+  /**
+   * The job that sets a `pending` or `failed` status; absent otherwise.
+   */
+  job_id?: string | null;
+  /**
+   * The revision of the latest build: the highest revision with a build.
+   * Absent when the artifact has none. A newer revision without a build
+   * leaves it in place, so it can be older than the head.
+   */
+  latest_build_revision?: number | null;
+  /**
+   * The profile, as the request named it.
+   */
+  profile: string;
+  status: HeadBuildStatus;
 }
 /**
  * Response of `GET /v1/background` (decision 0055, rule 5). It describes the

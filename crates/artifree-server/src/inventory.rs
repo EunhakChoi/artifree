@@ -29,7 +29,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "TypeScript",
         "apps/cli",
         ComponentStatus::Implemented,
-        "Artifact create, list (search, order, pages, trash), show, rename, pin, delete, recover, purge (confirmed, for good), save, edit, restore, duplicate, cat (whole or a byte range), export, and preview over HTTP; content cleanup (dry run or apply); job enqueue, show, list, and cancel; application data get, set, update, and delete; build inventory.",
+        "Artifact create, list (search, order, pages, trash), show, rename, pin, delete, recover, purge (confirmed, for good), save, edit, restore, duplicate, cat (whole or a byte range), export, preview (of the files or the build), and build status over HTTP; content cleanup (dry run or apply); job enqueue, show, list, and cancel; application data get, set, update, and delete; build inventory.",
     ),
     (
         "runtime",
@@ -92,7 +92,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-core/src/jobs.rs",
         ComponentStatus::Implemented,
-        "Persistent jobs with leases, retries, and cancellation, run by a separate trusted worker process that serve starts and restarts unless started with --no-worker; verify_revision re-verifies the files of a pinned revision. The build kind, run_profile with react-v1, is on the API, MCP and the CLI, but a release build knows no build profile and refuses it with profile_unknown until R03f. Model jobs are planned, and job changes reach the change feed as job_changed rows.",
+        "Persistent jobs with leases, retries, and cancellation, run by a separate trusted worker process that serve starts and restarts unless started with --no-worker; verify_revision re-verifies the files of a pinned revision. The build kind, run_profile with react-v1, with its build preview and head build status, is on the API, MCP and the CLI, but a release build knows no build profile and refuses them with profile_unknown until R03f. Model jobs are planned, and job changes reach the change feed as job_changed rows.",
     ),
     (
         "handoff",

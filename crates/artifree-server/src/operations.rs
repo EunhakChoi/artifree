@@ -6,19 +6,19 @@
 
 use artifree_contracts::api::{
     AgentSessionList, AppData, Artifact, ArtifactKind as WireKind, ArtifactList, Asset, AssetList,
-    BackgroundStatus, CancelJobResponse, CommitResponse, ConflictingFile, ContentEncoding,
-    CopiedPart, CreateArtifactRequest, CreateRuntimeViewRequest, DataMembers, DataWriteResponse,
-    DeleteAssetRequest, DeleteAssetResponse, DeleteDataRequest, DiagnosticLocation,
-    DuplicateArtifactRequest, DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest,
-    EnqueueJobResponse, ErrorBody, ErrorCode, ExecutionStatus, ExportRuntime,
+    BackgroundStatus, BuildStatus as WireBuildStatus, CancelJobResponse, CommitResponse,
+    ConflictingFile, ContentEncoding, CopiedPart, CreateArtifactRequest, CreateRuntimeViewRequest,
+    DataMembers, DataWriteResponse, DeleteAssetRequest, DeleteAssetResponse, DeleteDataRequest,
+    DiagnosticLocation, DuplicateArtifactRequest, DuplicateArtifactResponse, EditFilesRequest,
+    EnqueueJobRequest, EnqueueJobResponse, ErrorBody, ErrorCode, ExecutionStatus, ExportRuntime,
     FileChange as WireChange, FileEdit as WireEdit, FileUpload, Handoff, HandoffState,
-    Job as WireJob, JobBuild, JobDiagnostic, JobFailure as WireFailure, JobKind as WireJobKind,
-    JobList, JobMismatch, JobProblem, JobResult, JobState as WireJobState, JobVerdict, JsonValue,
-    ListArtifactsQuery, ListJobsQuery, ListSort, Preview, PurgeArtifactRequest,
-    PurgeArtifactResponse, ReadDataMembersQuery, RemoveUnreferencedContentRequest,
-    RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionFile,
-    RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata, RuntimeView,
-    SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest, SourceExportFormat,
+    HeadBuildStatus, Job as WireJob, JobBuild, JobDiagnostic, JobFailure as WireFailure,
+    JobKind as WireJobKind, JobList, JobMismatch, JobProblem, JobResult, JobState as WireJobState,
+    JobVerdict, JsonValue, ListArtifactsQuery, ListJobsQuery, ListSort, Preview,
+    PurgeArtifactRequest, PurgeArtifactResponse, ReadDataMembersQuery,
+    RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse, RestoreRevisionRequest,
+    Revision, RevisionFile, RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata,
+    RuntimeView, SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest, SourceExportFormat,
     SourceExportManifest, StageHandoffRequest, UnreferencedContent as WireContent,
     UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest, UploadAssetRequest,
     UploadAssetResponse,
@@ -28,6 +28,7 @@ use artifree_core::artifacts::{
     ArtifactError, ArtifactService, CopyParts, MetadataChange, Missing, RevisionExport,
 };
 use artifree_core::assets::AssetUpload;
+use artifree_core::build_reads::HeadBuild;
 use artifree_core::data::DataMutation;
 use artifree_core::jobs::{JobPageSize, NewBuild};
 use artifree_core::listing::{ListQuery, PageSize, SearchText};
@@ -825,6 +826,10 @@ pub(crate) async fn preview(
     let lookup_actor = actor.clone();
     let lookup_id = id.clone();
     let lookup_target = target.clone();
+    let build_profiles = match &target {
+        PreviewTarget::Source => Vec::new(),
+        PreviewTarget::Build(_) => state.settings().build_profiles.clone(),
+    };
     state
         .run(move |artifacts| match &lookup_target {
             PreviewTarget::Source => {
@@ -835,7 +840,13 @@ pub(crate) async fn preview(
                 Ok(())
             }
             PreviewTarget::Build(profile) => artifacts
-                .preview_build(&lookup_actor, &lookup_id, revision, profile)
+                .preview_build(
+                    &lookup_actor,
+                    &lookup_id,
+                    revision,
+                    profile,
+                    &build_profiles,
+                )
                 .map(drop),
         })
         .await?;
@@ -1575,12 +1586,7 @@ pub(crate) async fn enqueue_job(
         (WireJobKind::RunProfile, None) => {
             return Err(ApiError::invalid("profile: a run_profile job requires one"));
         }
-        // A name that cannot be a profile is not one this build knows either;
-        // it is not quoted back.
-        (WireJobKind::RunProfile, Some(name)) => Some(
-            name.parse::<ProfileName>()
-                .map_err(|_| ApiError::from(ArtifactError::ProfileUnknown))?,
-        ),
+        (WireJobKind::RunProfile, Some(name)) => Some(profile_name(&name)?),
     };
     let now = state.clock().now();
     // Only a build reads the build profiles, so a verification copies none.
@@ -1624,6 +1630,61 @@ pub(crate) async fn enqueue_job(
     Ok(EnqueueJobResponse {
         job: job_dto(&receipt.job, &diagnostics)?,
         replayed: receipt.delivery == Delivery::Replayed,
+    })
+}
+
+/// The profile a build request names (decision 0058 rules 14, 16 and 17).
+/// A name that cannot be a profile is not one this build knows either: it
+/// is `profile_unknown`, and it is not quoted back. The core then checks
+/// that the profile is a build profile, before anything is read.
+pub(crate) fn profile_name(name: &str) -> Result<ProfileName, ApiError> {
+    name.parse()
+        .map_err(|_| ApiError::from(ArtifactError::ProfileUnknown))
+}
+
+/// The head status of an artifact's builds of `profile` (decision 0058 rule
+/// 16): only for a caller who may read the artifact outside the trash.
+pub(crate) async fn build_status(
+    state: &AppState,
+    actor: ActorId,
+    id: &str,
+    profile: &str,
+) -> Result<WireBuildStatus, ApiError> {
+    let profile = profile_name(profile)?;
+    let id = artifact_id(id)?;
+    let name = profile.as_str().to_owned();
+    let builds = state.settings().build_profiles.clone();
+    let status = state
+        .run(move |artifacts| artifacts.build_status(&actor, &id, &profile, &builds))
+        .await?;
+    let (head, job_id, failure, diagnostics) = match status.head_build {
+        HeadBuild::Built => (HeadBuildStatus::Built, None, None, Vec::new()),
+        HeadBuild::Pending { job } => (
+            HeadBuildStatus::Pending,
+            Some(job.to_string()),
+            None,
+            Vec::new(),
+        ),
+        HeadBuild::Failed {
+            job,
+            failure,
+            diagnostics,
+        } => (
+            HeadBuildStatus::Failed,
+            Some(job.to_string()),
+            Some(failure_dto(failure)),
+            diagnostic_dtos(&diagnostics),
+        ),
+        HeadBuild::None => (HeadBuildStatus::None, None, None, Vec::new()),
+    };
+    Ok(WireBuildStatus {
+        profile: name,
+        head_revision: status.head.0,
+        latest_build_revision: status.latest.map(|build| build.revision.0),
+        status: head,
+        job_id,
+        failure,
+        diagnostics,
     })
 }
 
@@ -2138,16 +2199,7 @@ fn job_dto(record: &JobRecord, diagnostics: &[BuildDiagnostic]) -> Result<WireJo
         JobKind::VerifyRevision => WireJobKind::VerifyRevision,
         JobKind::RunProfile => WireJobKind::RunProfile,
     };
-    let failure = record.failure.map(|failure| match failure {
-        JobFailure::RevisionUnavailable => WireFailure::RevisionUnavailable,
-        JobFailure::StorageUnavailable => WireFailure::StorageUnavailable,
-        JobFailure::LeaseExpired => WireFailure::LeaseExpired,
-        JobFailure::Internal => WireFailure::Internal,
-        JobFailure::ExecutionUnavailable => WireFailure::ExecutionUnavailable,
-        JobFailure::BuildFailed => WireFailure::BuildFailed,
-        JobFailure::LimitExceeded => WireFailure::LimitExceeded,
-        JobFailure::OutputRejected => WireFailure::OutputRejected,
-    });
+    let failure = record.failure.map(failure_dto);
     Ok(WireJob {
         id: record.id.to_string(),
         artifact_id: record.artifact.to_string(),
@@ -2200,21 +2252,38 @@ fn job_dto(record: &JobRecord, diagnostics: &[BuildDiagnostic]) -> Result<WireJo
             file_count: counts.files,
             byte_count: counts.bytes,
         }),
-        diagnostics: diagnostics
-            .iter()
-            .map(|diagnostic| JobDiagnostic {
-                location: diagnostic
-                    .location
-                    .as_ref()
-                    .map(|location| DiagnosticLocation {
-                        path: location.path.to_string(),
-                        line: u64::from(location.line),
-                        column: u64::from(location.column),
-                    }),
-                message: diagnostic.message.as_str().to_owned(),
-            })
-            .collect(),
+        diagnostics: diagnostic_dtos(diagnostics),
     })
+}
+
+fn failure_dto(failure: JobFailure) -> WireFailure {
+    match failure {
+        JobFailure::RevisionUnavailable => WireFailure::RevisionUnavailable,
+        JobFailure::StorageUnavailable => WireFailure::StorageUnavailable,
+        JobFailure::LeaseExpired => WireFailure::LeaseExpired,
+        JobFailure::Internal => WireFailure::Internal,
+        JobFailure::ExecutionUnavailable => WireFailure::ExecutionUnavailable,
+        JobFailure::BuildFailed => WireFailure::BuildFailed,
+        JobFailure::LimitExceeded => WireFailure::LimitExceeded,
+        JobFailure::OutputRejected => WireFailure::OutputRejected,
+    }
+}
+
+fn diagnostic_dtos(diagnostics: &[BuildDiagnostic]) -> Vec<JobDiagnostic> {
+    diagnostics
+        .iter()
+        .map(|diagnostic| JobDiagnostic {
+            location: diagnostic
+                .location
+                .as_ref()
+                .map(|location| DiagnosticLocation {
+                    path: location.path.to_string(),
+                    line: u64::from(location.line),
+                    column: u64::from(location.column),
+                }),
+            message: diagnostic.message.as_str().to_owned(),
+        })
+        .collect()
 }
 
 fn commit_response(receipt: CommitReceipt) -> CommitResponse {

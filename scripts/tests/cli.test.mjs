@@ -294,6 +294,116 @@ for (const args of [
   });
 }
 
+test('CLI build previews and the build status send the right requests and refuse bad usage first', async () => {
+  const requests = [];
+  const artifactId = `art_${'1'.repeat(32)}`;
+  const preview = {
+    url: `http://127.0.0.1:7411/b/${'c'.repeat(43)}/`,
+    revision: 2,
+    expires_at_ms: 9,
+  };
+  const status = {
+    profile: 'react-v1',
+    head_revision: 3,
+    latest_build_revision: 2,
+    status: 'none',
+  };
+  const server = createServer((request, response) => {
+    requests.push([request.method, request.url]);
+    response.setHeader('content-type', 'application/json');
+    if (request.method === 'POST') {
+      response.statusCode = 201;
+      response.end(JSON.stringify(preview));
+    } else if (request.url.includes('/builds/'))
+      response.end(JSON.stringify(status));
+    else
+      response.end(
+        JSON.stringify({
+          id: artifactId,
+          kind: 'app',
+          title: 'Page',
+          pinned: false,
+          current_revision: 3,
+          metadata_revision: 1,
+          deleted_at_ms: null,
+          created_at_ms: 1,
+          updated_at_ms: 2,
+        }),
+      );
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const address = server.address();
+    assert.ok(address !== null && typeof address === 'object');
+    const env = {
+      ...process.env,
+      ARTIFREE_URL: `http://127.0.0.1:${address.port}`,
+      ARTIFREE_TOKEN: 'f'.repeat(64),
+    };
+    delete env.ARTIFREE_TOKEN_FILE;
+    const run = async (args) => {
+      try {
+        const { stdout, stderr } = await promisify(execFile)(
+          process.execPath,
+          ['apps/cli/dist/main.js', 'artifact', ...args],
+          { cwd: root, env, timeout: 10_000 },
+        );
+        return { status: 0, stdout, stderr };
+      } catch (error) {
+        return {
+          status: error.code,
+          stdout: error.stdout,
+          stderr: error.stderr,
+        };
+      }
+    };
+    for (const bad of [
+      ['preview', artifactId, '--build', ''],
+      ['preview', artifactId, '--build', 'react-v1', '--revision', '0'],
+      ['build-status', artifactId],
+      ['build-status', artifactId, '--build', ''],
+      ['build-status', '--build', 'react-v1'],
+      ['build-status', artifactId, 'extra', '--build', 'react-v1'],
+    ]) {
+      const refused = await run(bad);
+      assert.equal(refused.status, 2, bad.join(' '));
+      assert.equal(refused.stdout, '', bad.join(' '));
+    }
+    assert.deepEqual(requests, [], 'a bad command line sent a request');
+
+    const built = await run([
+      'preview',
+      artifactId,
+      '--revision',
+      '2',
+      '--build',
+      'react-v1',
+    ]);
+    assert.equal(built.status, 0, built.stderr);
+    assert.deepEqual(JSON.parse(built.stdout), preview);
+    const head = await run(['preview', artifactId, '--build', 'react-v1']);
+    assert.equal(head.status, 0, head.stderr);
+    const read = await run(['build-status', artifactId, '--build', 'react-v1']);
+    assert.equal(read.status, 0, read.stderr);
+    assert.deepEqual(JSON.parse(read.stdout), status);
+    assert.deepEqual(requests, [
+      [
+        'POST',
+        `/v1/artifacts/${artifactId}/revisions/2/builds/react-v1/previews`,
+      ],
+      ['GET', `/v1/artifacts/${artifactId}`],
+      [
+        'POST',
+        `/v1/artifacts/${artifactId}/revisions/3/builds/react-v1/previews`,
+      ],
+      ['GET', `/v1/artifacts/${artifactId}/builds/react-v1`],
+    ]);
+  } finally {
+    server.close();
+  }
+});
+
 test('CLI job commands send the right requests and refuse bad usage before sending anything', async () => {
   const requests = [];
   const jobId = `job_${'2'.repeat(32)}`;

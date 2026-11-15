@@ -5,6 +5,7 @@ import type {
   ArtifactKind,
   ArtifactList,
   BackgroundStatus,
+  BuildStatus,
   ChangeKind,
   CommitResponse,
   CopiedPart,
@@ -16,6 +17,7 @@ import type {
   FeedPosition,
   Handoff,
   HandoffState,
+  HeadBuildStatus,
   CancelJobResponse,
   EnqueueJobResponse,
   DiagnosticLocation,
@@ -968,6 +970,61 @@ export function parseJobList(value: unknown): JobList | undefined {
   return typeof next_page_token === 'string'
     ? { jobs, next_page_token }
     : undefined;
+}
+
+const HEAD_BUILD_STATUSES: readonly HeadBuildStatus[] = [
+  'built',
+  'pending',
+  'failed',
+  'none',
+];
+
+/**
+ * Parses `GET /v1/artifacts/{id}/builds/{profile}` (decision 0058 rule 16).
+ * A `pending` or `failed` status names its job and no other does; only a
+ * `failed` one has a failure, and only a `build_failed` one has diagnostics,
+ * at most 20; and the latest build is never
+ * newer than the head, and is the head's when it is `built`.
+ */
+export function parseBuildStatus(value: unknown): BuildStatus | undefined {
+  if (!isRecord(value)) return undefined;
+  const status = oneOf(HEAD_BUILD_STATUSES, value.status);
+  const latest = optional(value.latest_build_revision, (v) =>
+    isCount(v) ? v : undefined,
+  );
+  const jobId = optional(value.job_id, (v) =>
+    typeof v === 'string' ? v : undefined,
+  );
+  const failure = optional(value.failure, (v) => oneOf(JOB_FAILURES, v));
+  const diagnostics =
+    value.diagnostics === undefined
+      ? []
+      : list(value.diagnostics, jobDiagnostic);
+  const { profile, head_revision } = value;
+  if (
+    typeof profile !== 'string' ||
+    !isCount(head_revision) ||
+    status === undefined ||
+    latest === undefined ||
+    jobId === undefined ||
+    failure === undefined ||
+    diagnostics === undefined ||
+    (latest.set !== undefined && latest.set > head_revision) ||
+    (status === 'built') !== (latest.set === head_revision) ||
+    (status === 'pending' || status === 'failed') !==
+      (jobId.set !== undefined) ||
+    (status === 'failed') !== (failure.set !== undefined) ||
+    // Only a `build_failed` job keeps diagnostics, at most 20 (rule 13).
+    (failure.set !== 'build_failed' && diagnostics.length > 0) ||
+    diagnostics.length > 20
+  )
+    return undefined;
+  const parsed: BuildStatus = { profile, head_revision, status };
+  if (latest.set !== undefined) parsed.latest_build_revision = latest.set;
+  if (jobId.set !== undefined) parsed.job_id = jobId.set;
+  if (failure.set !== undefined) parsed.failure = failure.set;
+  if (diagnostics.length > 0) parsed.diagnostics = diagnostics;
+  return parsed;
 }
 
 function workerExit(value: unknown): WorkerExit | undefined {

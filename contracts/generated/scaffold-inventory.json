@@ -1,7 +1,7 @@
 {
   "name": "Artifree",
   "version": "0.1.0",
-  "contract_version": "0.30.0",
+  "contract_version": "0.31.0",
   "phase": "early-development",
   "server_framework": "axum",
   "async_runtime": "tokio",
@@ -24,7 +24,7 @@
       "language": "TypeScript",
       "path": "apps/cli",
       "status": "implemented",
-      "summary": "Artifact create, list (search, order, pages, trash), show, rename, pin, delete, recover, purge (confirmed, for good), save, edit, restore, duplicate, cat (whole or a byte range), export, and preview over HTTP; content cleanup (dry run or apply); job enqueue, show, list, and cancel; application data get, set, update, and delete; build inventory."
+      "summary": "Artifact create, list (search, order, pages, trash), show, rename, pin, delete, recover, purge (confirmed, for good), save, edit, restore, duplicate, cat (whole or a byte range), export, preview (of the files or the build), and build status over HTTP; content cleanup (dry run or apply); job enqueue, show, list, and cancel; application data get, set, update, and delete; build inventory."
     },
     {
       "id": "runtime",
@@ -87,7 +87,7 @@
       "language": "Rust",
       "path": "crates/artifree-core/src/jobs.rs",
       "status": "implemented",
-      "summary": "Persistent jobs with leases, retries, and cancellation, run by a separate trusted worker process that serve starts and restarts unless started with --no-worker; verify_revision re-verifies the files of a pinned revision. The build kind, run_profile with react-v1, is on the API, MCP and the CLI, but a release build knows no build profile and refuses it with profile_unknown until R03f. Model jobs are planned, and job changes reach the change feed as job_changed rows."
+      "summary": "Persistent jobs with leases, retries, and cancellation, run by a separate trusted worker process that serve starts and restarts unless started with --no-worker; verify_revision re-verifies the files of a pinned revision. The build kind, run_profile with react-v1, with its build preview and head build status, is on the API, MCP and the CLI, but a release build knows no build profile and refuses them with profile_unknown until R03f. Model jobs are planned, and job changes reach the change feed as job_changed rows."
     },
     {
       "id": "handoff",

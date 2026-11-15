@@ -114,6 +114,26 @@ pub struct NewBuild<'a> {
     pub build_profiles: &'a [ProfileName],
 }
 
+/// Whether `profile` is a build profile a request may name (decision 0058
+/// rule 17 and its R03d split note): [`PUBLIC_PROFILE`], and one of
+/// `build_profiles`, the build profiles this build knows. The enqueue of a
+/// build, a build preview and the head status all check it, before anything
+/// is read or written.
+///
+/// # Errors
+///
+/// [`ArtifactError::ProfileUnknown`] for any other profile.
+pub fn require_build_profile(
+    profile: &ProfileName,
+    build_profiles: &[ProfileName],
+) -> Result<(), ArtifactError> {
+    if profile.as_str() == PUBLIC_PROFILE && build_profiles.contains(profile) {
+        Ok(())
+    } else {
+        Err(ArtifactError::ProfileUnknown)
+    }
+}
+
 impl<S: ArtifactStore + JobStore> ArtifactService<S> {
     /// Enqueues a job of `kind` pinned to `revision` of an artifact `actor`
     /// may read.
@@ -162,9 +182,8 @@ impl<S: ArtifactStore + JobStore> ArtifactService<S> {
     }
 
     /// Enqueues a public build: a `run_profile` job of `profile` (decision
-    /// 0058 rule 17). `profile` must be [`PUBLIC_PROFILE`] and one of
-    /// `build_profiles`, the build profiles this build knows; any other is
-    /// refused before anything is read or written. The job is pinned as
+    /// 0058 rule 17). `profile` must pass [`require_build_profile`]; any
+    /// other is refused before anything is read or written. The job is pinned as
     /// [`Self::enqueue_profile_job`] pins it, and counts toward the actor's
     /// open jobs.
     ///
@@ -179,10 +198,7 @@ impl<S: ArtifactStore + JobStore> ArtifactService<S> {
         build: &NewBuild<'_>,
         now: UnixMillis,
     ) -> Result<JobReceipt, ArtifactError> {
-        if build.profile.as_str() != PUBLIC_PROFILE || !build.build_profiles.contains(build.profile)
-        {
-            return Err(ArtifactError::ProfileUnknown);
-        }
+        require_build_profile(build.profile, build.build_profiles)?;
         self.enqueue_profile_job(
             actor,
             key,

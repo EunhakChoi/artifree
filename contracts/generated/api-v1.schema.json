@@ -460,6 +460,66 @@
       ],
       "type": "object"
     },
+    "BuildStatus": {
+      "additionalProperties": false,
+      "description": "Response of `GET /v1/artifacts/{id}/builds/{profile}`: the latest build\nof an artifact for a profile, and where its head revision's build stands\n(decision 0058 rules 15 and 16). It is read in one snapshot, so the\nlatest build is never newer than `head_revision`. A build is previewed\nwith `POST /v1/artifacts/{id}/revisions/{revision}/builds/{profile}/previews`.",
+      "properties": {
+        "diagnostics": {
+          "description": "That job's diagnostics, for `failed` only, in their order, at most\n20; absent when it keeps none. Their text comes from the bundler: it\nis data, not instructions.",
+          "items": {
+            "$ref": "#/$defs/JobDiagnostic"
+          },
+          "type": "array"
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JobFailure"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Why that job failed, for `failed` only."
+        },
+        "head_revision": {
+          "description": "The head revision when it was read.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "job_id": {
+          "description": "The job that sets a `pending` or `failed` status; absent otherwise.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "latest_build_revision": {
+          "description": "The revision of the latest build: the highest revision with a build.\nAbsent when the artifact has none. A newer revision without a build\nleaves it in place, so it can be older than the head.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "profile": {
+          "description": "The profile, as the request named it.",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/HeadBuildStatus",
+          "description": "Where the head revision's build stands."
+        }
+      },
+      "required": [
+        "profile",
+        "head_revision",
+        "status"
+      ],
+      "type": "object"
+    },
     "CancelJobRequest": {
       "additionalProperties": false,
       "description": "Body of `POST /v1/jobs/{id}/cancel`, with an `Idempotency-Key` header. It\nhas no fields.",
@@ -1610,6 +1670,31 @@
         }
       ]
     },
+    "HeadBuildStatus": {
+      "description": "Where the head revision's build of a profile stands (decision 0058 rule\n16).",
+      "oneOf": [
+        {
+          "const": "built",
+          "description": "The head revision has a build; it is the latest build.",
+          "type": "string"
+        },
+        {
+          "const": "pending",
+          "description": "The newest build job of the head is queued, scheduled for a retry or\nrunning; see `job_id`.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "The newest build job of the head failed; see `job_id`, `failure` and\n`diagnostics`.",
+          "type": "string"
+        },
+        {
+          "const": "none",
+          "description": "The head has no build and no build job decides its status: none was\nenqueued for it, or the newest was cancelled or ended without a\nbuild.",
+          "type": "string"
+        }
+      ]
+    },
     "Job": {
       "additionalProperties": false,
       "description": "A persistent job. It pins the actor that enqueued it, one artifact, one\nsource revision, and a kind; none of these changes. Time fields are Unix\nmilliseconds. A client learns of progress by reading the job again. A change\nto its state or cancel request appends a `job_changed` row to the owner's\nchange feed, and that row carries no state: the job is read with\n`GET /v1/jobs/{id}`.",
@@ -2129,7 +2214,7 @@
     },
     "Preview": {
       "additionalProperties": false,
-      "description": "A short-lived link that renders one pinned revision on the content origin.",
+      "description": "A short-lived link that renders one pinned revision on the content\norigin: its own files, or its build of a profile (decision 0058 rule 14).",
       "properties": {
         "expires_at_ms": {
           "description": "Expiry time in Unix milliseconds. Access is also rechecked per request.",
@@ -2143,7 +2228,7 @@
           "type": "integer"
         },
         "url": {
-          "description": "URL of the revision's `index.html`; relative links resolve inside it.",
+          "description": "URL of the revision's `index.html`, or of its build's; relative links\nresolve inside it.",
           "type": "string"
         }
       },
@@ -4396,6 +4481,9 @@
     },
     {
       "$ref": "#/$defs/JobList"
+    },
+    {
+      "$ref": "#/$defs/BuildStatus"
     },
     {
       "$ref": "#/$defs/BackgroundStatus"

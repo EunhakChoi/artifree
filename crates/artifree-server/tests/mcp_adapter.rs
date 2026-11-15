@@ -786,6 +786,7 @@ async fn the_job_tools_say_what_they_change() -> TestResult {
         ("get_job", true),
         ("list_jobs", true),
         ("cancel_job", false),
+        ("get_build_status", true),
     ] {
         let tool = tools
             .iter()
@@ -1885,6 +1886,166 @@ async fn agents_enqueue_a_build_with_its_profile() -> TestResult {
                 "kind": "run_profile", "profile": "react-v1",
                 "idempotency_key": "build-enqueue-3"
             }),
+        )
+        .await?;
+    assert_eq!(
+        error_code(&refused),
+        "profile_unknown",
+        "a release build knows no profile"
+    );
+    Ok(())
+}
+
+/// Claims the job that is due in `database` and publishes a one-file build
+/// of it, as the execution worker's store calls do.
+fn publish_due_build(database: &std::path::Path) -> TestResult {
+    use artifree_domain::job::{AttemptIdentity, WorkerId};
+    use artifree_ports::build_store::{BuildPublication, BuildStore};
+    use artifree_ports::job_store::{ExecutionClaim, JobClaim, JobStore, ProfileBinding};
+
+    const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let store = SqliteStore::open(database)?;
+    let attempt = AttemptIdentity::from_random([9; 16]);
+    let profile: ProfileName = parsed("react-v1");
+    let known = [profile.clone()];
+    let worker: WorkerId = parsed("worker-a");
+    let now = UnixMillis(i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis(),
+    )?);
+    let claimed = store
+        .claim_job(JobClaim {
+            worker: &worker,
+            now,
+            lease_ms: 30_000,
+            known_profiles: &known,
+            execution: Some(ExecutionClaim {
+                attempt,
+                tool_digest: DIGEST,
+                machine: "machine-a",
+                boot: "boot-a",
+                cgroupns: "cgroupns-a",
+                directory: "0123456789abcdef0123456789abcdef",
+            }),
+        })?
+        .claimed
+        .ok_or("no job was due")?;
+    store.settle_attempt(&attempt, now)?;
+    let files = FilePackage::new(vec![(PackagePath::entry(), b"<p>built</p>".to_vec())])?;
+    store.publish_build(BuildPublication {
+        lease: &claimed.lease,
+        attempt: &attempt,
+        binding: ProfileBinding {
+            profile: &profile,
+            tool_digest: DIGEST,
+        },
+        files: &files,
+        now,
+    })?;
+    Ok(())
+}
+
+/// Decision 0058 rules 14 and 16 through MCP (slice R03db): `get_build_status`
+/// reads the head status as the HTTP route does, and `create_preview` with a
+/// profile issues a build ticket for a built revision only.
+#[tokio::test]
+async fn agents_read_the_build_status_and_preview_a_build() -> TestResult {
+    let harness = Harness::building();
+    let created = harness
+        .call(
+            "create_artifact",
+            json!({
+                "title": "Page", "idempotency_key": "status-create-1",
+                "files": [{ "path": "index.html", "encoding": "utf8", "content": "<p>x</p>" }]
+            }),
+        )
+        .await?;
+    let artifact = created["structuredContent"]["artifact"]["id"].clone();
+    let status = json!({ "artifact_id": artifact, "profile": "react-v1" });
+    let none = harness.call("get_build_status", status.clone()).await?;
+    assert_eq!(
+        none["structuredContent"],
+        json!({ "profile": "react-v1", "head_revision": 1, "status": "none" }),
+        "{none}"
+    );
+    let unbuilt = harness
+        .call(
+            "create_preview",
+            json!({ "artifact_id": artifact, "revision": 1, "profile": "react-v1" }),
+        )
+        .await?;
+    assert_eq!(error_code(&unbuilt), "not_found", "no build yet");
+
+    let queued = harness
+        .call(
+            "enqueue_job",
+            json!({
+                "artifact_id": artifact, "revision": 1, "kind": "run_profile",
+                "profile": "react-v1", "idempotency_key": "status-enqueue-1"
+            }),
+        )
+        .await?;
+    let job = queued["structuredContent"]["job"]["id"].clone();
+    let pending = harness.call("get_build_status", status.clone()).await?;
+    assert_eq!(
+        pending["structuredContent"],
+        json!({ "profile": "react-v1", "head_revision": 1, "status": "pending",
+                "job_id": job }),
+        "{pending}"
+    );
+
+    publish_due_build(&harness.database)?;
+    let built = harness.call("get_build_status", status).await?;
+    assert_eq!(
+        built["structuredContent"],
+        json!({ "profile": "react-v1", "head_revision": 1, "latest_build_revision": 1,
+                "status": "built" }),
+        "{built}"
+    );
+    let preview = harness
+        .call(
+            "create_preview",
+            json!({ "artifact_id": artifact, "revision": 1, "profile": "react-v1" }),
+        )
+        .await?;
+    assert_eq!(preview["isError"], false, "{preview}");
+    let url = preview["structuredContent"]["url"]
+        .as_str()
+        .ok_or("no preview url")?;
+    assert!(url.starts_with("http://127.0.0.1:7411/b/"), "{url}");
+    let source = harness
+        .call(
+            "create_preview",
+            json!({ "artifact_id": artifact, "revision": 1 }),
+        )
+        .await?;
+    let url = source["structuredContent"]["url"]
+        .as_str()
+        .ok_or("no preview url")?;
+    assert!(
+        !url.starts_with("http://127.0.0.1:7411/b/"),
+        "without a profile the preview is of the source: {url}"
+    );
+
+    for (name, arguments) in [
+        (
+            "get_build_status",
+            json!({ "artifact_id": artifact, "profile": "fixture" }),
+        ),
+        (
+            "create_preview",
+            json!({ "artifact_id": artifact, "revision": 1, "profile": "react-v1-check" }),
+        ),
+    ] {
+        let refused = harness.call(name, arguments).await?;
+        assert_eq!(error_code(&refused), "profile_unknown", "{name}");
+    }
+    let release = Harness::configured(Some(Vec::new()));
+    let refused = release
+        .call(
+            "get_build_status",
+            json!({ "artifact_id": artifact, "profile": "react-v1" }),
         )
         .await?;
     assert_eq!(

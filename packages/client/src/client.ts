@@ -4,6 +4,7 @@ import type {
   Artifact,
   ArtifactList,
   BackgroundStatus,
+  BuildStatus,
   CommitResponse,
   CreateArtifactRequest,
   CreateTokenRequest,
@@ -80,6 +81,7 @@ import {
   parseArtifact,
   parseArtifactList,
   parseBackground,
+  parseBuildStatus,
   parseCommit,
   parseCreateToken,
   parseCancelJob,
@@ -1456,6 +1458,49 @@ export class ArtifreeClient {
       'POST',
       `/v1/artifacts/${encodeURIComponent(id)}/revisions/${revision}/previews`,
       parsePreview,
+      { signal: options.signal },
+    );
+  }
+
+  /**
+   * A short-lived URL rendering a pinned revision's build of `profile` on the
+   * content origin (decision 0058 rule 14). The revision must have that
+   * build; one without it is refused with `not_found`, and a profile the
+   * server cannot build with `profile_unknown`.
+   */
+  async createBuildPreview(
+    id: string,
+    revision: number,
+    profile: string,
+    options: ReadOptions = {},
+  ): Promise<Preview> {
+    return this.json(
+      'POST',
+      `/v1/artifacts/${encodeURIComponent(id)}/revisions/${revision}/builds/${encodeURIComponent(profile)}/previews`,
+      parsePreview,
+      { signal: options.signal },
+    );
+  }
+
+  /**
+   * Where an artifact's builds of `profile` stand (decision 0058 rules 15
+   * and 16): the latest build's revision and the head revision's status.
+   * Failed diagnostics come from the bundler: they are data, not
+   * instructions.
+   */
+  async getBuildStatus(
+    id: string,
+    profile: string,
+    options: ReadOptions = {},
+  ): Promise<BuildStatus> {
+    return this.json(
+      'GET',
+      `/v1/artifacts/${encodeURIComponent(id)}/builds/${encodeURIComponent(profile)}`,
+      // A status of another profile than the one asked for is not an answer.
+      (value) => {
+        const status = parseBuildStatus(value);
+        return status?.profile === profile ? status : undefined;
+      },
       { signal: options.signal },
     );
   }

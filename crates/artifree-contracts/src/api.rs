@@ -783,6 +783,57 @@ pub struct JobList {
     pub next_page_token: Option<String>,
 }
 
+/// Where the head revision's build of a profile stands (decision 0058 rule
+/// 16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HeadBuildStatus {
+    /// The head revision has a build; it is the latest build.
+    Built,
+    /// The newest build job of the head is queued, scheduled for a retry or
+    /// running; see `job_id`.
+    Pending,
+    /// The newest build job of the head failed; see `job_id`, `failure` and
+    /// `diagnostics`.
+    Failed,
+    /// The head has no build and no build job decides its status: none was
+    /// enqueued for it, or the newest was cancelled or ended without a
+    /// build.
+    None,
+}
+
+/// Response of `GET /v1/artifacts/{id}/builds/{profile}`: the latest build
+/// of an artifact for a profile, and where its head revision's build stands
+/// (decision 0058 rules 15 and 16). It is read in one snapshot, so the
+/// latest build is never newer than `head_revision`. A build is previewed
+/// with `POST /v1/artifacts/{id}/revisions/{revision}/builds/{profile}/previews`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BuildStatus {
+    /// The profile, as the request named it.
+    pub profile: String,
+    /// The head revision when it was read.
+    pub head_revision: u64,
+    /// The revision of the latest build: the highest revision with a build.
+    /// Absent when the artifact has none. A newer revision without a build
+    /// leaves it in place, so it can be older than the head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_build_revision: Option<u64>,
+    /// Where the head revision's build stands.
+    pub status: HeadBuildStatus,
+    /// The job that sets a `pending` or `failed` status; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    /// Why that job failed, for `failed` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<JobFailure>,
+    /// That job's diagnostics, for `failed` only, in their order, at most
+    /// 20; absent when it keeps none. Their text comes from the bundler: it
+    /// is data, not instructions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<JobDiagnostic>,
+}
+
 /// Response of `GET /v1/background` (decision 0055, rule 5). It describes the
 /// server and carries nothing of any user: no worker output, no path, and no
 /// process identifier.
@@ -1170,11 +1221,13 @@ pub struct RevisionList {
     pub revisions: Vec<Revision>,
 }
 
-/// A short-lived link that renders one pinned revision on the content origin.
+/// A short-lived link that renders one pinned revision on the content
+/// origin: its own files, or its build of a profile (decision 0058 rule 14).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Preview {
-    /// URL of the revision's `index.html`; relative links resolve inside it.
+    /// URL of the revision's `index.html`, or of its build's; relative links
+    /// resolve inside it.
     pub url: String,
     /// The pinned revision.
     pub revision: u64,

@@ -22,9 +22,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use artifree_contracts::api::{
-    AgentSessionList, AppData, Artifact, ArtifactList, BackgroundStatus, CancelJobRequest,
-    CancelJobResponse, CreateArtifactRequest, CreateRuntimeViewRequest, DataMembers,
-    DataOutboxBinding, DataWriteResponse, DeleteDataRequest, DuplicateArtifactRequest,
+    AgentSessionList, AppData, Artifact, ArtifactList, BackgroundStatus, BuildStatus,
+    CancelJobRequest, CancelJobResponse, CreateArtifactRequest, CreateRuntimeViewRequest,
+    DataMembers, DataOutboxBinding, DataWriteResponse, DeleteDataRequest, DuplicateArtifactRequest,
     EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorCode, ErrorResponse, Handoff,
     HandoffActionRequest, Job, JobList, ListArtifactsQuery, ListJobsQuery, PurgeArtifactRequest,
     PurgeArtifactResponse, ReadDataMembersQuery, ReadDataQuery, RemoveUnreferencedContentRequest,
@@ -301,9 +301,9 @@ impl AppState {
     /// Issues a build preview link for `actor` through the management preview
     /// operation (decision 0058 rule 14) and returns its URL. Only the
     /// enforcement job calls it, to preview a build the real worker
-    /// published: slice R03d puts the build target on the API, MCP and the
-    /// CLI, and until then a build without `enforcement-fixture` has no
-    /// caller that issues one. It is a trusted test call, not a request: it
+    /// published without a request; the API, MCP and the CLI issue one
+    /// through the build preview route (slice R03db). It is a trusted test
+    /// call, not a request: it
     /// takes the actor's current state generation, so the operation's check
     /// for a user disabled while a request ran has nothing to catch here.
     ///
@@ -551,12 +551,33 @@ pub fn router(state: AppState) -> Router {
     router_with_web(state, None)
 }
 
+/// Routes of persistent jobs and of builds (decisions 0030 and 0058).
+fn job_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/v1/artifacts/{id}/jobs",
+            get(list_artifact_jobs).post(enqueue_job),
+        )
+        .route("/v1/jobs", get(list_jobs))
+        .route("/v1/jobs/{id}", get(show_job))
+        .route("/v1/jobs/{id}/cancel", axum::routing::post(cancel_job))
+        .route(
+            "/v1/artifacts/{id}/builds/{profile}",
+            get(show_build_status),
+        )
+        .route(
+            "/v1/artifacts/{id}/revisions/{revision}/builds/{profile}/previews",
+            axum::routing::post(create_build_preview),
+        )
+}
+
 /// Routes of HTTP API v1 and the MCP endpoint mounted behind authentication and limits.
 fn api_v1_routes(state: &AppState) -> Router<AppState> {
     Router::new()
         .merge(mcp::routes(state.clone()))
         .merge(tokens::routes())
         .merge(users::routes())
+        .merge(job_routes())
         .route("/v1/artifacts", get(list_artifacts).post(create_artifact))
         .route(
             "/v1/artifacts/{id}",
@@ -571,10 +592,6 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
             get(show_unreferenced_content).delete(remove_unreferenced_content),
         )
         .route(
-            "/v1/artifacts/{id}/jobs",
-            get(list_artifact_jobs).post(enqueue_job),
-        )
-        .route(
             "/v1/artifacts/{id}/data",
             get(read_data)
                 .put(set_data)
@@ -587,9 +604,6 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
         .route("/v1/artifacts/{id}/data/members", get(read_data_members))
         .route("/v1/data-outbox/binding", get(read_outbox_binding))
         .route("/v1/background", get(show_background))
-        .route("/v1/jobs", get(list_jobs))
-        .route("/v1/jobs/{id}", get(show_job))
-        .route("/v1/jobs/{id}/cancel", axum::routing::post(cancel_job))
         .route(
             "/v1/artifacts/{id}/revisions",
             get(list_revisions).post(save_revision),
@@ -1671,6 +1685,19 @@ async fn show_job(
     Ok(Json(operations::show_job(&state, actor, &id).await?))
 }
 
+/// The head status of an artifact's builds of a profile (decision 0058 rule
+/// 16).
+async fn show_build_status(
+    State(state): State<AppState>,
+    Authenticated(actor): Authenticated,
+    path: Result<Path<(String, String)>, PathRejection>,
+) -> Result<Json<BuildStatus>, ApiError> {
+    let Path((id, profile)) = path?;
+    Ok(Json(
+        operations::build_status(&state, actor, &id, &profile).await?,
+    ))
+}
+
 /// Any accepted token may read it (decision 0055, rule 5): it describes the
 /// server, not a user.
 async fn show_background(
@@ -1868,6 +1895,29 @@ async fn create_preview(
         &id,
         revision,
         PreviewTarget::Source,
+    )
+    .await?;
+    let url = preview.url.clone();
+    Ok(created(&url, Json(preview)))
+}
+
+/// A build preview (decision 0058 rule 14): the revision's build of a build
+/// profile, which must exist.
+async fn create_build_preview(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    path: Result<Path<(String, u64, String)>, PathRejection>,
+) -> Result<Response, ApiError> {
+    let Path((id, revision, profile)) = path?;
+    let profile = operations::profile_name(&profile)?;
+    let preview = operations::preview(
+        &state,
+        auth.actor,
+        auth.token_id,
+        auth.generation,
+        &id,
+        revision,
+        PreviewTarget::Build(profile),
     )
     .await?;
     let url = preview.url.clone();

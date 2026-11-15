@@ -2209,6 +2209,139 @@ test('A build reply that breaks the contract is an invalid response', async () =
   }
 });
 
+test('A build preview and the build status are requested on their routes and checked', async () => {
+  const sent = [];
+  let answer;
+  const client = new ArtifreeClient({
+    baseUrl: 'http://127.0.0.1:7410',
+    accessToken: 'token',
+    fetch: async (url, init) => {
+      sent.push([init.method, String(url)]);
+      return Response.json(answer, {
+        status: init.method === 'POST' ? 201 : 200,
+      });
+    },
+  });
+  const preview = {
+    url: `http://127.0.0.1:7411/b/${'c'.repeat(43)}/`,
+    revision: 1,
+    expires_at_ms: 9,
+  };
+  answer = preview;
+  assert.deepEqual(
+    await client.createBuildPreview(artifact.id, 1, 'react-v1'),
+    preview,
+  );
+  const failed = {
+    profile: 'react-v1',
+    head_revision: 2,
+    latest_build_revision: 1,
+    status: 'failed',
+    job_id: job.id,
+    failure: 'build_failed',
+    diagnostics: [
+      {
+        location: { path: 'src/main.tsx', line: 1, column: 16 },
+        message: 'Could not resolve "left-pad"',
+      },
+    ],
+  };
+  answer = failed;
+  assert.deepEqual(
+    await client.getBuildStatus(artifact.id, 'react-v1'),
+    failed,
+  );
+  for (const status of [
+    { profile: 'react-v1', head_revision: 2, status: 'none' },
+    {
+      profile: 'react-v1',
+      head_revision: 2,
+      status: 'pending',
+      job_id: job.id,
+    },
+    {
+      profile: 'react-v1',
+      head_revision: 2,
+      latest_build_revision: 2,
+      status: 'built',
+    },
+  ]) {
+    answer = status;
+    assert.deepEqual(
+      await client.getBuildStatus(artifact.id, 'react-v1'),
+      status,
+    );
+  }
+  assert.deepEqual(sent.slice(0, 2), [
+    [
+      'POST',
+      `http://127.0.0.1:7410/v1/artifacts/${artifact.id}/revisions/1/builds/react-v1/previews`,
+    ],
+    [
+      'GET',
+      `http://127.0.0.1:7410/v1/artifacts/${artifact.id}/builds/react-v1`,
+    ],
+  ]);
+
+  const { job_id: _job, ...unnamed } = failed;
+  const { failure: _failure, ...unexplained } = failed;
+  for (const broken of [
+    unnamed,
+    unexplained,
+    { ...failed, status: 'building' },
+    { ...failed, head_revision: -1 },
+    { ...failed, latest_build_revision: 3 },
+    { ...failed, diagnostics: [{ message: 7 }] },
+    { profile: 'react-v1', head_revision: 2, status: 'none', job_id: job.id },
+    {
+      profile: 'react-v1',
+      head_revision: 2,
+      status: 'pending',
+      job_id: job.id,
+      diagnostics: [{ message: 'no' }],
+    },
+    { profile: 'react-v1', head_revision: 2, status: 'built' },
+    {
+      profile: 'react-v1',
+      head_revision: 2,
+      latest_build_revision: 1,
+      status: 'built',
+    },
+    { head_revision: 2, status: 'none' },
+    { ...failed, failure: 'lease_expired' },
+    { ...failed, profile: 'react-v2' },
+    {
+      ...failed,
+      diagnostics: Array.from({ length: 21 }, () => ({ message: 'no' })),
+    },
+  ]) {
+    answer = broken;
+    assert.equal(
+      (await failure(client.getBuildStatus(artifact.id, 'react-v1'))).code,
+      'invalid_response',
+      JSON.stringify(broken),
+    );
+  }
+});
+
+test('The build routes report a refusal with its code', async () => {
+  for (const [status, code] of [
+    [404, 'not_found'],
+    [422, 'profile_unknown'],
+  ]) {
+    const client = clientWith(() =>
+      Response.json({ error: { code, message: 'no' } }, { status }),
+    );
+    for (const call of [
+      client.createBuildPreview(artifact.id, 1, 'react-v1'),
+      client.getBuildStatus(artifact.id, 'react-v1'),
+    ]) {
+      const error = await failure(call);
+      assert.deepEqual([error.status, error.code], [status, code]);
+    }
+  }
+});
+
 test('The job error codes keep their own names and statuses', async () => {
   for (const [status, code] of [
     [409, 'job_ended'],

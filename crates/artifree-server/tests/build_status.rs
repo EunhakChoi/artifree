@@ -110,8 +110,12 @@ impl Fixture {
     }
 
     fn status(&self) -> Result<BuildStatus, ArtifactError> {
-        self.service
-            .build_status(&self.owner, &self.artifact, &self.profile)
+        self.service.build_status(
+            &self.owner,
+            &self.artifact,
+            &self.profile,
+            std::slice::from_ref(&self.profile),
+        )
     }
 
     /// Enqueues a job of the profile for `revision` through the core.
@@ -343,15 +347,24 @@ fn a_caller_who_may_not_read_the_revision_is_refused() -> TestResult {
     let other: ActorId = parsed("other")?;
     let missing = ArtifactError::NotFound(Missing::Artifact);
     assert_eq!(
-        fixture
-            .service
-            .build_status(&other, &fixture.artifact, &fixture.profile),
+        fixture.service.build_status(
+            &other,
+            &fixture.artifact,
+            &fixture.profile,
+            std::slice::from_ref(&fixture.profile)
+        ),
         Err(missing.clone())
     );
     assert_eq!(
         fixture
             .service
-            .preview_build(&other, &fixture.artifact, revision, &fixture.profile)
+            .preview_build(
+                &other,
+                &fixture.artifact,
+                revision,
+                &fixture.profile,
+                std::slice::from_ref(&fixture.profile)
+            )
             .map(drop),
         Err(missing.clone())
     );
@@ -416,6 +429,7 @@ fn a_build_preview_needs_a_build_of_the_revision() -> TestResult {
                 &fixture.artifact,
                 SourceRevision(revision),
                 profile,
+                std::slice::from_ref(&fixture.profile),
             )
             .map(|build| build.revision)
     };
@@ -428,8 +442,8 @@ fn a_build_preview_needs_a_build_of_the_revision() -> TestResult {
     );
     assert_eq!(
         preview(1, &parsed("react-v1-check")?),
-        Err(ArtifactError::NotFound(Missing::Build)),
-        "another profile has no build of revision 1"
+        Err(ArtifactError::ProfileUnknown),
+        "a profile known only for tests is not a build profile (slice R03db)"
     );
     for revision in [0, 3] {
         assert_eq!(

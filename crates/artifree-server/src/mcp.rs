@@ -21,13 +21,13 @@ use artifree_contracts::api::{
     UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest, UploadAssetRequest,
 };
 use artifree_contracts::mcp::{
-    self, AcknowledgeHandoffArguments, ArtifactArguments, CancelJobArguments,
+    self, AcknowledgeHandoffArguments, ArtifactArguments, BuildStatusArguments, CancelJobArguments,
     CreateArtifactArguments, DeleteAssetArguments, DeleteDataArguments, DuplicateArtifactArguments,
     EditFilesArguments, EnqueueJobArguments, FileArguments, FileContent, GetDataArguments,
-    JobArguments, ListAssetsArguments, ListJobsArguments, PollHandoffArguments, ReadAssetArguments,
-    ReadAssetResponse, RegisterHandoffSessionArguments, RestoreRevisionArguments,
-    RevisionArguments, SaveRevisionArguments, SetDataArguments, ToolDefinition,
-    UpdateArtifactArguments, UpdateDataArguments, UploadAssetArguments,
+    JobArguments, ListAssetsArguments, ListJobsArguments, PollHandoffArguments, PreviewArguments,
+    ReadAssetArguments, ReadAssetResponse, RegisterHandoffSessionArguments,
+    RestoreRevisionArguments, RevisionArguments, SaveRevisionArguments, SetDataArguments,
+    ToolDefinition, UpdateArtifactArguments, UpdateDataArguments, UploadAssetArguments,
 };
 use artifree_core::artifacts::ArtifactError;
 use artifree_core::parts::{Boundary, ByteRange};
@@ -242,10 +242,15 @@ pub(crate) async fn dispatch(
         "read_file" => json(read_file(state, actor, arguments)).await,
         "create_preview" => {
             json(async {
-                let RevisionArguments {
+                let PreviewArguments {
                     artifact_id,
                     revision,
+                    profile,
                 } = parse(arguments)?;
+                let target = match profile {
+                    Some(profile) => PreviewTarget::Build(operations::profile_name(&profile)?),
+                    None => PreviewTarget::Source,
+                };
                 operations::preview(
                     state,
                     actor,
@@ -253,9 +258,19 @@ pub(crate) async fn dispatch(
                     auth.generation,
                     &artifact_id,
                     revision,
-                    PreviewTarget::Source,
+                    target,
                 )
                 .await
+            })
+            .await
+        }
+        "get_build_status" => {
+            json(async {
+                let BuildStatusArguments {
+                    artifact_id,
+                    profile,
+                } = parse(arguments)?;
+                operations::build_status(state, actor, &artifact_id, &profile).await
             })
             .await
         }

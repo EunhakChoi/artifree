@@ -83,6 +83,9 @@ impl World {
                 frame_ancestors: "http://127.0.0.1:*".into(),
                 limits: RequestLimits::default(),
                 change_streams: changes::DEFAULT_STREAMS_PER_ACTOR,
+                // A build ticket names a build profile of the build (slice
+                // R03db); this one is known in every build.
+                build_profiles: vec![profile()?],
                 ..Settings::default()
             },
         )?;

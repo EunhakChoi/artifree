@@ -49,7 +49,8 @@ export const ARTIFACT_HELP = `Usage:
   artifree artifact cat <id> <package-path> [--revision <n>]
       [--offset <n>] [--length <n>]
   artifree artifact export <id> --output <file> [--revision <n>]
-  artifree artifact preview <id> [--revision <n>]
+  artifree artifact preview <id> [--revision <n>] [--build <profile>]
+  artifree artifact build-status <id> --build <profile>
 
 Connection:
   --server <url>         API URL [env ARTIFREE_SERVER, ARTIFREE_URL, default http://127.0.0.1:7410]
@@ -108,6 +109,15 @@ cat --offset and --length write one byte range of the file instead: --length
 bytes from --offset (default 0), or to the end of the file without --length.
 A range that starts at or past the end of the file is refused. history lists
 each file's size and SHA-256.
+preview prints a short-lived URL that renders a revision (the current one by
+default) on the content origin. With --build react-v1 it renders that
+revision's build instead, which must exist (not_found otherwise).
+build-status prints where the artifact's builds of the profile stand:
+latest_build_revision, the highest revision with a build, and the status of
+the current revision's build: built, pending (job_id names the build job),
+failed (with job_id, failure and diagnostics, whose messages come from the
+bundler), or none (queue one with artifree job enqueue --build). A server
+whose build cannot build the profile refuses both with 422 profile_unknown.
 
 create, save, edit, restore, duplicate, rename, pin, unpin, delete, recover, and
 purge accept --idempotency-key <key>. Without it a new key is
@@ -207,6 +217,8 @@ export async function runArtifact(args: string[]): Promise<void> {
       return exportRevision(rest);
     case 'preview':
       return preview(rest);
+    case 'build-status':
+      return buildStatus(rest);
     default:
       throw new UsageError(
         `Unknown artifact command: ${command}. Use artifree artifact --help.`,
@@ -758,18 +770,50 @@ async function exportRevision(args: string[]): Promise<void> {
   });
 }
 
+/** The build profile `--build` names; an empty one is refused. */
+function buildProfile(value: string | undefined): string | undefined {
+  if (value === '')
+    throw new UsageError('--build requires a profile name, such as react-v1.');
+  return value;
+}
+
 async function preview(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args,
-    options: { ...connectionOptions, revision: { type: 'string' } },
+    options: {
+      ...connectionOptions,
+      revision: { type: 'string' },
+      build: { type: 'string' },
+    },
     allowPositionals: true,
     strict: true,
   });
   const [id = ''] = single(positionals, ['id']);
-  const client = await connect(values);
-  const revision =
+  const profile = buildProfile(values.build);
+  const explicit =
     values.revision === undefined
-      ? (await client.getArtifact(id)).current_revision
+      ? undefined
       : positiveNumber(values.revision, '--revision');
-  print(await client.createPreview(id, revision));
+  const client = await connect(values);
+  const revision = explicit ?? (await client.getArtifact(id)).current_revision;
+  print(
+    profile === undefined
+      ? await client.createPreview(id, revision)
+      : await client.createBuildPreview(id, revision, profile),
+  );
+}
+
+async function buildStatus(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args,
+    options: { ...connectionOptions, build: { type: 'string' } },
+    allowPositionals: true,
+    strict: true,
+  });
+  const [id = ''] = single(positionals, ['id']);
+  const profile = buildProfile(values.build);
+  if (profile === undefined)
+    throw new UsageError('build-status requires --build <profile>.');
+  const client = await connect(values);
+  print(await client.getBuildStatus(id, profile));
 }

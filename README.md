@@ -21,8 +21,9 @@ connection-scoped user grant; with their own grants it can also read and
 write its artifact's application data. One persistent job, `verify_revision`, re-checks a revision's stored files
 against their digests in a separate worker process that a persistent server
 starts and restarts by itself (`--no-worker` turns that off). The build kind,
-`run_profile` with `profile: "react-v1"`, is on the API, MCP and the CLI, but a
-release build knows no build profile yet and refuses it with `profile_unknown`
+`run_profile` with `profile: "react-v1"`, with its build preview and build
+status, is on the API, MCP and the CLI, but a release build knows no build
+profile yet and refuses them with `profile_unknown`
 ([decision 0058](docs/decisions/0058-react-builds-and-preview.md)). Publishing, roles and sharing, build and
 conversion workers, sandboxed execution of untrusted code, and external
 identity (OAuth, passwords, login sessions) are not implemented. The module inventory shown by the UI and
@@ -138,7 +139,11 @@ that revision from the database and reports `ok` or the first 50 mismatches;
 and stop it. `job enqueue <id> --revision <n> --build react-v1` asks for a
 build instead; a release build refuses it with `profile_unknown` until a
 release can build ([decision 0058](docs/decisions/0058-react-builds-and-preview.md)),
-and `--profile` still names the connection profile. A persistent `serve` starts one worker process and starts it again when
+and `--profile` still names the connection profile.
+`artifree artifact build-status <id> --build react-v1` prints the latest build
+and whether the current revision's build is built, pending, failed (with its
+diagnostics) or none, and `artifree artifact preview <id> --build react-v1`
+links a revision's build. A persistent `serve` starts one worker process and starts it again when
 it exits ([decision 0055](docs/decisions/0055-operating-background-work.md));
 `GET /v1/background` says whether it runs. With `--no-worker` (or
 `ARTIFREE_NO_WORKER=1`), and in a one-shot session, a job stays `queued` until
