@@ -75,6 +75,9 @@ pub(super) fn filters_with(
     set: FilterSet,
     measured: &[i64],
 ) -> Result<[BpfProgram; 2], PolicyError> {
+    // A build with no launch knows no set, so nothing below reads `measured`.
+    #[cfg(not(any(test, feature = "enforcement-fixture", target_arch = "x86_64")))]
+    let _ = measured;
     match set {
         #[cfg(any(test, feature = "enforcement-fixture"))]
         FilterSet::Fixture => {

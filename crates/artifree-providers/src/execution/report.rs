@@ -53,10 +53,7 @@ impl HostReport {
     /// This report with the policy hash of `profile`: an attempt's capacity is admitted before
     /// its claim names a profile, so the launch names the profile it runs (decision 0058, note
     /// "R03f split").
-    #[cfg(all(
-        target_os = "linux",
-        any(test, feature = "enforcement-fixture", target_arch = "x86_64")
-    ))]
+    #[cfg(target_os = "linux")]
     #[must_use]
     pub(super) fn with_policy(&self, profile: super::InspectionProfile) -> Self {
         Self {

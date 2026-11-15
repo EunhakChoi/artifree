@@ -15,7 +15,7 @@ use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::report::{HostReport, sha256_file_hex, sha256_hex};
+use super::report::{HostReport, sha256_file_hex};
 use super::{
     AdmissionRefusal, InspectionProfile, RoutingObservation, cgroup, launcher, manifest,
     probe_group, read_bounded,
@@ -83,9 +83,10 @@ pub(super) fn admit(
     // A panic elsewhere cannot leave the remembered path half-written: it is replaced
     // whole, so a poisoned lock still holds a valid value.
     let mut entered = ENTERED.lock().unwrap_or_else(PoisonError::into_inner);
-    admit_with(Some(profile), roots, process::id(), &mut entered, || {
+    admit_with(roots, process::id(), &mut entered, || {
         cgroup::own_uid(roots.proc_self)
     })
+    .map(|report| report.with_policy(profile))
 }
 
 /// Runs the whole admission like `admit` and also returns the delegated group the provider
@@ -98,7 +99,7 @@ pub(super) fn admit_for_attempt(
     roots: &AdmissionRoots<'_>,
 ) -> Result<(HostReport, PathBuf), AdmissionRefusal> {
     let mut entered = ENTERED.lock().unwrap_or_else(PoisonError::into_inner);
-    let report = admit_with(None, roots, process::id(), &mut entered, || {
+    let report = admit_with(roots, process::id(), &mut entered, || {
         cgroup::own_uid(roots.proc_self)
     })?;
     let delegated = entered.clone().ok_or(AdmissionRefusal::UndelegatedCgroup)?;
@@ -111,9 +112,9 @@ pub(super) fn admit_for_attempt(
 /// temporary roots. Facility 7 checks the group that holds this process: the delegated
 /// group on a first call, or its `supervisor` child on a second one. `entered` holds the
 /// delegated group of an earlier successful move in this process and is set by this call's.
-/// `profile` names the policy hash of the report; an attempt's capacity has none yet.
+/// The report names no policy (`policy_sha256` is empty): an attempt's capacity is taken before
+/// its profile is known, and the caller sets the hash with `HostReport::with_policy`.
 pub(super) fn admit_with(
-    profile: Option<InspectionProfile>,
     roots: &AdmissionRoots<'_>,
     own_pid: u32,
     entered: &mut Option<PathBuf>,
@@ -158,7 +159,7 @@ pub(super) fn admit_with(
         launcher_version: launcher::launcher_version(roots.tool_root),
         launcher_sha256,
         tool_manifest_sha256: tool_manifest.sha256().to_owned(),
-        policy_sha256: profile.map_or_else(String::new, |profile| sha256_hex(profile.manifest())),
+        policy_sha256: String::new(),
         core_routing: String::from_utf8_lossy(&routing.pattern)
             .trim_end()
             .to_owned(),

@@ -208,23 +208,8 @@ impl AttemptPlan {
     pub(super) fn fixture() -> Self {
         Self {
             program: launcher::EntryProgram::Fixture,
-            profile: &profile::FIXTURE_EXECUTION,
-            #[cfg(test)]
-            stub_override: None,
-            wall_deadline: WALL_DEADLINE,
-            readiness_deadline: READINESS_DEADLINE,
-            release_record: &RELEASE,
-            plant: None,
-            #[cfg(test)]
-            list_scratch: false,
-            lease: FIXTURE_LEASE,
-            #[cfg(test)]
-            store: always_confirms,
-            guardian: true,
-            provider_deadline: true,
-            renew_regardless: false,
-            pause: None,
             checkpoint_at_release: false,
+            ..Self::for_worker(&profile::FIXTURE_EXECUTION, FIXTURE_LEASE)
         }
     }
 }
@@ -234,7 +219,7 @@ impl AttemptPlan {
     /// stub, the bootstrap and the guardian, under the job's `lease` and the decision 0042
     /// deadlines, and the store's checkpoint is asked once more before the release. No pause is
     /// set; only the `enforcement-fixture` build's adapter adds one.
-    #[cfg(any(feature = "enforcement-fixture", target_arch = "x86_64"))]
+    #[cfg(any(test, feature = "enforcement-fixture", target_arch = "x86_64"))]
     #[must_use]
     pub(super) fn for_worker(profile: &'static ExecutionProfile, lease: Duration) -> Self {
         Self {

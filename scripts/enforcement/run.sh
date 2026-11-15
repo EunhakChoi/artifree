@@ -206,12 +206,19 @@ run_scenario() {
 # test of the server's execution_jobs in a delegated unit and requires that no payload, probe or
 # entry point process outlived it (R02bb, decision 0057).
 run_server_job() {
-  local scenario=$1 label=$2 name=$3 left status=0
+  local scenario=$1 label=$2 name=$3
   shift 3
   sudo "$PREPARE" scenario "$scenario"
   run_unit "$server_test" "$label" "$name" -p Delegate=yes "$@"
+  require_nothing_left "$name"
+}
+
+# require_nothing_left WHAT fails when a payload, probe, bundler or entry point process is still
+# on the host after WHAT.
+require_nothing_left() {
+  local name=$1 left status=0
   # pgrep exits 1 when nothing matches; any other status is a failure of the check itself.
-  left="$(pgrep -a -f 'artifree-execution-payload|/tools/probes/|/artifree/tools/[^/]+/probes/|artifree-server execution')" || status=$?
+  left="$(pgrep -a -f 'artifree-execution-payload|/tools/probes/|/artifree/tools/[^/]+/probes/|/tools/bin/esbuild|artifree-server execution')" || status=$?
   case "$status" in
     0)
       printf '%s\n' "$left" >&2
@@ -402,7 +409,7 @@ case "$release" in
 esac
 
 say "build the test-support programs and find the test binaries"
-cargo build -p artifree-providers --example artifree-execution-fixture --locked
+cargo build -p artifree-providers --example artifree-execution-fixture --features enforcement-fixture --locked
 [[ -f "$FIXTURE" && -x "$FIXTURE" ]] || fail "the fixture was not built: $FIXTURE"
 cargo build -p artifree-providers --example artifree-execution-payload --locked
 [[ -f "$PAYLOAD" && -x "$PAYLOAD" ]] || fail "the payload was not built: $PAYLOAD"
@@ -853,6 +860,7 @@ for case in template bad-import; do
     -- "$release_bin" worker run --data-dir "$PWD/$release_data" --execution-dir "$PWD/$release_exec" --once \
     > "$OUT/release-$case.jsonl" 2> "$OUT/release-$case.stderr" \
     || fail "the release worker unit failed; see $OUT/release-$case.stderr"
+  require_nothing_left "the release worker's $case build"
   ARTIFREE_WORKER_DATA="$PWD/$release_data" ARTIFREE_BUILD_CASE=$case \
     run_direct "$server_test" "release-$case-check" builds::job_check_a_release_build
   chmod -R u+w -- "$release_exec"

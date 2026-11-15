@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 
 use super::super::admission::{AdmissionRoots, admit_with};
-use super::super::{AdmissionRefusal, InspectionProfile, launcher};
+use super::super::{AdmissionRefusal, launcher};
 use super::{
     MANIFEST_FILE, ManifestIdentity, ancestor_protected, ancestors_to, entry_protected, verify,
 };
@@ -511,14 +511,8 @@ fn manifest_comes_after_the_named_files_and_before_delegation() -> Result<(), Bo
     for (description, edit, manifest, expected) in cases {
         let scratch = Scratch::new()?;
         let host = make_host(&scratch, edit, manifest)?;
-        let outcome = admit_with(
-            Some(InspectionProfile::fixture()),
-            &host.roots(),
-            process::id(),
-            &mut None,
-            || Ok(u32::MAX),
-        )
-        .map(|_| ());
+        let outcome =
+            admit_with(&host.roots(), process::id(), &mut None, || Ok(u32::MAX)).map(|_| ());
         assert_eq!(outcome, Err(expected), "{description}");
     }
     Ok(())

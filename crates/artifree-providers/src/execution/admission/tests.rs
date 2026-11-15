@@ -14,9 +14,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::super::{
-    AdmissionRefusal, Controller, InspectionProfile, cgroup, launcher, probe_group,
-};
+use super::super::{AdmissionRefusal, Controller, cgroup, launcher, probe_group};
 use super::*;
 
 /// The pid that the baseline host lists beside the provider's own pid in `cgroup.procs`.
@@ -227,14 +225,7 @@ fn refusal_as(
     host: &FakeHost,
     worker_uid: impl FnOnce() -> Result<u32, AdmissionRefusal>,
 ) -> Option<AdmissionRefusal> {
-    admit_with(
-        Some(InspectionProfile::fixture()),
-        &host.roots(),
-        process::id(),
-        &mut None,
-        worker_uid,
-    )
-    .err()
+    admit_with(&host.roots(), process::id(), &mut None, worker_uid).err()
 }
 
 /// The uid that owns `host`, and the next uid, which owns nothing in it.

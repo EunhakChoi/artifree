@@ -31,13 +31,14 @@ pub(super) const KILLED_BY_SIGSYS: i32 = 128 + 31;
 pub(super) const FIXTURE_FILE: &str = "bin/artifree-execution-fixture";
 /// The fixture's path inside the sandbox, where the tool root is bound as `/tools`.
 const FIXTURE_COMMAND: &str = "/tools/bin/artifree-execution-fixture";
-/// The server binary inside the tool root (decision 0057 rule 4). It is the bootstrap, and in every
-/// build it runs the namespace check and the probe child (decision 0058, note "R03f split").
+/// The server binary inside the tool root (decision 0057 rule 4). It is the bootstrap, and it runs
+/// admission's namespace check and probe child (decision 0058, note "R03f split"). A build without
+/// the launch refuses every `execution` mode, so its admission stops at the namespace check.
 pub(super) const SERVER_FILE: &str = "bin/artifree-server";
 /// The server binary's path inside the sandbox.
 const SERVER_COMMAND: &str = "/tools/bin/artifree-server";
 
-/// The program of the tool root that runs an attempt's stub, bootstrap and guardian (decision 0057 rule 4). Admission's namespace check and probe child always use the server binary.
+/// The program of the tool root that runs an attempt's stub, bootstrap and guardian (decision 0057 rule 4). Admission's namespace check and probe child use the server binary in every build.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EntryProgram {
     /// `bin/artifree-execution-fixture`, the test-support program, whose mode is its first argument.

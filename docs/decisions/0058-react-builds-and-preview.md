@@ -973,6 +973,8 @@ Roadmap: R03.
 >   or 70 with one line on stderr when the read or the write fails.
 >   Admission's namespace check runs the root's server with
 >   `execution namespaces`, and its probe child with `execution wait`.
+>   A build without the launch serves neither mode, so its admission, which
+>   only `inspect_host` reaches there, stops at the namespace check.
 > - The tests that proved `profile_unknown` for a release build already
 >   gave the server an empty list of build profiles, as a build that knows
 >   none, and they name `fixture`, `react-v1-check` and names that are no
@@ -988,6 +990,8 @@ Roadmap: R03.
 > - The Jobs smoke's new case `build-queued` presses "Build revision 1" on
 >   the real server, sees the queued build and the real notice that no
 >   execution worker is ready, and then cancels the build.
+>   On a host other than x86_64 Linux the server knows no build profile,
+>   so the case is skipped there.
 >   `build-unknown` and `preview-build-unknown` answer the status and the
 >   enqueue with `422 profile_unknown` in the browser.
 > - Part 18 of the enforcement job builds the server without the feature

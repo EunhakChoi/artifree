@@ -3,8 +3,6 @@
 //! Built by the tests only and shipped in no release archive. Its arguments
 //! select the mode:
 //!
-//! - `namespaces` prints one `name=target` line per namespace of this process
-//!   to stdout.
 //! - `wait <input>` reads stdin to end of file and discards what it read. The
 //!   trailing path is the provider's staged input, which this mode ignores.
 //! - `false-ready <input>` writes the READY record on descriptor 0 without
@@ -63,9 +61,6 @@ use std::convert::Infallible;
 #[cfg(target_os = "linux")]
 use std::os::unix::net::UnixListener;
 
-/// Namespaces that `namespaces` reports, in output order.
-const NAMESPACES: [&str; 7] = ["user", "pid", "net", "mnt", "ipc", "uts", "cgroup"];
-
 fn main() -> ExitCode {
     let arguments: Vec<OsString> = env::args_os().skip(1).collect();
     match arguments.as_slice() {
@@ -96,7 +91,6 @@ fn main() -> ExitCode {
 /// Runs a mode that takes no identity argument.
 fn run_mode(mode: &OsStr) -> ExitCode {
     match mode.to_str() {
-        Some("namespaces") => finish(print_namespaces()),
         Some("wait") => finish(wait_for_end_of_input()),
         #[cfg(target_os = "linux")]
         Some("false-ready") => finish(false_ready()),
@@ -190,26 +184,6 @@ fn run_child(run: fn(&str) -> Result<Infallible, BootstrapFailure>, identity: &s
         Ok(never) => match never {},
         Err(failure) => report_failure(&failure, ExitCode::from(70)),
     }
-}
-
-/// Prints one `name=target` line per namespace of this process.
-///
-/// The whole text is built before anything is written, so a failure prints nothing.
-fn print_namespaces() -> io::Result<()> {
-    let mut text = String::new();
-    for name in NAMESPACES {
-        let link = fs::read_link(format!("/proc/self/ns/{name}"))?;
-        let target = link.to_str().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "namespace target is not UTF-8")
-        })?;
-        text.push_str(name);
-        text.push('=');
-        text.push_str(target);
-        text.push('\n');
-    }
-    let mut stdout = io::stdout().lock();
-    stdout.write_all(text.as_bytes())?;
-    stdout.flush()
 }
 
 /// Reads standard input to end of file and discards what it read.

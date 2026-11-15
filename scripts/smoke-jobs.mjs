@@ -585,9 +585,18 @@ async function checkRunningCancel(world) {
  * On the x86_64 Linux release build a press of "Build revision N" queues a
  * real react-v1 build of the revision, which the tab lists and which waits
  * with the real notice that no execution worker is ready (decision 0058,
- * R03fa).
+ * R03fa). On any other host the server knows no build profile, so the case
+ * is skipped there.
  */
 async function checkBuildQueued(world) {
+  // Only the x86_64 Linux build knows react-v1; a server built for any other
+  // host refuses the build, which build-unknown covers.
+  if (process.platform !== 'linux' || process.arch !== 'x64') {
+    process.stderr.write(
+      `jobs: build-queued skipped on ${process.platform}-${process.arch}\n`,
+    );
+    return;
+  }
   const artifact = await createArtifact(world.server, 'Jobs build queued');
   const opened = await openJobs(world, artifact);
   let queued;

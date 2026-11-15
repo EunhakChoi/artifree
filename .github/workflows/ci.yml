@@ -338,12 +338,13 @@ jobs:
       # tests run the server binary that serves the fixture profile. Release archives, the container
       # image and the clean-install checks build without it; scripts/check-boundaries.mjs enforces
       # that. Part 18 of the matrix also runs builds through the server built without the feature,
-      # in the release profile, as the release archives build it (decision 0058, R03fa).
+      # in the release profile, as the release archives build it (decision 0058, R03fa). The fixture
+      # example needs the feature, so scripts/enforcement/run.sh builds it: no workflow build line
+      # names the feature (scripts/check-boundaries.mjs).
       - name: Build the enforcement tests and the test-support programs
         run: |
           cargo test -p artifree-providers --test enforcement --no-run --locked
           cargo test -p artifree-providers --lib --no-run --locked
-          cargo build -p artifree-providers --example artifree-execution-fixture --locked
           cargo build -p artifree-providers --example artifree-execution-payload --locked
           cargo test -p artifree-server --features enforcement-fixture --test execution_jobs --no-run --locked
           cargo build -p artifree-server --bin artifree-server --release --locked
