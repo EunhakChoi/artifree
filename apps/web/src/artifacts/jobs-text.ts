@@ -16,7 +16,7 @@ import type {
   JobState,
   JobVerdict,
 } from '@artifree/contracts';
-import { BUILD_PROFILE } from './jobs-model';
+import { BUILD_PROFILE } from './build-profile';
 import type { NamedRefusal, Refusal } from './jobs-model';
 
 /** The name of each kind of job. */

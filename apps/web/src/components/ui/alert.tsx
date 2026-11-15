@@ -34,6 +34,25 @@ function Alert({
   );
 }
 
+/**
+ * An alert's look for a status that stays on screen and changes in place: an
+ * `output`, a polite live region, so assistive technology does not interrupt
+ * for each update as it does for `role="alert"`.
+ */
+function AlertStatus({
+  className,
+  variant,
+  ...props
+}: React.ComponentProps<'output'> & VariantProps<typeof alertVariants>) {
+  return (
+    <output
+      data-slot="alert"
+      className={cn(alertVariants({ variant }), className)}
+      {...props}
+    />
+  );
+}
+
 function AlertTitle({ className, ...props }: React.ComponentProps<'div'>) {
   return (
     <div
@@ -73,4 +92,4 @@ function AlertAction({ className, ...props }: React.ComponentProps<'div'>) {
   );
 }
 
-export { Alert, AlertTitle, AlertDescription, AlertAction };
+export { Alert, AlertStatus, AlertTitle, AlertDescription, AlertAction };

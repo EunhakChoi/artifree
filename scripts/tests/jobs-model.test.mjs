@@ -40,6 +40,8 @@ const {
   pressCancel,
   pressVerify,
   reactionTo,
+  readsBuildStatus,
+  showsQueuedNotice,
   PROFILE_UNKNOWN_TEXT,
   buildText,
   headStatusLines,
@@ -802,4 +804,51 @@ test('workerText states the worker mode and state', () => {
     workerText(background('stopped', 'none')),
     'Worker mode: none. Worker state: stopped.',
   );
+});
+
+// Decision 0058, R03ea: which changes read the head build status again. A
+// listed verification's changes cannot change a build, so they read none.
+const verifyRow = { ...jobAt('job_verify', 1000, 'running') };
+const buildRow = {
+  ...jobAt('job_build', 900, 'running'),
+  kind: 'run_profile',
+  profile: 'react-v1',
+};
+const statusRows = { jobs: [verifyRow, buildRow], next: undefined };
+const statusCases = [
+  ['a revised change', feedChange('revised'), true],
+  [
+    'a job_changed of a listed build',
+    feedChange('job_changed', { job_id: 'job_build' }),
+    true,
+  ],
+  [
+    'a job_changed of an unlisted job',
+    feedChange('job_changed', { job_id: 'job_new' }),
+    true,
+  ],
+  [
+    'a job_changed of a listed verification',
+    feedChange('job_changed', { job_id: 'job_verify' }),
+    false,
+  ],
+  ['a metadata change', feedChange('metadata_updated'), false],
+  [
+    'a revised change of another artifact',
+    feedChange('revised', { artifact_id: OTHER_ARTIFACT }),
+    false,
+  ],
+];
+for (const [name, change, reads] of statusCases) {
+  test(`readsBuildStatus: ${name} ${reads ? 'reads' : 'does not read'} the status`, () => {
+    assert.equal(readsBuildStatus(change, ARTIFACT, statusRows), reads);
+  });
+}
+
+test('showsQueuedNotice: a build shows it only for the shown revision; a verification always does', () => {
+  const build = { ...buildRow, revision: 3 };
+  const verification = { ...verifyRow, revision: 3 };
+  assert.equal(showsQueuedNotice(build, 3), true);
+  assert.equal(showsQueuedNotice(build, 4), false);
+  assert.equal(showsQueuedNotice(verification, 4), true);
 });

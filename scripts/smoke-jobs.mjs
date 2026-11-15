@@ -578,8 +578,9 @@ async function checkBuildUnknown(world) {
   const artifact = await createArtifact(world.server, 'Jobs build unknown');
   const opened = await openJobs(world, artifact);
   try {
+    // The banner is a polite status region; a refused press is an alert.
     const banner = opened.panel
-      .getByRole('alert')
+      .getByRole('status')
       .filter({ hasText: WORDS.profileUnknown });
     await expect(banner).toBeVisible({ timeout: WAIT_MS });
     await opened.panel
@@ -587,8 +588,7 @@ async function checkBuildUnknown(world) {
       .click();
     const refusal = opened.panel
       .getByRole('alert')
-      .filter({ hasText: WORDS.profileUnknown })
-      .filter({ has: opened.tab.getByRole('button', { name: 'Dismiss' }) });
+      .filter({ hasText: WORDS.profileUnknown });
     await expect(refusal).toBeVisible({ timeout: WAIT_MS });
     assert.deepEqual(
       await jobsOf(world.server, artifact.id),
@@ -598,13 +598,20 @@ async function checkBuildUnknown(world) {
     await refusal.getByRole('button', { name: 'Dismiss' }).click();
     await expect(refusal).toBeHidden({ timeout: WAIT_MS });
     await expect(banner).toBeVisible();
+    // A real job of the artifact sends job_changed changes, which read the list
+    // again but not a status the server refused as profile_unknown.
+    await enqueue(world.server, artifact.id);
+    await expect(
+      jobRow(opened.panel, 'Verify revision 1').getByText('Succeeded', {
+        exact: true,
+      }),
+    ).toBeVisible({ timeout: FEED_MS });
+    assert.equal(
+      opened.log.statusReads.length,
+      1,
+      'The status was read again after profile_unknown.',
+    );
     assertCalm(opened.log, world.browser, { refused: ['422'], cuts: 0 });
-    if (world.browser.browserType().name() === 'chromium')
-      assert.equal(
-        opened.log.statusRefused.length,
-        1,
-        'The status was read again after profile_unknown.',
-      );
   } finally {
     await opened.context.close();
   }
@@ -675,7 +682,7 @@ async function checkBuildIntercepted(world) {
   );
   try {
     const banner = opened.panel
-      .getByRole('alert')
+      .getByRole('status')
       .filter({ hasText: 'Revision 1, the newest' });
     await expect(banner).toContainText('not built', { timeout: WAIT_MS });
     await expect(banner).toContainText('No revision has a build yet.');
@@ -962,9 +969,10 @@ function jobRow(panel, text) {
 
 /**
  * Records what a Jobs page reports: its JavaScript errors and its console
- * messages. A 409 or 422 the API answers is a refusal the check provokes, and a
- * connection reset is an answer the check cuts; both are counted. The 422 of
- * each read of the head build status is counted apart. What the
+ * messages. A 409, or a 422 of an enqueue, the API answers is a refusal the
+ * check provokes, and a connection reset is an answer the check cuts; both are
+ * counted. The 422 of each read of the head build status is counted apart, and
+ * every request for that status is recorded in both engines. What the
  * artifact's preview frame logs is kept as evidence, as the suite keeps it. The
  * keys of the page's own enqueue requests are kept, in order.
  */
@@ -977,6 +985,7 @@ function watch(tab, origin, artifactId, contentOrigin) {
     cuts: [],
     enqueues: [],
     statusRefused: [],
+    statusReads: [],
   };
   tab.on('pageerror', (error) => log.errors.push(error.message));
   tab.on('console', (message) => {
@@ -997,15 +1006,22 @@ function watch(tab, origin, artifactId, contentOrigin) {
       new URL(where).pathname.endsWith(`/builds/${PROFILE}`)
     )
       log.statusRefused.push(status[1]);
-    else if (fromApi && (status?.[1] === '409' || status?.[1] === '422'))
+    else if (
+      fromApi &&
+      (status?.[1] === '409' ||
+        (status?.[1] === '422' &&
+          new URL(where).pathname === `/v1/artifacts/${artifactId}/jobs`))
+    )
       log.refused.push(status[1]);
     else if (fromApi && text.includes('ERR_CONNECTION_RESET'))
       log.cuts.push(text);
     else log.unexpected.push(text);
   });
   tab.on('request', (request) => {
-    if (request.method() !== 'POST') return;
     const { pathname } = new URL(request.url());
+    if (pathname === `/v1/artifacts/${artifactId}/builds/${PROFILE}`)
+      log.statusReads.push(request.method());
+    if (request.method() !== 'POST') return;
     if (pathname === `/v1/artifacts/${artifactId}/jobs`)
       log.enqueues.push(request.headers()['idempotency-key']);
   });

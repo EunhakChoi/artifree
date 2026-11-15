@@ -274,6 +274,8 @@ test('the banner names the head as the newest revision, its failure and its job,
       diagnostics: [{ message: 'Unexpected token in App.tsx' }],
     },
   });
+  // A banner that stays on screen is a polite status region, not an alert.
+  assert.match(markup, /^<output data-slot="alert"/);
   assert.match(markup, /Revision 5, the newest: build failed/);
   assert.match(markup, /The build reported errors\./);
   assert.match(markup, /Job job_x\./);
@@ -290,6 +292,7 @@ test('the banner says when this server cannot build the profile', () => {
 
 test('the banner shows a failed read in words with a way to try again', () => {
   const markup = bannerMarkup({ kind: 'failed', message: 'Server down.' });
+  assert.match(markup, /^<div data-slot="alert" role="alert"/);
   assert.match(markup, /Could not read the build status/);
   assert.match(markup, /Server down\./);
   assert.match(markup, /Try again/);

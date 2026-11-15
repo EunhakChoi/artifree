@@ -14,7 +14,7 @@ import { Empty, EmptyHeader, EmptyTitle } from '@/components/ui/empty';
 import type { ArtifactChanges } from './artifact-changes';
 import { BuildStatusBanner } from './jobs-build';
 import { JobsDriver, portsFor, systemJobsClock } from './jobs-driver';
-import { IDLE } from './jobs-model';
+import { IDLE, showsQueuedNotice } from './jobs-model';
 import type { Press, PressState } from './jobs-model';
 import { JobRow } from './jobs-row';
 import { NO_JOBS_TEXT, refusalText } from './jobs-text';
@@ -200,7 +200,7 @@ export function JobsPanel({
             <JobRow
               key={job.id}
               job={job}
-              overdue={overdue.has(job.id)}
+              overdue={overdue.has(job.id) && showsQueuedNotice(job, revision)}
               background={background}
               backgroundError={backgroundError}
               cancel={cancels.get(job.id) ?? IDLE}
@@ -236,14 +236,14 @@ interface PressOutcomeProps {
 }
 
 /** What the retry of an unknown press says, by the kind of the press. */
-function retryLabel(press: Press): string | undefined {
+function retryLabel(press: Press): string {
   switch (press.kind) {
     case 'verify':
       return `Retry verify revision ${press.revision}`;
     case 'build':
       return `Retry build revision ${press.revision}`;
     case 'cancel':
-      return undefined;
+      return 'Retry cancel';
     default: {
       const unhandled: never = press;
       throw new Error(`Unhandled press: ${JSON.stringify(unhandled)}`);
@@ -281,16 +281,9 @@ function PressOutcome({
             </p>
           </AlertDescription>
           <div className="flex flex-wrap gap-2">
-            {retry !== undefined ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={onRetry}
-              >
-                {retry}
-              </Button>
-            ) : null}
+            <Button type="button" variant="outline" size="sm" onClick={onRetry}>
+              {retry}
+            </Button>
             <Button
               type="button"
               variant="outline"

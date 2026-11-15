@@ -784,11 +784,16 @@ Roadmap: R03.
 > - The banner reads `GET /v1/artifacts/{id}/builds/react-v1` with the tab's
 >   other reads, one at a time, after the jobs and before
 >   `GET /v1/background`. A change that a status read began before makes its
->   answer stale: it is read again, not shown. A reset of the feed drops the
->   status with the rows, and only then is a `profile_unknown` answer read
->   again.
-> - The notice of a queued build follows `execution.ready` alone; the notice
->   of a queued verification still follows the server's worker.
+>   answer stale: it is read again, not shown. A `job_changed` of a job the
+>   list shows as a verification does not read the status, since it cannot
+>   change a build and would otherwise keep every status read stale while a
+>   verification runs. A reset of the feed drops the status with the rows,
+>   and only then is a `profile_unknown` answer read again.
+> - The banner is a polite status region, since it stays on screen and
+>   changes with the feed; a failed read of it is an alert.
+> - The notice of a queued build follows `execution.ready` alone, and only a
+>   build of the shown revision shows it; the notice of a queued verification
+>   still follows the server's worker.
 > - Diagnostics are React text nodes in the build row, each with its
 >   `path:line:column`; the banner never shows them.
 > - Proven by the driver, model and row tests, each guard by a mutation that

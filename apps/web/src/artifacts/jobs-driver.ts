@@ -230,7 +230,7 @@ export class JobsDriver {
   readonly follow = (change: FeedChange): void => {
     if (!this.running) return;
     const reaction = reactionTo(change, this.artifactId, this.view.rows);
-    const status = readsBuildStatus(change, this.artifactId);
+    const status = readsBuildStatus(change, this.artifactId, this.view.rows);
     if (reaction.type === 'none' && !status) return;
     if (status) this.oweStatus();
     if (reaction.type === 'job') {
@@ -742,10 +742,8 @@ export class JobsDriver {
       next = statusAfterFailure(error);
     }
     if (signal.aborted) return;
-    if (generation !== this.statusGeneration) {
-      this.pending.status = true;
-      return;
-    }
+    // The change that made this answer stale owed the read that replaces it.
+    if (generation !== this.statusGeneration) return;
     this.update({ buildStatus: next });
   }
 

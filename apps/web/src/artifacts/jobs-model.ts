@@ -33,11 +33,7 @@ export const JOB_POLL_MS = 15_000;
  */
 export const QUEUED_NOTICE_MS = 5_000;
 
-/**
- * The build profile the tab asks for and reads the status of (decision 0058,
- * rule 14): the only profile the record defines.
- */
-export const BUILD_PROFILE = 'react-v1';
+export { BUILD_PROFILE } from './build-profile';
 
 // Terminal states never change again (the contract's JobState).
 const ENDED: Record<JobState, boolean> = {
@@ -199,17 +195,30 @@ export function reactionTo(
 /**
  * Whether a change of the feed makes the tab read the head build status again
  * (decision 0058, R03ea): a `job_changed`, which may end or start a build, and a
- * `revised`, which moves the head, of the artifact. A `recovered` reads the
- * first page, and the status comes with it.
+ * `revised`, which moves the head, of the artifact. A `job_changed` of a listed
+ * verification is skipped: it cannot change a build's status, and while a
+ * verification runs its changes would make every status read stale. A
+ * `recovered` reads the first page, and the status comes with it.
  */
 export function readsBuildStatus(
   change: FeedChange,
   artifactId: string,
+  rows: JobRows | undefined,
 ): boolean {
-  return (
-    change.artifact_id === artifactId &&
-    (change.change === 'job_changed' || change.change === 'revised')
-  );
+  if (change.artifact_id !== artifactId) return false;
+  if (change.change === 'revised') return true;
+  if (change.change !== 'job_changed') return false;
+  const listed = rows?.jobs.find((job) => job.id === change.job_id);
+  return listed?.kind !== 'verify_revision';
+}
+
+/**
+ * Whether a queued job past `QUEUED_NOTICE_MS` shows its notice about its worker
+ * while the page shows `shownRevision`. A verification always does (rule 14); a
+ * build only when it is a build of the shown revision (decision 0058, R03ea).
+ */
+export function showsQueuedNotice(job: Job, shownRevision: number): boolean {
+  return job.kind !== 'run_profile' || job.revision === shownRevision;
 }
 
 /**

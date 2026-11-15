@@ -2,10 +2,17 @@
  * The head build status above the Jobs tab's list (decision 0058, rule 16, and
  * R03ea): the head revision named as the newest, its status, the failure in
  * words and the job that sets it, and the latest build's revision when it is
- * not the head. Diagnostics are shown in the failed build's row only.
+ * not the head. Diagnostics are shown in the failed build's row only. The
+ * banner stays on screen and changes with the feed, so it is a polite status
+ * region; only a failed read of it is an alert.
  */
 import { RotateCwIcon } from 'lucide-react';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import {
+  Alert,
+  AlertDescription,
+  AlertStatus,
+  AlertTitle,
+} from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import type { BuildStatusState } from './jobs-model';
 import {
@@ -33,22 +40,22 @@ export function BuildStatusBanner({ state, onRetry }: BuildStatusBannerProps) {
       );
     case 'read':
       return (
-        <Alert>
+        <AlertStatus>
           <AlertTitle>{headStatusTitle(state.status)}</AlertTitle>
           <AlertDescription>
             {headStatusLines(state.status).map((line) => (
               <p key={line}>{line}</p>
             ))}
           </AlertDescription>
-        </Alert>
+        </AlertStatus>
       );
     case 'profile_unknown':
       return (
-        <Alert>
+        <AlertStatus>
           <AlertDescription>
             <p>{PROFILE_UNKNOWN_TEXT}</p>
           </AlertDescription>
-        </Alert>
+        </AlertStatus>
       );
     case 'failed':
       return (
