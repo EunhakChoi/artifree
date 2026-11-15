@@ -10,8 +10,9 @@ R03cc (build tickets, the `/b/` route and the head status, below the
 wire), R03cda (the execution readiness, schema 16), R03cdb (the
 claim deadline), R03da (the public kind, contract 0.30.0) and R03db
 (build tickets and the head status on the wire, contract 0.31.0), R03ea
-(the build in the Jobs tab) and R03eb (the build preview) are implemented,
-R03f is not**.
+(the build in the Jobs tab) and R03eb (the build preview) are implemented;
+R03fa (the release build) and R03fb (the release archive and the supported
+host) are not**.
 Roadmap: R03.
 
 > **Note, 2026-11-14 (slices).** R03b is split into R03ba, R03bb and R03bc,
@@ -845,6 +846,74 @@ Roadmap: R03.
 >   - A successful build served by `/b/` stays proven by the enforcement job
 >     at the HTTP level.
 
+> **Note, 2026-11-15 (R03f split).** R03f is split into R03fa, the launch
+> and `react-v1` in the release build, and R03fb, the release archive, the
+> operator documentation and the supported host. R03fa comes first, and R03fb
+> states as supported only what R03fa proves. This note fixes what rules 5
+> and 21 and the table leave open; it changes no numbered rule, and in rule
+> 22 and the earlier notes R03f now means both slices.
+>
+> - **R03fa, the release build.**
+>   - A release build for x86_64 Linux compiles the launch, as the build
+>     with `enforcement-fixture` does today: the attempt, admission's launch
+>     checks, staging, collection, the lock, the registry and the worker's
+>     adapter. Its profile table holds `react-v1` only. The fixture, the
+>     `react-v1` check, the measurement entry, the measured filter and the
+>     fixture's run modes stay behind `enforcement-fixture` (rule 5). A build
+>     for any other target, Linux on another architecture included, keeps no
+>     launch and knows no profile, as today.
+>   - A release root holds no fixture program: rule 19's script installs
+>     none, and 0056 rule 4 ships it in no archive. So in a release build,
+>     admission's namespace check and probe child (facilities 8 to 10) run
+>     the root's server binary. The server gains the two modes they need,
+>     `execution namespaces` and `execution wait`, which print the process's
+>     namespaces and read standard input to its end. No other fixture mode
+>     is added. The test build and the `enforcement-fixture` build keep the
+>     fixture for these checks, so the enforcement matrix does not change.
+>     Facility 4 checks the program the build uses, and a missing one
+>     refuses with the existing missing-file refusal.
+>   - A release server's `execution` entry points serve `react-v1`'s stub,
+>     bootstrap and guardian and the two admission modes. Any other
+>     identity, the fixture's included, is refused as today: one line on
+>     stderr and status 2. A release worker on x86_64 Linux accepts
+>     `--execution-dir`; on any other target it refuses it, as today.
+>   - On an x86_64 Linux host, a release build's enqueue of `react-v1` is
+>     therefore accepted. With no execution worker ready, the job stays
+>     queued and ends as `execution_unavailable` after ten minutes (rule
+>     20), and `GET /v1/background` says that no worker is ready. The tests
+>     that proved `profile_unknown` on the release build move with it. The
+>     server, MCP and CLI tests name a profile that no build knows. The
+>     browser cases (`build-unknown`, `preview-build-unknown`) intercept the
+>     refusal. The Jobs smoke also proves the queued build on the real
+>     release server, with the notice that no execution worker is ready
+>     from its real `/v1/background`.
+>   - Proven by the release-build tests rewritten for the new table (the
+>     fixture's identity is refused, and `react-v1`'s entry points and
+>     `--execution-dir` are accepted on x86_64 Linux), by the boundary
+>     checker, which still keeps `enforcement-fixture` and
+>     `--all-features` out of every release build line, and by the
+>     enforcement job. That job also builds the server without the
+>     feature, packages a root for it with rule 19's script, and runs one
+>     `react-v1` build of the template through that release binary's
+>     worker to a published build, plus one build that fails with
+>     diagnostics.
+> - **R03fb, the release archive and the supported host.**
+>   - The clean-install check of the `linux-x64` archive proves that its
+>     server serves `react-v1`'s entry points and refuses the fixture's,
+>     and that its `--version` names the root version that rule 19's
+>     script prepares. The other archives keep refusing every entry point.
+>   - The operator documentation describes the supported host of rule 21:
+>     Ubuntu 24.04 on x86_64, a root prepared by rule 19's script for each
+>     server release, the second worker unit with its delegated group
+>     (0056 rule 6), the readiness that `GET /v1/background` reports, and
+>     the cleanup of an old root after an upgrade. It says that other hosts,
+>     the container image included, are not supported for builds: there an
+>     enqueue is accepted or refused as above, and no build runs.
+>   - The README, the roadmap and this record's status line name the
+>     supported host only once R03fb lands.
+>   - Proven by the clean-install check, and by review of the
+>     documentation against the script and the units it describes.
+
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),
 > [0057](0057-connecting-execution-to-jobs.md) (the `run_profile` kind and
@@ -1119,7 +1188,8 @@ stands.
 | R03db   | The wire half of rules 14 and 16: the build preview route and the head status read, contract 0.31.0, in the API, MCP, the client and the CLI.                                                                                                                                                                                                                                                                                                  | Contract, HTTP, MCP, client and CLI tests for both calls and their refusals.                                                                                                                                                                                                                                                                                               |
 | R03ea   | The build in the Jobs tab: the build action, the head status and its diagnostics, and the build rows, after the R03e split note.                                                                                                                                                                                                                                                                                                               | Component tests, and Chromium and Firefox smoke for the request, the pending and failed states and the refusal.                                                                                                                                                                                                                                                            |
 | R03eb   | The build preview: the choice between files and build, and the "latest" notice, after R03ea.                                                                                                                                                                                                                                                                                                                                                   | Component tests, and Chromium and Firefox smoke for the choice, the notice and the refusal. No smoke host runs a profile, so a successful build and its `/b/` preview are proven by component tests and by the enforcement job at the HTTP level.                                                                                                                          |
-| R03f    | Rules 5 and 21: the release build for x86_64 Linux compiles the launch path and knows `react-v1`, and the operator documentation and the supported-host statement.                                                                                                                                                                                                                                                                             | Release-archive and clean-install checks of the launch path; the enforcement job runs the release binary's worker; review of the documentation.                                                                                                                                                                                                                            |
+| R03fa   | Rule 5, after the R03f split note: the release build for x86_64 Linux compiles the launch and knows `react-v1` only, with the server's admission modes in place of the fixture.                                                                                                                                                                                                                                                                | Release-build tests and the boundary checker; the enforcement job runs one successful and one failing `react-v1` build through the release binary's worker.                                                                                                                                                                                                                |
+| R03fb   | Rule 21, after R03fa: the `linux-x64` archive's launch entry points, the operator documentation and the supported-host statement.                                                                                                                                                                                                                                                                                                              | The clean-install check of the archive; review of the documentation against the script and units it describes.                                                                                                                                                                                                                                                             |
 
 ### What a slice still has to settle
 
