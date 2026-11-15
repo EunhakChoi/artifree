@@ -505,7 +505,13 @@ impl ArtifactStore for SqliteStore {
         // One read snapshot, so the key and the artifact it names agree.
         let snapshot = connection.transaction().map_err(unavailable)?;
         match key_use(&snapshot, request)? {
-            KeyUse::Same(id, position) => replayed(&snapshot, &id, position).map(Some),
+            KeyUse::Same(id, position) => {
+                // A member's commit replays only while its role allows a
+                // commit (decision 0060 rule 17); the key of a create or a
+                // copy names an artifact the caller owns, which always may.
+                access::admit(&snapshot, &id, request.actor, Need::Change)?;
+                replayed(&snapshot, &id, position).map(Some)
+            }
             KeyUse::New | KeyUse::Reused | KeyUse::Gone(..) => Ok(None),
         }
     }

@@ -18,7 +18,7 @@
 use artifree_domain::SourceRevision;
 use artifree_domain::access::Need;
 use artifree_domain::change::FeedId;
-use artifree_domain::identity::{ArtifactId, UnixMillis};
+use artifree_domain::identity::{ActorId, ArtifactId, UnixMillis};
 use artifree_domain::job::{
     AttemptIdentity, CheckpointAnswer, Finding, JobFailure, JobId, JobKind, JobState,
     MAX_ACTIVE_JOBS_PER_ACTOR, MAX_ATTEMPTS, Problem, ProfileName, VerifyReport, WorkerId,
@@ -375,20 +375,26 @@ fn cancel(
         return Err(JobStoreError::NotFound);
     };
     // Decision 0057 rule 3: nobody can see or cancel a hidden job, so the
-    // request gets the same NotFound and records no key.
-    if job.actor != *request.request.actor
-        || !is_public_job(job.kind, job.profile.as_ref())
+    // request gets the same NotFound and records no key. A job is cancelled
+    // by the user who enqueued it or by the artifact's owner (decision 0060
+    // rule 11); anyone else does not find it.
+    if !is_public_job(job.kind, job.profile.as_ref())
         || !artifact_in_place(transaction, &job.artifact)?
     {
         return Err(JobStoreError::NotFound);
     }
+    let by_owner = job.actor != *request.request.actor;
+    if by_owner && !owns(transaction, &job.artifact, request.request.actor)? {
+        return Err(JobStoreError::NotFound);
+    }
     // A member cancels its own job while it is a member, read again here
-    // before the key (decision 0060 rules 5, 11 and 17).
+    // before the key (decision 0060 rules 5, 11 and 17); the owner's cancel
+    // of a member's job needs the owner.
     super::access::admit(
         transaction,
         &job.artifact,
         request.request.actor,
-        Need::Read,
+        if by_owner { Need::Own } else { Need::Read },
     )?;
     match key_of(transaction, request.request)? {
         Key::Same(id) => {
@@ -432,6 +438,51 @@ fn cancel(
         job: written(transaction, request.job)?,
         delivery: Delivery::Committed,
     })
+}
+
+/// Whether `actor` owns `artifact`.
+fn owns(
+    connection: &Connection,
+    artifact: &ArtifactId,
+    actor: &ActorId,
+) -> Result<bool, StoreError> {
+    connection
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM artifacts WHERE id = ?1 AND owner = ?2)",
+            [artifact.as_str(), actor.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)
+}
+
+/// Ends as cancelled the jobs `user` queued on `artifact` that have not
+/// started, in the caller's transaction: a revocation and a downgrade to
+/// viewer take them (decision 0060 rule 15), since that user may no longer
+/// enqueue there. A running job ends normally. Each cancelled job is a job
+/// change, written to the user's feed only while it is still a member.
+pub(super) fn cancel_for_access(
+    transaction: &Transaction<'_>,
+    artifact: &ArtifactId,
+    user: &ActorId,
+    now: UnixMillis,
+) -> Result<(), StoreError> {
+    let ids: Vec<String> = transaction
+        .prepare_cached(
+            "UPDATE jobs SET state = 'cancelled', finished_at = ?3
+             WHERE artifact_id = ?1 AND actor = ?2 AND state IN ('queued', 'retry_scheduled')
+             RETURNING id",
+        )
+        .map_err(unavailable)?
+        .query_map(params![artifact.as_str(), user.as_str(), now.0], |row| {
+            row.get(0)
+        })
+        .map_err(unavailable)?
+        .collect::<Result<_, _>>()
+        .map_err(unavailable)?;
+    for id in ids {
+        record_job_change(transaction, &id.parse().map_err(corrupt)?)?;
+    }
+    Ok(())
 }
 
 /// A job due for a worker: its identifier and what decides how to take it.

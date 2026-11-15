@@ -275,6 +275,17 @@ fn change(
             (Some(_), None) => (ChangeKind::AccessRevoked, Some(request.user)),
         };
         super::record_access_change(transaction, request.artifact, kind, revoked)?;
+        // Rule 15: a user who may no longer enqueue on the artifact loses the
+        // jobs it queued there that have not started. The revocation's row
+        // is written first, so a job change after it reaches only a member.
+        if stored_role.is_some() && role != Some(Role::Editor) {
+            super::jobs::cancel_for_access(
+                transaction,
+                request.artifact,
+                request.user,
+                request.now,
+            )?;
+        }
         AccessVersion(next)
     };
     transaction

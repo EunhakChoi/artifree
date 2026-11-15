@@ -285,7 +285,6 @@ fn a_revoked_members_running_job_writes_nothing_to_its_feed() -> TestResult {
     let f = Fixture::new()?;
     f.grant("grant-ana", &f.ana, Role::Editor)?;
     f.enqueue(&f.ana, "ana-job1")?;
-    f.access("revoke-ana", &f.ana, AccessChange::Revoke)?;
     let claim = f.store.claim_job(JobClaim {
         worker: &parsed::<WorkerId>("worker-one"),
         now: UnixMillis(2),
@@ -293,13 +292,14 @@ fn a_revoked_members_running_job_writes_nothing_to_its_feed() -> TestResult {
         known_profiles: &[],
         execution: None,
     })?;
-    assert!(
-        claim.claimed.is_some(),
-        "the job of a revoked member still runs"
-    );
+    let lease = claim.claimed.ok_or("the job was not claimed")?.lease;
+    // A revocation leaves a running job running (rule 15); its worker's
+    // next transition is still a job change.
+    f.access("revoke-ana", &f.ana, AccessChange::Revoke)?;
+    f.store.release_job(&lease, UnixMillis(3))?;
     assert_eq!(
         f.kinds(&f.ana)?,
-        [AccessGranted, JobChanged, AccessRevoked],
+        [AccessGranted, JobChanged, JobChanged, AccessRevoked],
         "the revocation stays the revoked user's last row of the artifact"
     );
     Ok(())

@@ -322,7 +322,9 @@ impl<S: ArtifactStore + AccessStore + JobStore> ArtifactService<S> {
         })
     }
 
-    /// Cancels a job of `actor`. A job that has not started ends as cancelled
+    /// Cancels a job of `actor`, or, when `actor` owns its artifact, a
+    /// member's job on it (decision 0060 rule 11): the answer carries the job
+    /// as it does for one's own. A job that has not started ends as cancelled
     /// at once. A running job gets a cancel request; its worker stops at the
     /// next checkpoint and the job ends as cancelled, unless it ended first.
     /// This stops work. It does not undo effects of the work, and says
@@ -332,8 +334,8 @@ impl<S: ArtifactStore + AccessStore + JobStore> ArtifactService<S> {
     ///
     /// # Errors
     ///
-    /// [`ArtifactError::NotFound`] as for [`Self::job`],
-    /// [`ArtifactError::JobEnded`] for a job that is already succeeded,
+    /// [`ArtifactError::NotFound`] as for [`Self::job`], except for the
+    /// owner's cancel of a member's job, [`ArtifactError::JobEnded`] for a job that is already succeeded,
     /// failed, or cancelled, [`ArtifactError::RequestKeyReused`], or
     /// [`ArtifactError::Unavailable`].
     pub fn cancel_job(

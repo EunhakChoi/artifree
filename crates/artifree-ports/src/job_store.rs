@@ -420,7 +420,8 @@ pub trait JobStore {
     /// [`JobStoreError::Unavailable`].
     fn enqueue_profile_job(&self, request: NewProfileJob<'_>) -> Result<JobReceipt, JobStoreError>;
 
-    /// Cancels a job of the actor. A job that has not started ends as
+    /// Cancels a job of the actor, or, for the artifact's owner, a member's
+    /// job on it (decision 0060 rule 11). A job that has not started ends as
     /// cancelled at once; a running job gets `cancel_requested` and ends as
     /// cancelled when its worker reaches a checkpoint. The same request
     /// replays. A job that ended is [`JobStoreError::Conflict`]. A hidden job
