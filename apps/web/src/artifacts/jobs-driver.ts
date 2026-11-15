@@ -1,7 +1,8 @@
 /**
- * The driver of the Jobs tab (decision 0055, rules 5, 8, 14 and 15). It holds
- * the tab's state, reads the list, the jobs and `GET /v1/background` one at a
- * time, and sends the presses of "Verify revision N" and "Cancel" under their
+ * The driver of the Jobs tab (decision 0055, rules 5, 8, 14 and 15, and
+ * decision 0058, R03ea). It holds the tab's state, reads the list, the jobs,
+ * the head build status and `GET /v1/background` one at a time, and sends the
+ * presses of "Verify revision N", "Build revision N" and "Cancel" under their
  * request keys. It has no React and no DOM. The client, the clock and the key
  * source are injected, so a test can drive its timing and its retries.
  */
@@ -9,6 +10,7 @@ import { newIdempotencyKey } from '@artifree/client';
 import type { ArtifreeClient, FeedChange } from '@artifree/client';
 import type {
   BackgroundStatus,
+  BuildStatus,
   CancelJobResponse,
   EnqueueJobRequest,
   EnqueueJobResponse,
@@ -18,6 +20,7 @@ import type {
 } from '@artifree/contracts';
 import { describeFailure } from './failure';
 import {
+  BUILD_PROFILE,
   IDLE,
   JOB_PAGE_SIZE,
   JOB_POLL_MS,
@@ -28,14 +31,24 @@ import {
   nextBackgroundRead,
   nextOverdueAt,
   overdueJobs,
+  pressBuild,
   pressCancel,
   pressVerify,
   reactionTo,
+  readsBuildStatus,
   replaceJob,
   seenQueued,
+  statusAfterFailure,
+  STATUS_UNREAD,
   upsertJob,
 } from './jobs-model';
-import type { JobRows, JobsView, Press, PressState } from './jobs-model';
+import type {
+  BuildStatusState,
+  JobRows,
+  JobsView,
+  Press,
+  PressState,
+} from './jobs-model';
 
 /**
  * The requests for one artifact's jobs. A read takes the signal that a stop
@@ -51,7 +64,12 @@ export interface JobsPorts {
   readonly getJob: (id: string, signal: AbortSignal) => Promise<Job>;
   /** `GET /v1/background`: the server's worker. */
   readonly getBackground: (signal: AbortSignal) => Promise<BackgroundStatus>;
-  /** Asks for a verification of a revision, under the request key `key`. */
+  /** The artifact's head build status of `profile` (decision 0058, rule 16). */
+  readonly getBuildStatus: (
+    profile: string,
+    signal: AbortSignal,
+  ) => Promise<BuildStatus>;
+  /** Asks for a verification or a build, under the request key `key`. */
   readonly enqueueJob: (
     request: EnqueueJobRequest,
     key: string,
@@ -73,6 +91,8 @@ export function portsFor(
     listJobs: (query, signal) => client.listJobs(query, { artifactId, signal }),
     getJob: (id, signal) => client.getJob(id, { signal }),
     getBackground: (signal) => client.getBackground({ signal }),
+    getBuildStatus: (profile, signal) =>
+      client.getBuildStatus(artifactId, profile, { signal }),
     enqueueJob: (request, key) =>
       client.enqueueJob(artifactId, request, { idempotencyKey: key }),
     cancelJob: (id, key) => client.cancelJob(id, { idempotencyKey: key }),
@@ -103,6 +123,7 @@ type Read =
   | { readonly kind: 'first' }
   | { readonly kind: 'job'; readonly id: string }
   | { readonly kind: 'more'; readonly token: string }
+  | { readonly kind: 'status' }
   | { readonly kind: 'background' };
 
 /** The read in flight, and the controller that a stop aborts. */
@@ -116,6 +137,7 @@ interface Pending {
   first: boolean;
   readonly jobs: Set<string>;
   more: boolean;
+  status: boolean;
   background: boolean;
 }
 
@@ -145,6 +167,8 @@ export class JobsDriver {
     backgroundError: undefined,
     overdue: new Set<string>(),
     verify: IDLE,
+    build: IDLE,
+    buildStatus: STATUS_UNREAD,
     cancels: new Map<string, PressState>(),
   };
   private readonly listeners = new Set<() => void>();
@@ -154,12 +178,16 @@ export class JobsDriver {
     first: false,
     jobs: new Set<string>(),
     more: false,
+    status: false,
     background: false,
   };
   private inFlight: InFlight | undefined;
   // Advanced by each change that reads jobs and by each committed press. A read
   // begun in an earlier generation is stale when it answers (rule 8).
   private generation = 0;
+  // Advanced each time the head build status is owed again: a read of it begun
+  // before is stale when it answers.
+  private statusGeneration = 0;
   private seen: ReadonlyMap<string, number> = new Map<string, number>();
   private lastBackground: number | undefined;
   private stopPoll: (() => void) | undefined;
@@ -202,12 +230,15 @@ export class JobsDriver {
   readonly follow = (change: FeedChange): void => {
     if (!this.running) return;
     const reaction = reactionTo(change, this.artifactId, this.view.rows);
-    if (reaction.type === 'none') return;
-    this.generation += 1;
+    const status = readsBuildStatus(change, this.artifactId, this.view.rows);
+    if (reaction.type === 'none' && !status) return;
+    if (status) this.oweStatus();
     if (reaction.type === 'job') {
+      this.generation += 1;
       this.pending.jobs.add(reaction.id);
-    } else {
-      this.pending.first = true;
+    } else if (reaction.type === 'first page') {
+      this.generation += 1;
+      this.oweFirst();
     }
     this.pump();
   };
@@ -222,7 +253,7 @@ export class JobsDriver {
     if (this.running) return;
     this.observeResets(resets);
     this.running = true;
-    this.pending.first = true;
+    this.oweFirst();
     this.pending.background = true;
     if (!this.connected) this.armPoll();
     this.pump();
@@ -240,6 +271,7 @@ export class JobsDriver {
     this.pending.first = false;
     this.pending.jobs.clear();
     this.pending.more = false;
+    this.pending.status = false;
     this.pending.background = false;
     this.stopPoll?.();
     this.stopPoll = undefined;
@@ -276,7 +308,7 @@ export class JobsDriver {
     if (!this.running) return;
     this.observeResets(resets);
     this.generation += 1;
-    this.pending.first = true;
+    this.oweFirst();
     this.pump();
   }
 
@@ -297,7 +329,14 @@ export class JobsDriver {
     if (this.view.readError !== undefined) {
       this.update({ readError: undefined });
     }
-    this.pending.first = true;
+    this.oweFirst();
+    this.pump();
+  }
+
+  /** Reads the head build status again, after a failed read of it. */
+  retryStatus(): void {
+    if (!this.running || this.view.buildStatus.kind !== 'failed') return;
+    this.oweStatus();
     this.pump();
   }
 
@@ -329,6 +368,33 @@ export class JobsDriver {
     const { status } = this.view.verify;
     if (status === 'unknown' || status === 'refused') {
       this.update({ verify: IDLE });
+    }
+  }
+
+  /**
+   * Asks for a build of `revision` with `BUILD_PROFILE` under a new request key
+   * (rule 14, and decision 0058, R03ea). Ignored while the last press of "Build
+   * revision N" is sending or its outcome is unknown.
+   */
+  build(revision: number): void {
+    const status = this.view.build.status;
+    // As for "Verify revision N": a new press would drop the unknown press's key.
+    if (status === 'sending' || status === 'unknown') return;
+    this.send(pressBuild(revision, this.newKey));
+  }
+
+  /** Sends the build whose answer was lost again, under its own key. */
+  retryBuild(): void {
+    const slot = this.view.build;
+    if (slot.status !== 'unknown') return;
+    this.send(slot.press);
+  }
+
+  /** Drops the unknown or refused press of "Build revision N". */
+  forgetBuild(): void {
+    const { status } = this.view.build;
+    if (status === 'unknown' || status === 'refused') {
+      this.update({ build: IDLE });
     }
   }
 
@@ -374,18 +440,26 @@ export class JobsDriver {
       this.update({ verify: state });
       return;
     }
+    if (press.kind === 'build') {
+      this.update({ build: state });
+      return;
+    }
     const cancels = new Map(this.view.cancels);
     cancels.set(press.jobId, state);
     this.update({ cancels });
   }
 
   /**
-   * Empties the slot of a committed `press`: a verification's slot becomes
-   * idle, and a job's cancel is forgotten.
+   * Empties the slot of a committed `press`: a verification's or a build's
+   * slot becomes idle, and a job's cancel is forgotten.
    */
   private clearPress(press: Press): void {
     if (press.kind === 'verify') {
       this.update({ verify: IDLE });
+      return;
+    }
+    if (press.kind === 'build') {
+      this.update({ build: IDLE });
       return;
     }
     const cancels = new Map(this.view.cancels);
@@ -395,11 +469,24 @@ export class JobsDriver {
 
   /** Whether `press` is still the sending press of its slot. */
   private isSending(press: Press): boolean {
-    const slot =
-      press.kind === 'verify'
-        ? this.view.verify
-        : this.view.cancels.get(press.jobId);
+    const slot = this.slotOf(press);
     return slot?.status === 'sending' && slot.press === press;
+  }
+
+  /** The state of the slot that `press` belongs to. */
+  private slotOf(press: Press): PressState | undefined {
+    switch (press.kind) {
+      case 'verify':
+        return this.view.verify;
+      case 'build':
+        return this.view.build;
+      case 'cancel':
+        return this.view.cancels.get(press.jobId);
+      default: {
+        const unhandled: never = press;
+        throw new Error(`Unhandled press: ${JSON.stringify(unhandled)}`);
+      }
+    }
   }
 
   /** The request that `press` makes, under the press's key. */
@@ -407,6 +494,16 @@ export class JobsDriver {
     if (press.kind === 'verify') {
       return this.ports.enqueueJob(
         { kind: 'verify_revision', revision: press.revision },
+        press.key,
+      );
+    }
+    if (press.kind === 'build') {
+      return this.ports.enqueueJob(
+        {
+          kind: 'run_profile',
+          profile: BUILD_PROFILE,
+          revision: press.revision,
+        },
         press.key,
       );
     }
@@ -434,6 +531,8 @@ export class JobsDriver {
     if (this.isSending(press)) this.clearPress(press);
     // A stopped tab leaves the rows alone; it reads the list again on start.
     if (!this.running) return;
+    // A committed build sets the head status, so the status is read again.
+    if (press.kind === 'build') this.oweStatus();
     const rows = this.view.rows;
     const id = answer.job.id;
     if (rows === undefined) {
@@ -447,9 +546,9 @@ export class JobsDriver {
     } else {
       this.update({
         rows:
-          press.kind === 'verify'
-            ? upsertJob(rows, answer.job)
-            : replaceJob(rows, answer.job),
+          press.kind === 'cancel'
+            ? replaceJob(rows, answer.job)
+            : upsertJob(rows, answer.job),
       });
       this.afterRows();
     }
@@ -474,7 +573,7 @@ export class JobsDriver {
 
   /**
    * Takes the next owed read: first page, then jobs, then the next page, then
-   * the worker.
+   * the head build status, then the worker.
    */
   private takeRead(): Read | undefined {
     if (this.pending.first) {
@@ -490,6 +589,10 @@ export class JobsDriver {
       this.pending.more = false;
       const token = this.view.rows?.next;
       if (token !== undefined) return { kind: 'more', token };
+    }
+    if (this.pending.status) {
+      this.pending.status = false;
+      return { kind: 'status' };
     }
     if (this.pending.background) {
       this.pending.background = false;
@@ -525,6 +628,8 @@ export class JobsDriver {
         return this.readJob(read.id, signal, generation);
       case 'more':
         return this.readMore(read.token, signal, generation);
+      case 'status':
+        return this.readStatus(signal);
       case 'background':
         return this.readBackground(signal);
       default: {
@@ -621,6 +726,28 @@ export class JobsDriver {
   }
 
   /**
+   * Reads the head build status (decision 0058, R03ea). An answer that a later
+   * change has made stale is not shown; the status is read again instead. A
+   * `profile_unknown` refusal stays until the feed resets.
+   */
+  private async readStatus(signal: AbortSignal): Promise<void> {
+    const generation = this.statusGeneration;
+    let next: BuildStatusState;
+    try {
+      next = {
+        kind: 'read',
+        status: await this.ports.getBuildStatus(BUILD_PROFILE, signal),
+      };
+    } catch (error: unknown) {
+      next = statusAfterFailure(error);
+    }
+    if (signal.aborted) return;
+    // The change that made this answer stale owed the read that replaces it.
+    if (generation !== this.statusGeneration) return;
+    this.update({ buildStatus: next });
+  }
+
+  /**
    * Reads `GET /v1/background` (rule 5). The read's start is recorded when it
    * begins, so the next read is timed from it while this one is in flight, and
    * a failed read waits for the same schedule.
@@ -654,23 +781,50 @@ export class JobsDriver {
   }
 
   /**
-   * Drops the loaded rows, their next page and the reads owed for them, since the
-   * database may be another one (rule 15). A read of the list or of a job in
+   * Drops the loaded rows, their next page, the head build status and the reads
+   * owed for them, since the database may be another one (rule 15). A read of the list or of a job in
    * flight is abandoned, so its answer cannot join rows it no longer belongs to.
    * The worker's read does not depend on the rows and is left to finish. The
    * presses keep their state (rule 14).
    */
   private forgetRows(): void {
     this.generation += 1;
+    this.statusGeneration += 1;
     this.pending.more = false;
     this.pending.jobs.clear();
+    this.pending.status = false;
     const flight = this.inFlight;
     if (flight !== undefined && flight.kind !== 'background') {
       flight.controller.abort();
       this.inFlight = undefined;
     }
-    this.update({ rows: undefined, moreError: undefined });
+    // The status, and a `profile_unknown` refusal, may be another server's.
+    this.update({
+      rows: undefined,
+      moreError: undefined,
+      buildStatus: STATUS_UNREAD,
+    });
     this.afterRows();
+  }
+
+  /**
+   * Owes a read of the first page, and of the head build status with it
+   * (decision 0058, R03ea).
+   */
+  private oweFirst(): void {
+    this.pending.first = true;
+    this.oweStatus();
+  }
+
+  /**
+   * Owes a read of the head build status, unless the server refused the
+   * profile: that refusal holds until the feed resets. A read in flight
+   * becomes stale.
+   */
+  private oweStatus(): void {
+    if (this.view.buildStatus.kind === 'profile_unknown') return;
+    this.statusGeneration += 1;
+    this.pending.status = true;
   }
 
   /** Updates the first-seen times of the queued jobs, then their timers. */
@@ -737,7 +891,7 @@ export class JobsDriver {
   private onPoll(): void {
     this.stopPoll = undefined;
     if (!this.running || this.connected) return;
-    this.pending.first = true;
+    this.oweFirst();
     this.pump();
     this.armPoll();
   }

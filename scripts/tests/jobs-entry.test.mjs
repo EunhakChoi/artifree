@@ -25,6 +25,7 @@ const JOBS_MODULES = [
   'jobs-text.ts',
   'jobs-driver.ts',
   'jobs-row.tsx',
+  'jobs-build.tsx',
   'jobs-panel.tsx',
 ];
 

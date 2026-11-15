@@ -27,7 +27,10 @@ import { api, hold, raw } from './smoke-workspace.mjs';
  * job is cancelled from the tab; with no worker the tab says so; a lost answer
  * is retried under its key and makes one job, also after the tab is left and
  * opened again; a refusal shows its code; "Load more" reads the next page; and
- * the list is read again after a reset.
+ * the list is read again after a reset. On this release build the head build
+ * status and "Build revision N" answer profile_unknown (decision 0058, R03ea);
+ * since no smoke host runs a profile, a pending and a failed build are given
+ * to the tab by intercepting its reads and its enqueue in the browser.
  *
  * Each page has a browser context of its own, and what it reports is recorded
  * as the other checks record theirs: a refusal the check provokes is counted,
@@ -56,7 +59,14 @@ const WORDS = {
   cancelNote: 'Cancelling stops the work; it undoes nothing.',
   cancelRequested: 'Cancel requested. The job stops at its next checkpoint.',
   cancelled: 'Cancelled. Nothing was undone.',
+  profileUnknown:
+    'This server cannot build the react-v1 profile (profile_unknown).',
+  noExecution: 'No execution worker is ready, so this build waits',
+  buildFailed: 'The build reported errors.',
 };
+
+/** The build profile the tab asks for (decision 0058, rule 14). */
+const PROFILE = 'react-v1';
 
 /**
  * Each check of the Jobs tab by its case name. The static check of the built
@@ -73,6 +83,8 @@ const RUNNERS = {
   'job-ended': checkJobEnded,
   'load-more': checkLoadMore,
   'running-cancel': checkRunningCancel,
+  'build-unknown': checkBuildUnknown,
+  'build-intercepted': checkBuildIntercepted,
   contract: checkContract,
 };
 
@@ -557,6 +569,191 @@ async function checkRunningCancel(world) {
   });
 }
 
+/**
+ * On this release build the head build status says that the server cannot
+ * build react-v1, and a press of "Build revision N" is refused with the same
+ * code and commits nothing (decision 0058, R03ea).
+ */
+async function checkBuildUnknown(world) {
+  const artifact = await createArtifact(world.server, 'Jobs build unknown');
+  const opened = await openJobs(world, artifact);
+  try {
+    // The banner is a polite status region; a refused press is an alert.
+    const banner = opened.panel
+      .getByRole('status')
+      .filter({ hasText: WORDS.profileUnknown });
+    await expect(banner).toBeVisible({ timeout: WAIT_MS });
+    await opened.panel
+      .getByRole('button', { name: 'Build revision 1', exact: true })
+      .click();
+    const refusal = opened.panel
+      .getByRole('alert')
+      .filter({ hasText: WORDS.profileUnknown });
+    await expect(refusal).toBeVisible({ timeout: WAIT_MS });
+    assert.deepEqual(
+      await jobsOf(world.server, artifact.id),
+      [],
+      'The refused build committed a job.',
+    );
+    await refusal.getByRole('button', { name: 'Dismiss' }).click();
+    await expect(refusal).toBeHidden({ timeout: WAIT_MS });
+    await expect(banner).toBeVisible();
+    // A real job of the artifact sends job_changed changes, which read the list
+    // again but not a status the server refused as profile_unknown.
+    await enqueue(world.server, artifact.id);
+    await expect(
+      jobRow(opened.panel, 'Verify revision 1').getByText('Succeeded', {
+        exact: true,
+      }),
+    ).toBeVisible({ timeout: FEED_MS });
+    assert.equal(
+      opened.log.statusReads.length,
+      1,
+      'The status was read again after profile_unknown.',
+    );
+    assertCalm(opened.log, world.browser, { refused: ['422'], cuts: 0 });
+  } finally {
+    await opened.context.close();
+  }
+}
+
+/**
+ * The tab's reads of one artifact's build, answered in the browser: the head
+ * status, the enqueue of a build, the job list and the job reads all come from
+ * `state`, which the check changes. Every other request reaches the server.
+ */
+async function interceptBuild(tab, artifactId, state) {
+  const json = (route, status, body) =>
+    route.fulfill({
+      status,
+      contentType: 'application/json',
+      body: JSON.stringify(body),
+    });
+  await tab.route(
+    (url) =>
+      url.pathname === `/v1/artifacts/${artifactId}/builds/${PROFILE}` ||
+      url.pathname === `/v1/artifacts/${artifactId}/jobs` ||
+      url.pathname === `/v1/jobs/${state.job.id}`,
+    async (route) => {
+      const request = route.request();
+      const { pathname } = new URL(request.url());
+      if (pathname.endsWith(`/builds/${PROFILE}`))
+        return json(route, 200, state.status);
+      if (pathname === `/v1/jobs/${state.job.id}`)
+        return json(route, 200, state.job);
+      if (request.method() === 'POST') {
+        state.enqueued.push(request.postDataJSON());
+        state.listed = true;
+        return json(route, 201, { job: state.job, replayed: false });
+      }
+      return json(route, 200, { jobs: state.listed ? [state.job] : [] });
+    },
+  );
+}
+
+/**
+ * A build asked in the tab shows its row and the head status, waits with the
+ * notice that no execution worker is ready, then fails: the banner says so in
+ * words and names the job, and the row lists the diagnostics as plain text
+ * (decision 0058, R03ea). The server's answers are replaced in the browser.
+ */
+async function checkBuildIntercepted(world) {
+  const artifact = await createArtifact(world.server, 'Jobs build');
+  const id = `job_${'e'.repeat(32)}`;
+  const base = {
+    id,
+    artifact_id: artifact.id,
+    kind: 'run_profile',
+    profile: PROFILE,
+    revision: 1,
+    attempt: 0,
+    max_attempts: 3,
+    cancel_requested: false,
+    created_at_ms: Date.now(),
+  };
+  const state = {
+    job: { ...base, state: 'queued' },
+    status: { profile: PROFILE, head_revision: 1, status: 'none' },
+    listed: false,
+    enqueued: [],
+  };
+  const opened = await openJobs(world, artifact, (tab) =>
+    interceptBuild(tab, artifact.id, state),
+  );
+  try {
+    const banner = opened.panel
+      .getByRole('status')
+      .filter({ hasText: 'Revision 1, the newest' });
+    await expect(banner).toContainText('not built', { timeout: WAIT_MS });
+    await expect(banner).toContainText('No revision has a build yet.');
+    // The committed press reads the status again, which is pending now.
+    state.status = { ...state.status, status: 'pending', job_id: id };
+    await opened.panel
+      .getByRole('button', { name: 'Build revision 1', exact: true })
+      .click();
+    const row = jobRow(opened.panel, 'Build 1');
+    await expect(row.getByText('Queued', { exact: true })).toBeVisible({
+      timeout: WAIT_MS,
+    });
+    await expect(row).toContainText(`Profile ${PROFILE}`);
+    await expect(banner).toContainText('build pending', { timeout: WAIT_MS });
+    await expect(banner).toContainText(`Job ${id}.`);
+    assert.deepEqual(state.enqueued, [
+      { kind: 'run_profile', profile: PROFILE, revision: 1 },
+    ]);
+    // This server has no execution worker, so its real `GET /v1/background`
+    // says none is ready once the build has been queued for 5 seconds.
+    await expect(
+      row.getByRole('alert').filter({ hasText: WORDS.noExecution }),
+    ).toBeVisible({ timeout: WAIT_MS });
+
+    const markup = '<b>bold</b>';
+    state.job = {
+      ...base,
+      state: 'failed',
+      attempt: 1,
+      failure: 'build_failed',
+      finished_at_ms: Date.now(),
+      diagnostics: [
+        {
+          location: { path: 'src/App.tsx', line: 3, column: 7 },
+          message: `Unexpected ${markup}`,
+        },
+      ],
+    };
+    state.status = {
+      ...state.status,
+      status: 'failed',
+      job_id: id,
+      failure: 'build_failed',
+      diagnostics: state.job.diagnostics,
+    };
+    // A real job of the artifact sends a job_changed, which reads the list and
+    // the status again.
+    await enqueue(world.server, artifact.id);
+    await expect(banner).toContainText('build failed', { timeout: FEED_MS });
+    await expect(banner).toContainText(WORDS.buildFailed);
+    await expect(banner).toContainText(`Job ${id}.`);
+    await expect(banner).not.toContainText(markup);
+    await expect(row.getByText('Failed', { exact: true })).toBeVisible({
+      timeout: WAIT_MS,
+    });
+    const diagnostics = row.getByRole('list', { name: 'Diagnostics' });
+    await expect(diagnostics.getByRole('listitem')).toHaveText([
+      `src/App.tsx:3:7: Unexpected ${markup}`,
+    ]);
+    assert.equal(
+      await diagnostics.locator('b, a').count(),
+      0,
+      'A diagnostic was rendered as markup.',
+    );
+    await world.checkAccessibility('jobs-build-failed', opened.tab);
+    assertCalm(opened.log, world.browser, { refused: [], cuts: 0 });
+  } finally {
+    await opened.context.close();
+  }
+}
+
 /** Creates an artifact with one page whose title the search finds. */
 async function createArtifact(server, label, content) {
   const title = `${label} ${randomUUID().slice(0, 8)}`;
@@ -665,13 +862,15 @@ try {
 
 /**
  * Connects a new page of its own to the server and opens the artifact's Jobs
- * tab. The caller closes the returned context.
+ * tab. `prepare`, when given, sets up the page before it loads. The caller
+ * closes the returned context.
  */
-async function openJobs(world, artifact) {
+async function openJobs(world, artifact, prepare) {
   const context = await world.browser.newContext();
   try {
     const tab = await context.newPage();
     tab.setDefaultTimeout(WAIT_MS);
+    await prepare?.(tab);
     const log = watch(
       tab,
       world.origin,
@@ -770,8 +969,10 @@ function jobRow(panel, text) {
 
 /**
  * Records what a Jobs page reports: its JavaScript errors and its console
- * messages. A 409 the API answers is a refusal the check provokes, and a
- * connection reset is an answer the check cuts; both are counted. What the
+ * messages. A 409, or a 422 of an enqueue, the API answers is a refusal the
+ * check provokes, and a connection reset is an answer the check cuts; both are
+ * counted. The 422 of each read of the head build status is counted apart, and
+ * every request for that status is recorded in both engines. What the
  * artifact's preview frame logs is kept as evidence, as the suite keeps it. The
  * keys of the page's own enqueue requests are kept, in order.
  */
@@ -783,6 +984,8 @@ function watch(tab, origin, artifactId, contentOrigin) {
     refused: [],
     cuts: [],
     enqueues: [],
+    statusRefused: [],
+    statusReads: [],
   };
   tab.on('pageerror', (error) => log.errors.push(error.message));
   tab.on('console', (message) => {
@@ -792,16 +995,33 @@ function watch(tab, origin, artifactId, contentOrigin) {
       log.preview.push(text);
       return;
     }
-    const fromApi = message.location().url.startsWith(`${origin}/v1/`);
+    const where = message.location().url;
+    const fromApi = where.startsWith(`${origin}/v1/`);
     const status = text.match(/status of (\d{3}) /u);
-    if (fromApi && status?.[1] === '409') log.refused.push(status[1]);
+    // A release build answers each read of the head build status with 422
+    // profile_unknown (decision 0058, R03ea); those are counted apart.
+    if (
+      fromApi &&
+      status?.[1] === '422' &&
+      new URL(where).pathname.endsWith(`/builds/${PROFILE}`)
+    )
+      log.statusRefused.push(status[1]);
+    else if (
+      fromApi &&
+      (status?.[1] === '409' ||
+        (status?.[1] === '422' &&
+          new URL(where).pathname === `/v1/artifacts/${artifactId}/jobs`))
+    )
+      log.refused.push(status[1]);
     else if (fromApi && text.includes('ERR_CONNECTION_RESET'))
       log.cuts.push(text);
     else log.unexpected.push(text);
   });
   tab.on('request', (request) => {
-    if (request.method() !== 'POST') return;
     const { pathname } = new URL(request.url());
+    if (pathname === `/v1/artifacts/${artifactId}/builds/${PROFILE}`)
+      log.statusReads.push(request.method());
+    if (request.method() !== 'POST') return;
     if (pathname === `/v1/artifacts/${artifactId}/jobs`)
       log.enqueues.push(request.headers()['idempotency-key']);
   });

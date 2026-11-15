@@ -1,14 +1,17 @@
 /**
- * The rules of the Jobs tab (decision 0055, rules 13 to 15): its rows, paging,
- * which change reads what again, the key of each press, and when a queued job
- * asks whether a worker runs. Plain code without React, so the rules are
- * bundled and tested on their own.
+ * The rules of the Jobs tab (decision 0055, rules 13 to 15, and decision 0058,
+ * R03ea): its rows, paging, which change reads what again, the key of each
+ * press, the head build status, and when a queued job asks whether a worker
+ * runs. Plain code without React, so the rules are bundled and tested on their
+ * own.
  */
 import { ArtifreeApiError, newIdempotencyKey } from '@artifree/client';
 import type { FeedChange } from '@artifree/client';
 import type {
   BackgroundStatus,
+  BuildStatus,
   Job,
+  JobKind,
   JobList,
   JobState,
 } from '@artifree/contracts';
@@ -29,6 +32,8 @@ export const JOB_POLL_MS = 15_000;
  * says when no worker is running (rule 14).
  */
 export const QUEUED_NOTICE_MS = 5_000;
+
+export { BUILD_PROFILE } from './build-profile';
 
 // Terminal states never change again (the contract's JobState).
 const ENDED: Record<JobState, boolean> = {
@@ -188,11 +193,42 @@ export function reactionTo(
 }
 
 /**
- * A press of "Verify revision N" or of "Cancel". `key` is its request key: a
- * retry of the press sends the same key, and nothing makes a new one for it.
+ * Whether a change of the feed makes the tab read the head build status again
+ * (decision 0058, R03ea): a `job_changed`, which may end or start a build, and a
+ * `revised`, which moves the head, of the artifact. A `job_changed` of a listed
+ * verification is skipped: it cannot change a build's status, and while a
+ * verification runs its changes would make every status read stale. A
+ * `recovered` reads the first page, and the status comes with it.
+ */
+export function readsBuildStatus(
+  change: FeedChange,
+  artifactId: string,
+  rows: JobRows | undefined,
+): boolean {
+  if (change.artifact_id !== artifactId) return false;
+  if (change.change === 'revised') return true;
+  if (change.change !== 'job_changed') return false;
+  const listed = rows?.jobs.find((job) => job.id === change.job_id);
+  return listed?.kind !== 'verify_revision';
+}
+
+/**
+ * Whether a queued job past `QUEUED_NOTICE_MS` shows its notice about its worker
+ * while the page shows `shownRevision`. A verification always does (rule 14); a
+ * build only when it is a build of the shown revision (decision 0058, R03ea).
+ */
+export function showsQueuedNotice(job: Job, shownRevision: number): boolean {
+  return job.kind !== 'run_profile' || job.revision === shownRevision;
+}
+
+/**
+ * A press of "Verify revision N", "Build revision N" or "Cancel". `key` is its
+ * request key: a retry of the press sends the same key, and nothing makes a new
+ * one for it.
  */
 export type Press =
   | { readonly kind: 'verify'; readonly revision: number; readonly key: string }
+  | { readonly kind: 'build'; readonly revision: number; readonly key: string }
   | { readonly kind: 'cancel'; readonly jobId: string; readonly key: string };
 
 /**
@@ -208,6 +244,17 @@ export function pressVerify(
 }
 
 /**
+ * A press of "Build revision N" with a new request key, under the same rules
+ * as `pressVerify` (decision 0058, R03ea).
+ */
+export function pressBuild(
+  revision: number,
+  newKey: () => string = newIdempotencyKey,
+): Press {
+  return { kind: 'build', revision, key: newKey() };
+}
+
+/**
  * A press of "Cancel" for a job, with a new request key as `pressVerify` makes
  * one: the cancel request takes an `Idempotency-Key` (0030, rule 10).
  */
@@ -218,11 +265,23 @@ export function pressCancel(
   return { kind: 'cancel', jobId, key: newKey() };
 }
 
+/** The refusals the tab shows by their code. */
+export type NamedRefusal = 'too_many_jobs' | 'job_ended' | 'profile_unknown';
+
 /**
- * A refusal the tab shows as such: `too_many_jobs` and `job_ended` by their
- * code, and any other refusal as `other`.
+ * A refusal the tab shows as such: `too_many_jobs`, `job_ended` and
+ * `profile_unknown` by their code, and any other refusal as `other`.
  */
-export type Refusal = 'too_many_jobs' | 'job_ended' | 'other';
+export type Refusal = NamedRefusal | 'other';
+
+/** Whether `code` is a refusal the tab names. */
+function isNamedRefusal(code: string): code is NamedRefusal {
+  return (
+    code === 'too_many_jobs' ||
+    code === 'job_ended' ||
+    code === 'profile_unknown'
+  );
+}
 
 /**
  * Where the latest press of one kind stands. `unknown` means the answer was
@@ -248,17 +307,15 @@ export const IDLE: PressState = { status: 'idle' };
 
 /**
  * The state after `press` failed with `error`. A failure that may have
- * committed stays `unknown`. A 4xx refusal committed nothing: `too_many_jobs`
- * and `job_ended` are shown as such (rule 14), and any other is `other`.
+ * committed stays `unknown`. A 4xx refusal committed nothing: `too_many_jobs`,
+ * `job_ended` and `profile_unknown` are shown as such (rule 14, and decision
+ * 0058, R03ea), and any other is `other`.
  */
 export function afterFailure(press: Press, error: unknown): PressState {
   if (mayHaveCommitted(error)) {
     return { status: 'unknown', press, message: describeFailure(error) };
   }
-  if (
-    error instanceof ArtifreeApiError &&
-    (error.code === 'too_many_jobs' || error.code === 'job_ended')
-  ) {
+  if (error instanceof ArtifreeApiError && isNamedRefusal(error.code)) {
     return {
       status: 'refused',
       refusal: error.code,
@@ -353,25 +410,64 @@ export function showsNoWorker(status: BackgroundStatus): boolean {
   return status.worker.state !== 'running';
 }
 
-/** What a queued job's notice says about the worker (rule 14). */
+/**
+ * What a queued job's notice says about its worker: a verification waits for
+ * the server's worker (rule 14), and a build for an execution worker (decision
+ * 0058, R03ea).
+ */
 export type WorkerNoticeState =
   | { readonly kind: 'unread'; readonly message: string }
-  | { readonly kind: 'no_worker'; readonly status: BackgroundStatus };
+  | { readonly kind: 'no_worker'; readonly status: BackgroundStatus }
+  | { readonly kind: 'no_execution' };
 
 /**
- * The notice of a queued job about its worker, or undefined when there is none
- * to show. A failed read is shown even after an earlier answer: that answer may
- * no longer hold, so it is not presented as the current state.
+ * The notice of a queued job of `kind` about its worker, or undefined when
+ * there is none to show. A failed read is shown even after an earlier answer:
+ * that answer may no longer hold, so it is not presented as the current state.
+ * A build shows its notice when no execution worker is ready; a verification
+ * when the server's worker does not run.
  */
 export function workerNoticeOf(
+  kind: JobKind,
   background: BackgroundStatus | undefined,
   backgroundError: string | undefined,
 ): WorkerNoticeState | undefined {
   if (backgroundError !== undefined) {
     return { kind: 'unread', message: backgroundError };
   }
-  if (background === undefined || !showsNoWorker(background)) return undefined;
+  if (background === undefined) return undefined;
+  if (kind === 'run_profile') {
+    return background.execution.ready ? undefined : { kind: 'no_execution' };
+  }
+  if (!showsNoWorker(background)) return undefined;
   return { kind: 'no_worker', status: background };
+}
+
+/**
+ * What the tab knows of the head build status (decision 0058, rule 16, and
+ * R03ea): not read yet, read, refused as `profile_unknown`, or a read that
+ * failed, in words.
+ */
+export type BuildStatusState =
+  | { readonly kind: 'unread' }
+  | { readonly kind: 'read'; readonly status: BuildStatus }
+  | { readonly kind: 'profile_unknown' }
+  | { readonly kind: 'failed'; readonly message: string };
+
+/** The head build status before its first read. */
+export const STATUS_UNREAD: BuildStatusState = { kind: 'unread' };
+
+/**
+ * The status state after a read of it failed with `error`. A refusal as
+ * `profile_unknown` says that the server cannot build the profile, which a
+ * later read does not change until the feed resets; any other failure is shown
+ * in words.
+ */
+export function statusAfterFailure(error: unknown): BuildStatusState {
+  if (error instanceof ArtifreeApiError && error.code === 'profile_unknown') {
+    return { kind: 'profile_unknown' };
+  }
+  return { kind: 'failed', message: describeFailure(error) };
 }
 
 /**
@@ -395,6 +491,10 @@ export interface JobsView {
   readonly overdue: ReadonlySet<string>;
   /** The latest press of "Verify revision N". */
   readonly verify: PressState;
+  /** The latest press of "Build revision N". */
+  readonly build: PressState;
+  /** The head build status of `BUILD_PROFILE`. */
+  readonly buildStatus: BuildStatusState;
   /** The latest press of "Cancel" for each job, by job id. */
   readonly cancels: ReadonlyMap<string, PressState>;
 }

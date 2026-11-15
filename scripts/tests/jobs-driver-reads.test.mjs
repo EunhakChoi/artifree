@@ -43,6 +43,14 @@ const WORKER = {
 };
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
+/** The head build status of an artifact without any build. */
+const NO_BUILD = {
+  profile: 'react-v1',
+  head_revision: 1,
+  status: 'none',
+  diagnostics: [],
+};
+
 /** A clock that moves only when a test advances it; ties run in arming order. */
 class FakeClock {
   #time = 0;
@@ -133,10 +141,14 @@ function deferred() {
  * `Error` that the call rejects with, or a promise that the test settles.
  * Every call is recorded with its fake time, its input (the query, the id or
  * the request) and its signal or request key. `peak()` is the most reads that
- * were in flight at once.
+ * were in flight at once. The head build status (decision 0058, R03ea) is
+ * recorded apart, in `statusCalls`, so the cases of the list read their calls
+ * as before; it answers `NO_BUILD` unless `getBuildStatus` is scripted.
  */
 function fakePorts(clock, answers) {
   const calls = [];
+  const statusCalls = [];
+  let statusServed = 0;
   const served = Object.fromEntries(
     Object.keys(answers).map((name) => [name, 0]),
   );
@@ -164,10 +176,28 @@ function fakePorts(clock, answers) {
     });
   };
 
+  const readStatus = (profile, signal) => {
+    statusCalls.push({ profile, at: clock.now(), signal });
+    const list = answers.getBuildStatus ?? [NO_BUILD];
+    const answer = list[Math.min(statusServed, list.length - 1)];
+    statusServed += 1;
+    inFlight += 1;
+    peak = Math.max(peak, inFlight);
+    const settled =
+      answer instanceof Error
+        ? Promise.reject(answer)
+        : Promise.resolve(answer);
+    return settled.finally(() => {
+      inFlight -= 1;
+    });
+  };
+
   return {
     calls,
+    statusCalls,
     peak: () => peak,
     ports: {
+      getBuildStatus: readStatus,
       listJobs: (query, signal) => read('listJobs', query, { signal }),
       getJob: (id, signal) => read('getJob', id, { signal }),
       getBackground: (signal) => read('getBackground', undefined, { signal }),

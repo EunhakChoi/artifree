@@ -1,7 +1,8 @@
 /**
- * The Jobs tab of an artifact's page (decision 0055, rules 13 to 15): the
- * artifact's jobs, newest first, with "Verify revision N", the outcome of its
- * last press, "Cancel" and "Load more". The page loads this module with
+ * The Jobs tab of an artifact's page (decision 0055, rules 13 to 15, and
+ * decision 0058, R03ea): the artifact's jobs, newest first, with "Verify
+ * revision N" and "Build revision N", the outcome of each one's last press, the
+ * head build status, "Cancel" and "Load more". The page loads this module with
  * `React.lazy`, so it comes with the tab and not with the page.
  */
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
@@ -11,9 +12,10 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Empty, EmptyHeader, EmptyTitle } from '@/components/ui/empty';
 import type { ArtifactChanges } from './artifact-changes';
+import { BuildStatusBanner } from './jobs-build';
 import { JobsDriver, portsFor, systemJobsClock } from './jobs-driver';
-import { IDLE } from './jobs-model';
-import type { PressState } from './jobs-model';
+import { IDLE, showsQueuedNotice } from './jobs-model';
+import type { Press, PressState } from './jobs-model';
 import { JobRow } from './jobs-row';
 import { NO_JOBS_TEXT, refusalText } from './jobs-text';
 
@@ -31,7 +33,10 @@ export interface JobsPanelProps {
   readonly driver: JobsDriver | undefined;
   /** Receives the driver the first mount made, so that the page keeps it. */
   readonly onDriver: (driver: JobsDriver) => void;
-  /** The revision the page shows; "Verify revision N" asks for it (rule 14). */
+  /**
+   * The revision the page shows; "Verify revision N" and "Build revision N" ask
+   * for it (rule 14).
+   */
   readonly revision: number;
   /** The artifact's change feed, followed while mounted (rule 15). */
   readonly changes: ArtifactChanges;
@@ -111,6 +116,8 @@ export function JobsPanel({
 
   const {
     verify,
+    build,
+    buildStatus,
     rows,
     readError,
     moreError,
@@ -122,7 +129,7 @@ export function JobsPanel({
   const jobs = rows?.jobs;
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col items-start gap-2">
+      <div className="flex flex-wrap items-start gap-2">
         <Button
           type="button"
           variant="outline"
@@ -132,12 +139,32 @@ export function JobsPanel({
         >
           Verify revision {revision}
         </Button>
-        <VerifyOutcome
-          verify={verify}
-          onRetry={() => driver.retryVerify()}
-          onForget={() => driver.forgetVerify()}
-        />
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={build.status === 'sending' || build.status === 'unknown'}
+          onClick={() => driver.build(revision)}
+        >
+          Build revision {revision}
+        </Button>
       </div>
+      <PressOutcome
+        press={verify}
+        sending="Asking for a verification…"
+        onRetry={() => driver.retryVerify()}
+        onForget={() => driver.forgetVerify()}
+      />
+      <PressOutcome
+        press={build}
+        sending="Asking for a build…"
+        onRetry={() => driver.retryBuild()}
+        onForget={() => driver.forgetBuild()}
+      />
+      <BuildStatusBanner
+        state={buildStatus}
+        onRetry={() => driver.retryStatus()}
+      />
       {readError !== undefined ? (
         <Alert variant="destructive">
           <AlertTitle>Could not read the jobs</AlertTitle>
@@ -173,7 +200,7 @@ export function JobsPanel({
             <JobRow
               key={job.id}
               job={job}
-              overdue={overdue.has(job.id)}
+              overdue={overdue.has(job.id) && showsQueuedNotice(job, revision)}
               background={background}
               backgroundError={backgroundError}
               cancel={cancels.get(job.id) ?? IDLE}
@@ -193,51 +220,70 @@ export function JobsPanel({
   );
 }
 
-/** The props of the outcome of the last press of "Verify revision N". */
-interface VerifyOutcomeProps {
-  /** The latest press of "Verify revision N". */
-  readonly verify: PressState;
+/**
+ * The props of the outcome of the last press of "Verify revision N" or "Build
+ * revision N".
+ */
+interface PressOutcomeProps {
+  /** The latest press of the button. */
+  readonly press: PressState;
+  /** What the outcome says while the press is sending. */
+  readonly sending: string;
   /** Sends the press again, with its own request key. */
   readonly onRetry: () => void;
   /** Drops the press; nothing is sent again. */
   readonly onForget: () => void;
 }
 
+/** What the retry of an unknown press says, by the kind of the press. */
+function retryLabel(press: Press): string {
+  switch (press.kind) {
+    case 'verify':
+      return `Retry verify revision ${press.revision}`;
+    case 'build':
+      return `Retry build revision ${press.revision}`;
+    case 'cancel':
+      return 'Retry cancel';
+    default: {
+      const unhandled: never = press;
+      throw new Error(`Unhandled press: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
 /**
- * Where the last press of "Verify revision N" stands: sending, an outcome that
- * is unknown and can be retried, or a refusal (rule 14).
+ * Where the last press of "Verify revision N" or "Build revision N" stands:
+ * sending, an outcome that is unknown and can be retried, or a refusal (rule
+ * 14).
  */
-function VerifyOutcome({ verify, onRetry, onForget }: VerifyOutcomeProps) {
-  switch (verify.status) {
+function PressOutcome({
+  press: state,
+  sending,
+  onRetry,
+  onForget,
+}: PressOutcomeProps) {
+  switch (state.status) {
     case 'idle':
       return null;
     case 'sending':
       return (
-        <output className="text-sm text-muted-foreground">
-          Asking for a verification…
-        </output>
+        <output className="text-sm text-muted-foreground">{sending}</output>
       );
-    case 'unknown':
+    case 'unknown': {
+      const retry = retryLabel(state.press);
       return (
         <Alert>
           <AlertTitle>Outcome unknown</AlertTitle>
           <AlertDescription>
-            <p>{verify.message}</p>
+            <p>{state.message}</p>
             <p>
               Retrying sends the same request again; it never adds a second job.
             </p>
           </AlertDescription>
           <div className="flex flex-wrap gap-2">
-            {verify.press.kind === 'verify' ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={onRetry}
-              >
-                Retry verify revision {verify.press.revision}
-              </Button>
-            ) : null}
+            <Button type="button" variant="outline" size="sm" onClick={onRetry}>
+              {retry}
+            </Button>
             <Button
               type="button"
               variant="outline"
@@ -249,11 +295,12 @@ function VerifyOutcome({ verify, onRetry, onForget }: VerifyOutcomeProps) {
           </div>
         </Alert>
       );
+    }
     case 'refused':
       return (
         <Alert variant="destructive">
           <AlertDescription>
-            <p>{refusalText(verify.refusal, verify.message)}</p>
+            <p>{refusalText(state.refusal, state.message)}</p>
           </AlertDescription>
           <div className="flex flex-wrap gap-2">
             <Button
@@ -268,7 +315,7 @@ function VerifyOutcome({ verify, onRetry, onForget }: VerifyOutcomeProps) {
         </Alert>
       );
     default: {
-      const unhandled: never = verify;
+      const unhandled: never = state;
       throw new Error(`Unhandled press state: ${JSON.stringify(unhandled)}`);
     }
   }

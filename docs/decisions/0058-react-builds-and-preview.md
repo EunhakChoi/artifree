@@ -9,8 +9,8 @@ diagnostics), R03cb (the worker's composition, diagnostics and failures),
 R03cc (build tickets, the `/b/` route and the head status, below the
 wire), R03cda (the execution readiness, schema 16), R03cdb (the
 claim deadline), R03da (the public kind, contract 0.30.0) and R03db
-(build tickets and the head status on the wire, contract 0.31.0) are
-implemented, R03ea, R03eb and R03f are not**.
+(build tickets and the head status on the wire, contract 0.31.0) and R03ea
+(the build in the Jobs tab) are implemented, R03eb and R03f are not**.
 Roadmap: R03.
 
 > **Note, 2026-11-14 (slices).** R03b is split into R03ba, R03bb and R03bc,
@@ -774,6 +774,34 @@ Roadmap: R03.
 >     with an intercepted status; a successful build and its `/b/` preview
 >     stay proven by component tests and by the enforcement job at the
 >     HTTP level, as the table says.
+
+> **Note, 2026-11-15 (R03ea).** The Jobs tab implements R03ea as the R03e
+> split note fixes it; no numbered rule changes and the wire is unchanged.
+>
+> - "Build revision N" asks for `run_profile` with `react-v1` under the press
+>   rules of 0055 rule 14, in its own slot beside "Verify revision N". A
+>   committed build reads the head status again.
+> - The banner reads `GET /v1/artifacts/{id}/builds/react-v1` with the tab's
+>   other reads, one at a time, after the jobs and before
+>   `GET /v1/background`. A change that a status read began before makes its
+>   answer stale: it is read again, not shown. A `job_changed` of a job the
+>   list shows as a verification does not read the status, since it cannot
+>   change a build and would otherwise keep every status read stale while a
+>   verification runs. A reset of the feed drops the status with the rows,
+>   and only then is a `profile_unknown` answer read again.
+> - The banner is a polite status region, since it stays on screen and
+>   changes with the feed; a failed read of it is an alert.
+> - The notice of a queued build follows `execution.ready` alone, and only a
+>   build of the shown revision shows it; the notice of a queued verification
+>   still follows the server's worker.
+> - Diagnostics are React text nodes in the build row, each with its
+>   `path:line:column`; the banner never shows them.
+> - Proven by the driver, model and row tests, each guard by a mutation that
+>   fails them, and by the Jobs smoke cases `build-unknown` (the release
+>   build's `profile_unknown`, on the status and on a press) and
+>   `build-intercepted` (pending, the execution notice from the server's real
+>   `GET /v1/background`, and failed with diagnostics as text) in Chromium and
+>   Firefox. R03eb, the build preview, is not implemented.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),

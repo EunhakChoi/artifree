@@ -59,6 +59,14 @@ const RUNNING = {
   execution: { ready: false },
 };
 
+/** The head build status of an artifact without any build. */
+const NO_BUILD = {
+  profile: 'react-v1',
+  head_revision: 3,
+  status: 'none',
+  diagnostics: [],
+};
+
 /** A promise that never settles. */
 function neverSettles() {
   return new Promise(() => {});
@@ -135,6 +143,7 @@ function portsWith(overrides) {
       throw new Error('No case in this file reads one job.');
     },
     getBackground: async () => RUNNING,
+    getBuildStatus: async () => NO_BUILD,
     enqueueJob: neverSettles,
     cancelJob: neverSettles,
     ...overrides,
@@ -155,7 +164,7 @@ async function startedDriver(ports) {
 }
 
 /**
- * The two presses (rule 14). Each names the port its write goes through, the
+ * The three presses (rule 14, and decision 0058, R03ea). Each names the port its write goes through, the
  * calls that press, retry and forget it, how its slot reads (an absent cancel
  * is idle), the jobs the list shows before the press, and the job its answer
  * carries.
@@ -170,6 +179,16 @@ const PRESSES = {
     slot: (driver) => driver.snapshot().verify,
     listed: [],
     answer: job(),
+  },
+  build: {
+    port: 'enqueueJob',
+    target: [{ kind: 'run_profile', profile: 'react-v1', revision: 3 }],
+    press: (driver) => driver.build(3),
+    retry: (driver) => driver.retryBuild(),
+    forget: (driver) => driver.forgetBuild(),
+    slot: (driver) => driver.snapshot().build,
+    listed: [],
+    answer: job({ kind: 'run_profile', profile: 'react-v1' }),
   },
   cancel: {
     port: 'cancelJob',
@@ -193,28 +212,81 @@ function portsForPress(spec, writes) {
 
 // Fails when a new press replaces one whose outcome is unknown: the lost
 // press may have made a job, and a new key would make a second one.
-test('verify: a press while the outcome of the last one is unknown is ignored, and the retry keeps its key', async () => {
-  const spec = PRESSES.verify;
-  const writes = writePort(
-    fails(apiError(0, 'network_error')),
-    succeeds(spec.answer, true),
-  );
+for (const kind of ['verify', 'build']) {
+  test(`${kind}: a press while the outcome of the last one is unknown is ignored, and the retry keeps its key`, async () => {
+    const spec = PRESSES[kind];
+    const writes = writePort(
+      fails(apiError(0, 'network_error')),
+      succeeds(spec.answer, true),
+    );
+    const driver = await startedDriver(portsForPress(spec, writes));
+
+    spec.press(driver);
+    await nextTurn();
+    assert.equal(spec.slot(driver).status, 'unknown');
+    spec.press(driver);
+    await nextTurn();
+    assert.equal(writes.calls.length, 1, 'the second press sent nothing');
+    assert.equal(spec.slot(driver).status, 'unknown');
+
+    spec.retry(driver);
+    await nextTurn();
+    assert.deepEqual(
+      writes.calls.map((call) => call.key),
+      ['k1', 'k1'],
+    );
+  });
+}
+
+// Decision 0058, R03ea: every release build answers a build press with
+// `422 profile_unknown`, and the tab shows that refusal by its code.
+test('build: a 422 profile_unknown is refused as such, and forgetting clears it', async () => {
+  const spec = PRESSES.build;
+  const writes = writePort(fails(apiError(422, 'profile_unknown')));
   const driver = await startedDriver(portsForPress(spec, writes));
 
   spec.press(driver);
   await nextTurn();
-  assert.equal(spec.slot(driver).status, 'unknown');
-  spec.press(driver);
-  await nextTurn();
-  assert.equal(writes.calls.length, 1, 'the second press sent nothing');
-  assert.equal(spec.slot(driver).status, 'unknown');
+  assert.equal(spec.slot(driver).status, 'refused');
+  assert.equal(spec.slot(driver).refusal, 'profile_unknown');
+  assert.equal(driver.snapshot().verify.status, 'idle');
 
-  spec.retry(driver);
-  await nextTurn();
-  assert.deepEqual(
-    writes.calls.map((call) => call.key),
-    ['k1', 'k1'],
+  spec.forget(driver);
+  assert.equal(spec.slot(driver).status, 'idle');
+});
+
+// A committed build sets the head status (rule 16), so the tab reads it again;
+// a committed verification does not change it.
+test('build: a committed press reads the head build status again, and a verification does not', async () => {
+  const reads = [];
+  const pending = { ...NO_BUILD, status: 'pending', job_id: JOB };
+  const statuses = [NO_BUILD, pending];
+  const writes = writePort(
+    succeeds(job()),
+    succeeds(job({ kind: 'run_profile', profile: 'react-v1' })),
   );
+  const driver = await startedDriver(
+    portsWith({
+      enqueueJob: writes.port,
+      getBuildStatus: async (profile) => {
+        reads.push(profile);
+        return statuses[Math.min(reads.length - 1, statuses.length - 1)];
+      },
+    }),
+  );
+  assert.deepEqual(reads, ['react-v1']);
+
+  driver.verify(3);
+  await nextTurn();
+  assert.deepEqual(reads, ['react-v1']);
+
+  driver.build(3);
+  await nextTurn();
+  assert.deepEqual(reads, ['react-v1', 'react-v1']);
+  assert.deepEqual(driver.snapshot().buildStatus, {
+    kind: 'read',
+    status: pending,
+  });
 });
 
 for (const [kind, spec] of Object.entries(PRESSES)) {
