@@ -95,12 +95,11 @@ impl RoomHub {
         }
     }
 
-    /// Removes the participants of `actor` in the room of `artifact`, as a
-    /// revocation or a move to the trash does (decision 0060 rule 15). Its
-    /// connections stay open.
-    pub(crate) fn leave_member(&self, actor: &ActorId, artifact: &ArtifactId) {
+    /// Removes the participants of each of `users` in its room of
+    /// `artifact` (decision 0060 rule 15). Their connections stay open.
+    pub(crate) fn leave_members(&self, users: &[ActorId], artifact: &ArtifactId) {
         if let Ok(mut rooms) = self.rooms.lock() {
-            rooms.leave_room(actor, artifact);
+            rooms.leave_rooms(users, artifact);
         }
     }
 

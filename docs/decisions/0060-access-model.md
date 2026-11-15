@@ -316,7 +316,7 @@ S02 is split into slices, each its own pull request, in this order:
 | S02b  | 2 to 5, 9, 11, 17     | The core's access and role checks on every artifact operation, read again in the committing transaction                  | implemented, except as its section says |
 | S02c  | 13, 14                | Feed delivery to every reader and the access change rows                                                                 | implemented                             |
 | S02d1 | 11, 15 (jobs), 17     | The queued jobs a revocation and a downgrade take, the owner's cancel, and member replays in the store                   | implemented                             |
-| S02d2 | 15 (memory)           | What a revocation and the trash remove from runtime memory                                                               | implemented                             |
+| S02d2 | 15 (memory, trash)    | What the trash removes from runtime memory, and the closure a revocation will call                                       | implemented                             |
 | S02d3 | 16 (memory), 3, 18    | The confirmations against the access generation, runtime capabilities offered by role, and the disabled mark             | not implemented                         |
 | S02e  | 6 to 8                | `/v1/me`, the access routes, listings with roles, the CLI and the contract; what a downgrade removes from runtime memory | not implemented                         |
 | S02f  | 10                    | The declared shared space                                                                                                | not implemented                         |
@@ -436,24 +436,26 @@ is broken. What a revocation and the trash remove from runtime memory is
 S02d2; the confirmations against the access generation (rule 16), runtime
 capabilities offered by role, and rule 18's marking are S02d3.
 
-**S02d2 (implemented).** Revoking a member and moving the artifact to the
-trash end, for that user and that artifact only, what the server holds in
-memory (rule 15): its preview, build preview and runtime view tickets of the
-artifact, the grants scoped to it on each of the user's runtime connections,
-its participants in the artifact's room, and its handoff deliveries that
-name it, offered or not. The connections, the change streams, the inboxes
-and everything of other artifacts stay; the fences of the closed views stay
+**S02d2 (implemented).** A move to the trash ends, for each current member
+and that artifact only, what the server holds in memory (rule 15): its
+preview, build preview and runtime view tickets of the artifact, the grants
+scoped to it on each of the member's runtime connections, its participants
+in its room of the artifact, and its handoff deliveries that name it,
+offered or not. The connections, the change streams, the inboxes and
+everything of other artifacts stay; the fences of the closed views stay
 too, since they grant nothing and keep an older generation from being issued
-again. A committed move to the trash, over HTTP or MCP, runs this for every
-current member, read from the store after the commit (the trash keeps the
-list); a replay runs it again, which changes nothing. The owner's own
-tickets, grants, room and handoffs of the artifact are left as they were
-before S02. No route revokes a member yet
-(S02e), so the revocation's call is the trash's until then. A behavioural
-test over the real registries and service (`runtime_tests.rs`,
-`a_move_to_the_trash_closes_what_a_member_holds_of_that_artifact_only`)
-fails when each guard is broken. Not in S02d2: a request that passed its
-access check before the revocation may still register afterwards, until the
-confirmations of rule 16 (S02d3); and what a downgrade to viewer removes
-(the `source.write` grants), which comes with the route that changes a role
-(S02e).
+again. The store names the members in the transaction that commits the
+move, in the metadata receipt, and the server closes what they hold right
+after it, over HTTP and MCP alike; a replay names no member and closes
+nothing, so a retried move after a recovery leaves what members opened
+again. The owner's own tickets, grants, room and handoffs of the artifact
+are left as they were before S02. The same closure, for one user, is what a
+revocation runs, but no route revokes a member yet: the call comes with the
+access routes (S02e). Behavioural tests over the real registries and service
+(`runtime_tests.rs`: `a_move_to_the_trash_closes_what_a_member_holds_of_that_artifact_only`
+and `a_replayed_move_to_the_trash_closes_nothing_after_a_recovery`) fail when
+each guard is broken. Not in S02d2: a request that passed its access check
+before the move may still register afterwards, until the confirmations of
+rule 16 (S02d3); the revocation's call (S02e); and what a downgrade to viewer
+removes (the `source.write` grants), which comes with the route that changes
+a role (S02e).

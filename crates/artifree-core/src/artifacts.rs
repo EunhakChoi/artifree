@@ -1227,22 +1227,6 @@ impl<S: ArtifactStore + AccessStore> ArtifactService<S> {
             .ok_or(ArtifactError::NotFound(Missing::Revision))
     }
 
-    /// The current members of an artifact, in the trash too, for closing what
-    /// the server holds for them (decision 0060 rule 15). It names users to
-    /// the server, not to a caller, so it checks no actor; an artifact that
-    /// does not exist or was purged has none.
-    ///
-    /// # Errors
-    ///
-    /// [`ArtifactError::Unavailable`].
-    pub fn members(&self, id: &ArtifactId) -> Result<Vec<ActorId>, ArtifactError> {
-        Ok(self
-            .store
-            .access_list(id)?
-            .map(|list| list.members.into_iter().map(|member| member.user).collect())
-            .unwrap_or_default())
-    }
-
     /// An artifact the actor may read: its own or one it is a member of,
     /// outside the trash (decision 0060 rule 3).
     pub(crate) fn authorized(

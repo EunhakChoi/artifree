@@ -452,16 +452,16 @@ impl PreviewTickets {
         }
     }
 
-    /// Invalidates every live ticket `actor` holds for `artifact`, preview,
-    /// build preview and runtime view alike, as a revocation or a move to the
-    /// trash does (decision 0060 rule 15). Its tickets of other artifacts
-    /// stay. The fences of the closed views stay too: they grant nothing, and
-    /// keep an older generation of a view from being issued again.
-    pub(crate) fn revoke_member(&self, actor: &ActorId, artifact: &ArtifactId) {
+    /// Invalidates every live ticket that one of `users` holds for
+    /// `artifact`, preview, build preview and runtime view alike (decision
+    /// 0060 rule 15). Their tickets of other artifacts stay. The fences of the
+    /// closed views stay too: they grant nothing, and keep an older
+    /// generation of a view from being issued again.
+    pub(crate) fn revoke_members(&self, users: &[ActorId], artifact: &ArtifactId) {
         if let Ok(mut registry) = self.registry.lock() {
             registry
                 .live
-                .retain(|_, ticket| &ticket.actor != actor || &ticket.artifact != artifact);
+                .retain(|_, ticket| &ticket.artifact != artifact || !users.contains(&ticket.actor));
         }
     }
 

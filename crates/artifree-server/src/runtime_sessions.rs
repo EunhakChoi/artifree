@@ -264,14 +264,14 @@ impl RuntimeSessions {
         }
     }
 
-    /// Drops, on every connection of `actor`, the grants scoped to
-    /// `artifact`, as a revocation or a move to the trash does (decision 0060
-    /// rule 15). A connection is per user and may hold grants for other
-    /// artifacts, so the connections stay open and those grants stay.
-    pub(crate) fn revoke_member(&self, actor: &ActorId, artifact: &ArtifactId) {
+    /// Drops, on every connection of each of `users`, the grants scoped to
+    /// `artifact` (decision 0060 rule 15). A connection is per user and may
+    /// hold grants for other artifacts, so the connections stay open and
+    /// those grants stay.
+    pub(crate) fn revoke_members(&self, users: &[ActorId], artifact: &ArtifactId) {
         if let Ok(sessions) = self.sessions.lock() {
             for ((owner, _), session) in sessions.iter() {
-                if owner != actor {
+                if !users.contains(owner) {
                     continue;
                 }
                 if let Ok(mut state) = session.state.lock() {

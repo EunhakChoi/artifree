@@ -468,21 +468,22 @@ impl AppState {
         self.shared.handoffs.revoke_actor(actor);
     }
 
-    /// Ends what `actor` holds in memory for `artifact` alone, as revoking
-    /// the member or moving the artifact to the trash does (decision 0060
-    /// rule 15): its preview, build preview and view tickets of the artifact,
-    /// the grants scoped to it on each of its connections, its participation
-    /// in the artifact's room, and its handoff deliveries that name it. The
+    /// Ends what each of `users` holds in memory for `artifact` alone
+    /// (decision 0060 rule 15): its preview, build preview and view tickets
+    /// of the artifact, the grants scoped to it on each of its connections,
+    /// its participation in the artifact's room, and its handoff deliveries
+    /// that name it. A move to the trash runs it for every member; revoking
+    /// one member will run it for that user once a route revokes (S02e). The
     /// connections and change streams stay open, unlike a disable's
     /// [`Self::revoke_actor`]; the streams carry the change rows. A request
     /// that passed its access check before this runs may still register
     /// afterwards: confirming it against the access generation (rule 16) is
     /// not implemented yet.
-    pub(crate) fn revoke_member(&self, actor: &ActorId, artifact: &ArtifactId) {
-        self.shared.previews.revoke_member(actor, artifact);
-        self.shared.runtime_sessions.revoke_member(actor, artifact);
-        self.shared.rooms.leave_member(actor, artifact);
-        self.shared.handoffs.revoke_member(actor, artifact);
+    pub(crate) fn revoke_members(&self, users: &[ActorId], artifact: &ArtifactId) {
+        self.shared.previews.revoke_members(users, artifact);
+        self.shared.runtime_sessions.revoke_members(users, artifact);
+        self.shared.rooms.leave_members(users, artifact);
+        self.shared.handoffs.revoke_members(users, artifact);
     }
 
     /// Confirms that `actor` is still in the state generation the request

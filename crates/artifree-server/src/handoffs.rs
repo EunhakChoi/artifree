@@ -175,13 +175,14 @@ impl Handoffs {
         }
     }
 
-    /// Forgets the deliveries of `actor` that name `artifact`, offered or
-    /// not, as a revocation or a move to the trash does (decision 0060 rule
-    /// 15). Its inboxes and its deliveries of other artifacts stay.
-    pub(crate) fn revoke_member(&self, actor: &ActorId, artifact: &ArtifactId) {
+    /// Forgets the deliveries of each of `users` that name `artifact`,
+    /// offered or not (decision 0060 rule 15). Their inboxes and their
+    /// deliveries of other artifacts stay.
+    pub(crate) fn revoke_members(&self, users: &[ActorId], artifact: &ArtifactId) {
         if let Ok(mut registry) = self.state.lock() {
             registry.items.retain(|_, item| {
-                item.owner != *actor || item.handoff.selection.artifact_id != artifact.as_str()
+                item.handoff.selection.artifact_id != artifact.as_str()
+                    || !users.contains(&item.owner)
             });
         }
     }

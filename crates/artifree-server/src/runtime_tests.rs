@@ -134,21 +134,9 @@ async fn create_runtime_artifact(
     state: &AppState,
     actor: &ActorId,
 ) -> Result<String, Box<dyn Error>> {
-    let created = operations::create(
-        state,
-        actor.clone(),
-        "runtime-race-key".parse()?,
-        CreateArtifactRequest {
-            title: "Runtime race".into(),
-            artifact_type: None,
-            files: Some(vec![FileUpload {
-                path: "index.html".into(),
-                encoding: ContentEncoding::Utf8,
-                content: "<!doctype html><html><head><!-- artifree-runtime --></head><body>test</body></html>".into(),
-            }]),
-        },
-    ).await.map_err(|error| error.body.message)?;
-    Ok(created.artifact.id)
+    Ok(create_keyed_artifact(state, actor, "runtime-race-key")
+        .await?
+        .to_string())
 }
 
 async fn issue_and_initialize(
@@ -2750,8 +2738,8 @@ fn a_view_create_pending_across_a_disable_and_an_enable_is_refused_and_leaves_no
     })
 }
 
-/// An artifact of `owner` made with request key `key`, so that one owner can
-/// make several.
+/// A runtime artifact of `owner` made with request key `key`, so that one
+/// owner can make several.
 async fn create_keyed_artifact(
     state: &AppState,
     owner: &ActorId,
@@ -2762,7 +2750,7 @@ async fn create_keyed_artifact(
         owner.clone(),
         key.parse()?,
         CreateArtifactRequest {
-            title: "Shared".into(),
+            title: "Runtime race".into(),
             artifact_type: None,
             files: Some(vec![FileUpload {
                 path: "index.html".into(),
@@ -2970,6 +2958,51 @@ fn a_move_to_the_trash_closes_what_a_member_holds_of_that_artifact_only()
         );
         // Ana's room of the kept artifact and the owner's room stay.
         assert_eq!(state.rooms().counts().map(|counts| counts.rooms), Some(2));
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+/// A replay of a move to the trash names no member, so after a recovery it
+/// closes nothing a member opened again (decision 0060 rule 15).
+#[test]
+fn a_replayed_move_to_the_trash_closes_nothing_after_a_recovery() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let (owner, ana) = (registered_user(&state, 1)?, registered_user(&state, 2)?);
+        let shared = create_keyed_artifact(&state, &owner, "create-shared").await?;
+        grant_viewer(&directory, &owner, &shared, &ana)?;
+        let anas = Holder::new(&state, &ana)?;
+        let trash = |key: &'static str, base: u64, deleted: bool| {
+            let (state, owner, shared) = (&state, owner.clone(), shared.to_string());
+            async move {
+                operations::update(
+                    state,
+                    owner,
+                    key.parse()?,
+                    &shared,
+                    UpdateArtifactRequest {
+                        base_metadata_revision: base,
+                        title: None,
+                        pinned: None,
+                        deleted: Some(deleted),
+                    },
+                )
+                .await
+                .map_err(|error| error.body.message)
+                .map_err(Box::<dyn Error>::from)
+            }
+        };
+        let first = anas.hold(&state, &shared).await?;
+        assert!(!trash("trash-shared", 1, true).await?.replayed);
+        assert_eq!(anas.holds(&state, &shared, &first)?, [false; 3]);
+        trash("recover-shared", 2, false).await?;
+        let again = anas.hold(&state, &shared).await?;
+        assert!(trash("trash-shared", 1, true).await?.replayed);
+        assert_eq!(anas.holds(&state, &shared, &again)?, [true; 3]);
         Ok::<(), Box<dyn Error>>(())
     })
 }

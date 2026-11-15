@@ -409,6 +409,7 @@ impl ArtifactStore for SqliteStore {
                     return Ok(MetadataReceipt {
                         artifact: snapshot(transaction, &id, position)?,
                         delivery: Delivery::Replayed,
+                        trashed_members: Vec::new(),
                     });
                 }
                 Settled::Proceed(current) => current,
@@ -434,11 +435,14 @@ impl ArtifactStore for SqliteStore {
                 (Some(_), None) => ChangeKind::Recovered,
                 _ => ChangeKind::MetadataUpdated,
             };
-            if kind == ChangeKind::Deleted {
+            let trashed_members = if kind == ChangeKind::Deleted {
                 // Decision 0057 rule 8: the trash revokes live run_profile attempts in the
                 // same transaction as the move.
                 jobs::revoke_for_trash(transaction, request.artifact, now)?;
-            }
+                access::current_members(transaction, request.artifact)?
+            } else {
+                Vec::new()
+            };
             if matches!(kind, ChangeKind::Deleted | ChangeKind::Recovered) {
                 // Decision 0060 rule 16: a move to or from the trash changes every
                 // member's access, so it raises every member's generation.
@@ -493,6 +497,7 @@ impl ArtifactStore for SqliteStore {
             Ok(MetadataReceipt {
                 artifact: snapshot(transaction, request.artifact, position)?,
                 delivery: Delivery::Committed,
+                trashed_members,
             })
         })
     }

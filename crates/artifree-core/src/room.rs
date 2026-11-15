@@ -636,12 +636,12 @@ impl Rooms {
         self.table.retain(|key, _| key.actor != *actor);
     }
 
-    /// Removes every participant of `actor` in the room of `artifact`, as a
-    /// revocation of `actor` or a move of `artifact` to the trash does
-    /// (decision 0060 rule 15). Its rooms of other artifacts stay.
-    pub fn leave_room(&mut self, actor: &ActorId, artifact: &ArtifactId) {
+    /// Removes every participant of each of `users` in its room of
+    /// `artifact`, as a move of `artifact` to the trash does for its members
+    /// (decision 0060 rule 15). Their rooms of other artifacts stay.
+    pub fn leave_rooms(&mut self, users: &[ActorId], artifact: &ArtifactId) {
         self.table
-            .retain(|key, _| key.actor != *actor || key.artifact != *artifact);
+            .retain(|key, _| key.artifact != *artifact || !users.contains(&key.actor));
     }
 
     /// Removes every participant of a tab in every room of `actor`, as when
