@@ -26,6 +26,13 @@ checkout, Rust, or `npm install`:
 No other platform (macOS, ARM, musl/Alpine) is packaged. The Windows binary
 links the C runtime statically.
 
+**Builds.** Only the Linux x64 server knows the `react-v1` build profile, and
+it runs builds only with an execution worker on a prepared host. Ubuntu 24.04
+on x86_64 is the supported host; [builds on the supported host](execution-host.md)
+describes its preparation with the files under `tools/`. Without it the package
+works as before, and a build ends as `execution_unavailable`. The Windows
+server refuses builds.
+
 **Linux glibc floor: 2.34.** The binary needs glibc 2.34 or newer (x86-64).
 Packaging refuses a binary whose `GLIBC_*` symbol versions exceed that, and CI
 repeats the check on the archive. Checked by running the package: Debian 12
@@ -64,6 +71,8 @@ artifree-<version>-<target>/
   cli/artifree.mjs         the command-line client, one bundled script
   docs/release-packages.md this page
   docs/backup-restore.md   backup, restore, and upgrade (O04)
+  tools/                   linux-x64 only: the tool root's packaging script, its lock list,
+                           and the server's and execution worker's systemd units
   LICENSE  THIRD_PARTY_NOTICES.md
   RUST_DEPENDENCIES.json   crates linked into the server: name, version, license expression
   LICENSES/INDEX.json      every third-party component with its license files (hashes)
@@ -239,9 +248,16 @@ checkout, and verifies: archive checksum, every manifest hash, only regular file
 and no unlisted file, link, or directory, entrypoints equal to the target's
 layout, the manifest matching the archive name and the runner's platform, start and health, the packaged web page, creating and saving an artifact
 with the packaged CLI, fetching its preview, stopping, restarting on the same
-data and finding revision 2, and the two startup refusals above. It ran only on
+data and finding revision 2, and the two startup refusals above. It also runs
+the server's execution entry points (decision 0058, R03fb): the Linux server
+serves `react-v1`'s, fails the fixture profile's identity as unknown, and
+reports a version that the packaging script accepts as a root's version; the
+Windows server refuses every entry point. The Linux archive must list the
+files under `tools/`, and the Windows archive must ship none. It ran only on
 those two runner images; it did not run against a real reverse proxy, tunnel, or
-other machine.
+other machine. The `Supported host (Ubuntu 24.04 x86_64)` job installs the Linux
+archive as [builds on the supported host](execution-host.md#what-ci-checks)
+describes and publishes a build.
 
 Further checks (decision 0037): the `Debian 12` job checks the archive's glibc
 requirement against the floor and runs the same verifier inside Debian 12

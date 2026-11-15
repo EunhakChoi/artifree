@@ -10,9 +10,10 @@ R03cc (build tickets, the `/b/` route and the head status, below the
 wire), R03cda (the execution readiness, schema 16), R03cdb (the
 claim deadline), R03da (the public kind, contract 0.30.0) and R03db
 (build tickets and the head status on the wire, contract 0.31.0), R03ea
-(the build in the Jobs tab), R03eb (the build preview) and R03fa (the
-launch and `react-v1` in the x86_64 Linux release build) are implemented;
-R03fb (the release archive and the supported host) is not**.
+(the build in the Jobs tab), R03eb (the build preview), R03fa (the
+launch and `react-v1` in the x86_64 Linux release build) and R03fb (the
+release archives and the supported host, Ubuntu 24.04 on x86_64) are
+implemented**.
 Roadmap: R03.
 
 > **Note, 2026-11-14 (slices).** R03b is split into R03ba, R03bb and R03bc,
@@ -1003,6 +1004,44 @@ Roadmap: R03.
 >   with `--execution-dir --once`. The tests then check, through the
 >   store, a published build served under `/b/` and a `build_failed` with
 >   the bundler's diagnostic.
+
+> **Note, 2026-11-15 (R03fb).** The release archives and the supported host
+> are implemented as the R03f split note describes, with these specifics; no
+> numbered rule changes.
+>
+> - The `linux-x64` archive ships, under `tools/`, rule 19's script and its
+>   lock list, copied from `scripts/tools/`, and two systemd units: the
+>   server's and the execution worker's, with `Delegate=yes` and the worker
+>   as the unit's own command (0056 rule 8). The operator documentation,
+>   `docs/execution-host.md`, installs those bytes unchanged, so the CI job
+>   that follows it runs what an operator runs. The `windows-x64` archive
+>   ships no `tools/`, and the manifest check refuses one that does.
+> - The clean-install check runs the unpacked server's entry points with an
+>   empty `PATH`. On `linux-x64`: the fixture's identity fails with status 70
+>   at the bootstrap and the stub, `react-v1`'s identity passes the stub's
+>   identity check, and `--version` names the manifest's version, which must
+>   match the version pattern of rule 19's script. On `windows-x64`: every
+>   `execution` entry point, the two admission modes included, ends with
+>   status 2 and one line saying it knows no execution profile.
+> - The documentation routes core dumps to the plain name `core` with a
+>   `sysctl.d` file after turning off apport, which installs a pipe, and
+>   requires `/opt` to be writable by root only, since the hosted runner's
+>   `/opt` is `0777`. It removes an old root as the enforcement job's
+>   `root-remove` does: unload and delete the launcher profile, then delete
+>   the root. The upgrade and a reboot are described but not exercised.
+> - The new CI job `Supported host (Ubuntu 24.04 x86_64)`, part of `Quality
+gate`, runs `scripts/verify-supported-host.sh` on the archive with a
+>   sparse checkout and no build: it follows the documentation's steps 1 to 7
+>   as written, creates an artifact from the bundler template with the
+>   packaged CLI, and requires a succeeded `react-v1` build of three files,
+>   the head status `built`, and a build preview under `/b/` that serves the
+>   page, a bundle holding the template's code and React, and the style
+>   sheet. It refuses to run outside a GitHub-hosted Ubuntu 24.04 x86_64
+>   runner, since it changes the host (0056 rule 12).
+> - The README, the roadmap, this status line, the inventory and the release
+>   package guide call Ubuntu 24.04 on x86_64 the supported host. The
+>   container image is unchanged: it holds no root, so no execution worker is
+>   ready there.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),

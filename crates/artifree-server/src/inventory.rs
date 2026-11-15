@@ -137,7 +137,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Worker language open",
         "crates/artifree-providers/src/build.rs",
         ComponentStatus::Planned,
-        "Isolated HTML/JS/TSX build and preview generation: the react-v1 profile in the x86_64 Linux release build and in the build with enforcement-fixture (decision 0058); no host is called supported yet.",
+        "Isolated HTML/JS/TSX build and preview generation: the react-v1 profile in the x86_64 Linux release build and in the build with enforcement-fixture (decision 0058); Ubuntu 24.04 on x86_64, prepared as docs/execution-host.md describes, is the supported host for builds.",
     ),
     (
         "export",

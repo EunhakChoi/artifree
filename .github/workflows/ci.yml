@@ -248,6 +248,39 @@ jobs:
           path: release
       - run: node scripts/verify-release.mjs release
 
+  # Why this job exists (decision 0058, R03fb): the supported host of rule 21 is proven by a
+  # clean install of the linux-x64 archive that follows docs/execution-host.md, not by the
+  # enforcement job, which builds from the checkout. Like the install job it builds nothing and
+  # installs no npm package: it unpacks the archive, routes core dumps to a plain file, prepares the
+  # tool root with the archive's tools/package-root.sh (which downloads only the pinned launcher
+  # package and the archives of the lock list, each checked against its SHA-256), starts the
+  # archive's two systemd units, and publishes a react-v1 build of the bundler template that the
+  # /b/ route serves. These host changes are why it runs only on a disposable hosted runner.
+  supported-host:
+    name: Supported host (Ubuntu 24.04 x86_64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: [package]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts
+            crates/artifree-providers/src/execution/attempt/bundler_template
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.12.0'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-linux-x64
+          path: release
+      - name: Install as the operator documentation says and publish a build
+        run: scripts/verify-supported-host.sh release crates/artifree-providers/src/execution/attempt/bundler_template
+      - name: Show the units' journal
+        if: ${{ failure() }}
+        run: sudo journalctl --no-pager -u artifree.service -u artifree-execution.service
+
   container:
     name: Container image (linux-x64)
     runs-on: ubuntu-24.04
@@ -372,6 +405,7 @@ jobs:
         browsers,
         package,
         install,
+        supported-host,
         container,
         debian-12,
         dependencies,

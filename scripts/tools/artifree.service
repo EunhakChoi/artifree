@@ -1,0 +1,16 @@
+# The Artifree server on the supported host (decision 0058 rule 21; docs/execution-host.md).
+# Copy it to /etc/systemd/system/. It runs the release that /opt/artifree/current points to, as
+# the account artifree, with its data in /var/lib/artifree/data. The server listens on loopback
+# only and starts its own trusted worker, which runs no build.
+[Unit]
+Description=Artifree server
+After=network.target
+
+[Service]
+User=artifree
+Group=artifree
+ExecStart=/opt/artifree/current/bin/artifree-server serve --data-dir /var/lib/artifree/data --web-dir /opt/artifree/current/web
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

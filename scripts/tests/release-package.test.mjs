@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readFile,
   rm,
+  stat,
   symlink,
   writeFile,
 } from 'node:fs/promises';
@@ -25,6 +26,7 @@ import {
   extract,
   refuses,
   verifyChecksum,
+  verifyExecutionEntryPoints,
   verifyManifest,
   verifyRelease,
 } from '../verify-release.mjs';
@@ -62,7 +64,10 @@ test(
   async () => {
     const built = await pack(join(scratch, 'out-run'));
     const summary = await verifyRelease(built.archive);
-    assert.deepEqual(summary, { revision: 2 });
+    assert.deepEqual(summary, {
+      buildProfiles: target === 'linux-x64' ? ['react-v1'] : [],
+      revision: 2,
+    });
   },
 );
 
@@ -412,6 +417,138 @@ test(
     await assert.rejects(
       verifyManifest(dir),
       /does not list LICENSES\/INDEX.json/,
+    );
+  },
+);
+
+const linuxOnly = {
+  skip:
+    target !== 'linux-x64' && 'the root tools ship in the linux-x64 package',
+};
+
+test(
+  'the linux-x64 package ships the root packaging script and its lock list, and the manifest check requires them',
+  linuxOnly,
+  async () => {
+    const { dir } = await unpacked('root-tools');
+    for (const path of ['tools/package-root.sh', 'tools/react-v1.lock']) {
+      assert.deepEqual(
+        await readFile(join(dir, ...path.split('/'))),
+        await readFile(join(root, 'scripts', ...path.split('/'))),
+        `${path} must be the repository's copy`,
+      );
+    }
+    const mode = (await stat(join(dir, 'tools', 'package-root.sh'))).mode;
+    assert.equal(mode & 0o111, 0o111, 'the script must be executable');
+    assert.equal(
+      (await stat(join(dir, 'tools', 'react-v1.lock'))).mode & 0o111,
+      0,
+      'the lock list is data',
+    );
+
+    await rm(join(dir, 'tools', 'react-v1.lock'));
+    await rewriteManifest(dir, (manifest) => {
+      manifest.files = manifest.files.filter(
+        (f) => f.path !== 'tools/react-v1.lock',
+      );
+    });
+    await assert.rejects(
+      verifyManifest(dir),
+      /does not list tools\/react-v1.lock/,
+    );
+  },
+);
+
+test(
+  'the manifest check refuses a tool its target does not ship',
+  linuxOnly,
+  async () => {
+    const { dir } = await unpacked('stray-tool');
+    const bytes = Buffer.from('#!/bin/sh\n');
+    await writeFile(join(dir, 'tools', 'extra.sh'), bytes);
+    await rewriteManifest(dir, (manifest) => {
+      manifest.files.push({
+        path: 'tools/extra.sh',
+        size: bytes.length,
+        sha256: sha256(bytes),
+      });
+    });
+    await assert.rejects(verifyManifest(dir), /must not ship tools\/extra.sh/);
+  },
+);
+
+/**
+ * Writes a shell script that stands in for a server: it prints `version` for
+ * `--version` and runs `body` for anything else.
+ */
+async function fakeServer(name, version, body) {
+  const path = join(scratch, name);
+  await writeFile(
+    path,
+    `#!/bin/sh\nif [ "$1" = --version ]; then echo "artifree-server ${version}"; exit 0; fi\n${body}\n`,
+    { mode: 0o755 },
+  );
+  return path;
+}
+
+test(
+  'the entry-point check tells a server that knows react-v1 from one that knows no profile',
+  { skip: process.platform !== 'linux' && 'the stand-ins are shell scripts' },
+  async () => {
+    const cwd = await mkdtemp(join(scratch, 'entry-cwd-'));
+    const check = (binary, target, version = '1.2.3') =>
+      verifyExecutionEntryPoints({
+        binary,
+        env: { PATH: '' },
+        cwd,
+        manifest: { target, version },
+      });
+    const knowsNone = await fakeServer(
+      'knows-none.sh',
+      '1.2.3',
+      'echo "Execution unavailable. This build knows no execution profile." >&2; exit 2',
+    );
+    assert.deepEqual(check(knowsNone, 'windows-x64'), []);
+    assert.throws(
+      () => check(knowsNone, 'linux-x64'),
+      /bootstrap artifree-fixture-inspection-v1: expected status 70, got 2/,
+    );
+
+    const acceptsAll = await fakeServer('accepts-all.sh', '1.2.3', 'exit 0');
+    assert.throws(
+      () => check(acceptsAll, 'linux-x64'),
+      /bootstrap artifree-fixture-inspection-v1: expected status 70, got 0/,
+    );
+    assert.throws(
+      () => check(acceptsAll, 'windows-x64'),
+      /artifree-server execution: expected status 2, got 0/,
+    );
+
+    // Fails every identity alike, so react-v1's is not served.
+    const knowsNoIdentity = await fakeServer(
+      'knows-no-identity.sh',
+      '1.2.3',
+      'echo "the execution profile identity is unknown" >&2; exit 70',
+    );
+    assert.throws(
+      () => check(knowsNoIdentity, 'linux-x64'),
+      /the input path is not absolute/,
+    );
+
+    const otherVersion = await fakeServer('other.sh', '9.9.9', 'exit 2');
+    assert.throws(
+      () => check(otherVersion, 'windows-x64'),
+      /does not report the manifest version/,
+    );
+
+    const notARootVersion = await fakeServer(
+      'short-version.sh',
+      '1.2',
+      'exit 2',
+    );
+    assert.throws(
+      () => check(notARootVersion, 'linux-x64', '1.2'),
+      /cannot name an execution tool root/,
     );
   },
 );

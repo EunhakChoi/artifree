@@ -4,7 +4,8 @@
 //! admission that checks facilities in a fixed order, verifies the tool root against its
 //! manifest, runs one trusted namespace check through the tool root's launcher and one
 //! trusted probe child in a probe cgroup. `inspect_host` gives every caller a refusal, at best
-//! `IncompleteEnforcement` (0056 rule 16), and no host is called supported.
+//! `IncompleteEnforcement` (0056 rule 16). No check here calls a host supported: the supported
+//! host is a documented setup (decision 0058 rule 21), and admission alone decides where a build runs.
 //! `run_stub`, `run_stub_for`, `run_bootstrap` and `run_guardian` serve the test-support program
 //! and the server's `execution` entry point (0057 rule 4). `write_probe_programs` serves the
 //! test-support program only (0056 rule 4); the probe programs are of use only under the launch.

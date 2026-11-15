@@ -24,11 +24,14 @@ starts and restarts by itself (`--no-worker` turns that off). The build kind,
 `run_profile` with `profile: "react-v1"`, with its build preview and build
 status, is on the API, MCP, the CLI and the web workspace (the Jobs tab and
 the preview's "Preview of: Build" choice). The x86_64 Linux release build
-knows `react-v1`, and its builds run only where an execution worker is ready,
-which no documented host setup provides yet; a release build for any other
-target refuses them with `profile_unknown`
-([decision 0058](docs/decisions/0058-react-builds-and-preview.md)). Publishing, roles and sharing, build and
-conversion workers, sandboxed execution of untrusted code, and external
+knows `react-v1`, and its builds run in a sandbox only where an execution
+worker is ready. Ubuntu 24.04 on x86_64, prepared as
+[builds on the supported host](docs/execution-host.md) describes, is the
+supported host; other Linux hosts are not supported for builds, and a release
+build for any other target refuses them with `profile_unknown`
+([decision 0058](docs/decisions/0058-react-builds-and-preview.md)). Publishing, roles and sharing,
+conversion workers, sandboxed execution of untrusted code other than these
+builds, and external
 identity (OAuth, passwords, login sessions) are not implemented. The module inventory shown by the UI and
 CLI is a build-time snapshot, not live server health.
 
