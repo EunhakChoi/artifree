@@ -334,9 +334,11 @@ impl<S: ArtifactStore + AccessStore + JobStore> ArtifactService<S> {
     ///
     /// # Errors
     ///
-    /// [`ArtifactError::NotFound`] as for [`Self::job`], except for the
-    /// owner's cancel of a member's job, [`ArtifactError::JobEnded`] for a job that is already succeeded,
-    /// failed, or cancelled, [`ArtifactError::RequestKeyReused`], or
+    /// [`ArtifactError::NotFound`] for a job that is missing, hidden, of an
+    /// artifact in the trash or purged, or neither the caller's nor of an
+    /// artifact it owns, [`ArtifactError::JobEnded`] for a job that is
+    /// already succeeded, failed, or cancelled,
+    /// [`ArtifactError::RequestKeyReused`], or
     /// [`ArtifactError::Unavailable`].
     pub fn cancel_job(
         &self,

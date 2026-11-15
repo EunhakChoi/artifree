@@ -10,7 +10,7 @@ use artifree_domain::access::{AccessVersion, Role};
 use artifree_domain::change::ChangeSequence;
 use artifree_domain::data::{DataChange, DataPath, DataValue};
 use artifree_domain::identity::{ActorId, UnixMillis, UserLabel};
-use artifree_domain::job::{JobKind, WorkerId};
+use artifree_domain::job::{JobKind, JobState, WorkerId};
 use artifree_domain::{AppDataVersion, MetadataRevision, SourceRevision};
 use artifree_ports::access_store::{AccessChange, AccessRequest, AccessStore};
 use artifree_ports::artifact_store::{
@@ -302,6 +302,25 @@ fn a_revoked_members_running_job_writes_nothing_to_its_feed() -> TestResult {
         [AccessGranted, JobChanged, JobChanged, AccessRevoked],
         "the revocation stays the revoked user's last row of the artifact"
     );
+    // The job it gave back is queued again, and the next claim ends it
+    // instead of running it for a user who is no longer a member.
+    let again = f.store.claim_job(JobClaim {
+        worker: &parsed::<WorkerId>("worker-one"),
+        now: UnixMillis(4),
+        lease_ms: 1_000,
+        known_profiles: &[],
+        execution: None,
+    })?;
+    assert!(again.claimed.is_none());
+    assert_eq!(
+        again
+            .settled
+            .iter()
+            .map(|job| job.state)
+            .collect::<Vec<_>>(),
+        [JobState::Cancelled]
+    );
+    assert_eq!(f.kinds(&f.ana)?.last(), Some(&AccessRevoked));
     Ok(())
 }
 

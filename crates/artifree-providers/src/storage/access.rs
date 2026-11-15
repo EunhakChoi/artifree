@@ -38,7 +38,7 @@ fn stored(value: u64) -> Result<i64, StoreError> {
 
 /// The access version of an artifact that `owner` owns and that is outside the
 /// trash and not purged.
-fn owned_in_place(
+pub(super) fn owned_in_place(
     connection: &Connection,
     artifact: &ArtifactId,
     owner: &ActorId,
@@ -276,8 +276,9 @@ fn change(
         };
         super::record_access_change(transaction, request.artifact, kind, revoked)?;
         // Rule 15: a user who may no longer enqueue on the artifact loses the
-        // jobs it queued there that have not started. The revocation's row
-        // is written first, so a job change after it reaches only a member.
+        // jobs it queued there that have not started. Each cancel is a job
+        // change; with the role just cleared, a revoked user's is not written.
+        // A job that later becomes due again is ended by the claim.
         if stored_role.is_some() && role != Some(Role::Editor) {
             super::jobs::cancel_for_access(
                 transaction,

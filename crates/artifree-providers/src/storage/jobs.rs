@@ -383,19 +383,20 @@ fn cancel(
     {
         return Err(JobStoreError::NotFound);
     }
-    let by_owner = job.actor != *request.request.actor;
-    if by_owner && !owns(transaction, &job.artifact, request.request.actor)? {
+    if job.actor == *request.request.actor {
+        // A member cancels its own job while it is a member, read again here
+        // before the key (decision 0060 rules 5, 11 and 17).
+        super::access::admit(
+            transaction,
+            &job.artifact,
+            request.request.actor,
+            Need::Read,
+        )?;
+    } else if super::access::owned_in_place(transaction, &job.artifact, request.request.actor)?
+        .is_none()
+    {
         return Err(JobStoreError::NotFound);
     }
-    // A member cancels its own job while it is a member, read again here
-    // before the key (decision 0060 rules 5, 11 and 17); the owner's cancel
-    // of a member's job needs the owner.
-    super::access::admit(
-        transaction,
-        &job.artifact,
-        request.request.actor,
-        if by_owner { Need::Own } else { Need::Read },
-    )?;
     match key_of(transaction, request.request)? {
         Key::Same(id) => {
             return Ok(JobReceipt {
@@ -440,26 +441,15 @@ fn cancel(
     })
 }
 
-/// Whether `actor` owns `artifact`.
-fn owns(
-    connection: &Connection,
-    artifact: &ArtifactId,
-    actor: &ActorId,
-) -> Result<bool, StoreError> {
-    connection
-        .query_row(
-            "SELECT EXISTS (SELECT 1 FROM artifacts WHERE id = ?1 AND owner = ?2)",
-            [artifact.as_str(), actor.as_str()],
-            |row| row.get(0),
-        )
-        .map_err(unavailable)
-}
-
 /// Ends as cancelled the jobs `user` queued on `artifact` that have not
 /// started, in the caller's transaction: a revocation and a downgrade to
 /// viewer take them (decision 0060 rule 15), since that user may no longer
-/// enqueue there. A running job ends normally. Each cancelled job is a job
-/// change, written to the user's feed only while it is still a member.
+/// enqueue there. It is the state change of the user's own cancel; a job not
+/// yet started holds no unsettled attempt, since an attempt's job leaves
+/// `running` only once it settles (decision 0057 rule 11). A running job ends
+/// normally, and if it becomes due again the claim ends it (see [`claim`]).
+/// Each cancelled job is a job change, written to the user's feed only while
+/// it is still a member.
 pub(super) fn cancel_for_access(
     transaction: &Transaction<'_>,
     artifact: &ArtifactId,
@@ -496,6 +486,9 @@ struct Due {
     created_at: i64,
     /// Its profile name, set for a `run_profile` job.
     profile: Option<String>,
+    /// Whether the user who enqueued it may still enqueue on the artifact:
+    /// its owner, or a member with the editor role (decision 0060 rule 15).
+    may_enqueue: bool,
 }
 
 /// Which jobs a worker may take, for `?1` = now: a queued or retry-scheduled
@@ -521,8 +514,9 @@ const DUE: &str = concat!(
 );
 
 /// The columns [`next_due`] reads for one due job: identifier, state, cancel
-/// request, attempts, maximum attempts, creation time and profile.
-type DueRow = (String, String, bool, i64, i64, i64, Option<String>);
+/// request, attempts, maximum attempts, creation time, profile, and whether
+/// its user may still enqueue.
+type DueRow = (String, String, bool, i64, i64, i64, Option<String>, bool);
 
 /// The first due job after `after`, the position (creation time and identifier)
 /// of a job the claim already passed over, or the first due job when `after` is
@@ -536,7 +530,10 @@ fn next_due(
         .query_row(
             &format!(
                 "SELECT j.id, j.state, j.cancel_requested, j.attempts, j.max_attempts,
-                     j.created_at, j.profile {DUE}
+                     j.created_at, j.profile,
+                     a.owner = j.actor OR EXISTS (SELECT 1 FROM artifact_members m
+                         WHERE m.artifact_id = a.id AND m.user_id = j.actor
+                           AND m.role = 'editor') {DUE}
                    AND (?2 IS NULL OR j.created_at > ?2 OR (j.created_at = ?2 AND j.id > ?3))
                  ORDER BY j.created_at, j.id LIMIT 1"
             ),
@@ -554,13 +551,23 @@ fn next_due(
                     row.get(4)?,
                     row.get(5)?,
                     row.get(6)?,
+                    row.get(7)?,
                 ))
             },
         )
         .optional()
         .map_err(unavailable)?;
     row.map(
-        |(id, state, cancel_requested, attempts, max_attempts, created_at, profile)| {
+        |(
+            id,
+            state,
+            cancel_requested,
+            attempts,
+            max_attempts,
+            created_at,
+            profile,
+            may_enqueue,
+        )| {
             Ok(Due {
                 id: id.parse().map_err(corrupt)?,
                 running: state == JobState::Running.as_str(),
@@ -569,6 +576,7 @@ fn next_due(
                 max_attempts,
                 created_at,
                 profile,
+                may_enqueue,
             })
         },
     )
@@ -628,7 +636,11 @@ fn claim(transaction: &Transaction<'_>, claim: JobClaim<'_>) -> Result<Claim, Jo
     let mut after: Option<(i64, JobId)> = None;
     // Each pass returns, ends a job, or moves the cursor past a job it leaves queued.
     while let Some(due) = next_due(transaction, claim.now, after.as_ref())? {
-        if due.running && due.cancel_requested {
+        // Decision 0060 rule 15: no new attempt starts for a user who may no
+        // longer enqueue on the artifact. A job released, scheduled for a
+        // retry or left with an expired lease after a revocation or a
+        // downgrade to viewer ends cancelled here, without an attempt.
+        if (due.running && due.cancel_requested) || !due.may_enqueue {
             // The worker that was asked to stop is gone; nothing is left to run.
             end(transaction, &due.id, JobState::Cancelled, None, claim.now)?;
             record_job_change(transaction, &due.id)?;

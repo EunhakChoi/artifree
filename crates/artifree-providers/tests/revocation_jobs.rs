@@ -6,17 +6,21 @@
 
 mod common;
 
+use std::collections::BTreeMap;
+
 use artifree_domain::SourceRevision;
 use artifree_domain::access::{AccessVersion, Role};
 use artifree_domain::change::ChangeSequence;
 use artifree_domain::identity::{ActorId, ArtifactId, UnixMillis, UserLabel};
-use artifree_domain::job::{JobId, JobKind, JobState, WorkerId};
+use artifree_domain::job::{JobFailure, JobId, JobKind, JobState, WorkerId};
 use artifree_ports::access_store::{AccessChange, AccessRequest, AccessStore};
 use artifree_ports::artifact_store::{
     ArtifactStore, ChangeKind, CommitReceipt, RequestFingerprint, RequestIdentity, RevisionCommit,
     StoreError,
 };
-use artifree_ports::job_store::{JobCancel, JobClaim, JobStore, JobStoreError, NewJob};
+use artifree_ports::job_store::{
+    Claim, JobCancel, JobClaim, JobStore, JobStoreError, NewJob, Retry,
+};
 use artifree_ports::user_store::{NewUser, UserStore};
 use artifree_providers::storage::SqliteStore;
 use artifree_providers::tokens::SqliteTokenStore;
@@ -115,6 +119,16 @@ impl Fixture {
             })?
             .job
             .id)
+    }
+
+    fn claim(&self, now: i64) -> Result<Claim, JobStoreError> {
+        self.store.claim_job(JobClaim {
+            worker: &parsed::<WorkerId>("worker-one"),
+            now: UnixMillis(now),
+            lease_ms: 1_000,
+            known_profiles: &[],
+            execution: None,
+        })
     }
 
     fn state(&self, job: &JobId) -> Result<JobState, Box<dyn std::error::Error>> {
@@ -274,5 +288,49 @@ fn a_members_commit_replays_only_while_its_role_allows_a_commit() -> TestResult 
         f.store.replay_receipt(identity),
         Err(StoreError::NotFound)
     ));
+    Ok(())
+}
+
+/// Whatever puts a job back in line after the access change (a retry, an
+/// expired lease) meets the claim, which starts no attempt for a user who
+/// may no longer enqueue on the artifact.
+#[test]
+fn no_new_attempt_starts_for_a_user_who_may_no_longer_enqueue() -> TestResult {
+    let f = Fixture::new()?;
+    let id = &f.shared.artifact.id;
+    let retried = f.enqueue(&f.ana, id, "ana-retried")?;
+    let lease = f.claim(2)?.claimed.ok_or("nothing was claimed")?.lease;
+    let expired = f.enqueue(&f.ben, id, "ben-expired")?;
+    assert!(f.claim(3)?.claimed.is_some(), "Ben's job runs");
+    f.access(id, &f.ana, AccessChange::Revoke)?;
+    f.access(id, &f.ben, AccessChange::Grant(Role::Viewer))?;
+    let scheduled = f.store.fail_job(
+        &lease,
+        JobFailure::StorageUnavailable,
+        Retry::At(UnixMillis(4)),
+        UnixMillis(4),
+    )?;
+    assert_eq!(scheduled.state, JobState::RetryScheduled);
+    // Past both leases: Ana's retry and Ben's expired run are due again.
+    let claim = f.claim(5_000)?;
+    assert!(claim.claimed.is_none(), "neither runs again");
+    let ended: BTreeMap<JobId, JobState> = claim
+        .settled
+        .into_iter()
+        .map(|job| (job.id, job.state))
+        .collect();
+    assert_eq!(
+        ended,
+        BTreeMap::from([
+            (retried, JobState::Cancelled),
+            (expired, JobState::Cancelled)
+        ])
+    );
+    // The control: the owner's job is still taken.
+    let owners = f.enqueue(&f.owner, id, "owner-queued")?;
+    assert_eq!(
+        f.claim(5_001)?.claimed.map(|claimed| claimed.job.id),
+        Some(owners)
+    );
     Ok(())
 }

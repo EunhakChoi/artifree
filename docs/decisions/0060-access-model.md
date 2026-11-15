@@ -414,7 +414,11 @@ open streams after an access change.
 **S02d1 (implemented).** A revocation, and a role change from editor to
 viewer, end as cancelled the jobs that user queued on the artifact and that
 have not started (queued or scheduled for a retry), in the transaction of the
-access change; a running job ends normally (rule 15). Each cancel is a job
+access change; a running job ends normally (rule 15). Whatever puts a job back in line
+afterwards (its worker releasing it, a retry, an expired lease) meets the
+claim, which ends as cancelled, without an attempt, a due job whose user is
+neither the owner nor an editor of the artifact, so no new attempt starts for
+a user who may no longer enqueue there. Each cancel is a job
 change, which reaches the user's feed only while it is still a member, so
 for a revoked user the revocation stays the last row. The owner of an
 artifact cancels a member's job on it (rules 3 and 11), and the answer
