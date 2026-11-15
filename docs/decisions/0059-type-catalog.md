@@ -158,10 +158,12 @@ repository. Where this record departs from the observations, it says so.
      changed outside the server.
 7. **A pin the server does not know.** A server started on data that names a
    type or release it does not know serves the artifact as before: reads,
-   previews and listings. It refuses every commit to that artifact, and a
-   duplicate of it, with `409 type_release_unknown`. Since releases are
-   append-only (rule 3), this happens only after a downgrade, which 0027
-   already discourages.
+   previews and listings. It refuses a new commit to that artifact, and a
+   new duplicate of it, with `409 type_release_unknown`. A retry whose
+   request key already has a stored result replays that result first, as
+   every commit and create does today, so a client whose response was lost
+   still learns what happened. Since releases are append-only (rule 3), this
+   happens only after a downgrade, which 0027 already discourages.
 8. **The type is visible.** Every surface that shows an artifact shows
    `type: {id, release}`, or `null` for an untyped artifact: the artifact
    reads, the listings, the change feed's artifact rows, MCP and the CLI.
