@@ -162,6 +162,13 @@ export async function verifyManifest(packageDir) {
     assert.equal(bytes.length, file.size, `Size mismatch: ${file.path}`);
     assert.equal(sha256(bytes), file.sha256, `SHA-256 mismatch: ${file.path}`);
   }
+  // An operator runs the root packaging script directly (docs/execution-host.md),
+  // so it must unpack executable; Windows records no such bit.
+  if (process.platform !== 'win32')
+    for (const path of hostFiles.filter((name) => name.endsWith('.sh'))) {
+      const { mode } = await stat(join(packageDir, ...path.split('/')));
+      assert.equal(mode & 0o111, 0o111, `${path} is not executable.`);
+    }
   await verifyLicenseBundle(packageDir);
   return manifest;
 }
@@ -261,8 +268,8 @@ function expectEntryFailure({ binary, env, cwd }, args, status, words) {
 }
 
 /**
- * Checks the unpacked server's execution entry points against its target
- * (decision 0058, R03fb) and returns the build profiles it serves. Every
+ * Checks the unpacked server's execution entry points against the build
+ * profiles its target knows (decision 0058, R03fb) and returns them. Every
  * server reports the manifest's version. The x86_64 Linux server serves
  * `react-v1`'s entry points and fails the fixture's identity as unknown, and
  * its version is one the packaging script accepts as a root's version, so
@@ -275,18 +282,31 @@ export function verifyExecutionEntryPoints({ binary, env, cwd, manifest }) {
     env,
     cwd,
     encoding: 'utf8',
+    input: '',
+    timeout: 30_000,
   });
+  assert.equal(
+    version.error,
+    undefined,
+    `--version did not run: ${version.error}`,
+  );
   assert.equal(version.status, 0, `--version failed: ${version.stderr}`);
   assert.equal(
     version.stdout.trim(),
     `artifree-server ${manifest.version}`,
     'The server does not report the manifest version.',
   );
-  if (TARGET_LAYOUT[manifest.target].hostFiles.length === 0) {
+  const profiles = TARGET_LAYOUT[manifest.target].buildProfiles;
+  if (profiles.length === 0) {
     for (const args of ENTRY_POINTS)
       expectEntryFailure(run, args, 2, 'knows no execution profile');
     return [];
   }
+  assert.deepEqual(
+    profiles,
+    ['react-v1'],
+    'No check exists for these profiles.',
+  );
   assert.match(
     manifest.version,
     ROOT_VERSION,
@@ -302,7 +322,7 @@ export function verifyExecutionEntryPoints({ binary, env, cwd, manifest }) {
     70,
     'the input path is not absolute',
   );
-  return ['react-v1'];
+  return profiles;
 }
 
 /**

@@ -144,7 +144,7 @@ change system settings, so read each step first.
    the web workspace says so too:
 
    ```sh
-   sudo cat /var/lib/artifree/data/access-token > ~/artifree-token && chmod 600 ~/artifree-token
+   sudo install -o "$USER" -m 0600 /var/lib/artifree/data/access-token ~/artifree-token
    curl --fail -H "Authorization: Bearer $(cat ~/artifree-token)" http://127.0.0.1:7410/v1/background
    ```
 
@@ -206,7 +206,8 @@ release has upgraded is refused by the old one, so restore the backup first.
 
 The `Supported host (Ubuntu 24.04 x86_64)` job (`scripts/verify-supported-host.sh`)
 downloads the `linux-x64` archive that the `Release archive` job built, and on a
-fresh runner without a checkout of the code it follows steps 1 to 7, with the
+fresh runner, with a sparse checkout of `scripts/` and the bundler template and
+no build, it follows steps 1 to 7, with the
 archive's script and units unchanged. It then creates an artifact from the
 bundler template with the packaged CLI, builds revision 1 with `react-v1`,
 requires the job to succeed with three files, the head status to be `built`,

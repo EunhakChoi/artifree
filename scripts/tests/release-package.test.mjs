@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+  chmod,
   copyFile,
   mkdir,
   mkdtemp,
@@ -9,6 +10,7 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
@@ -18,7 +20,7 @@ import {
   buildReleasePackage,
   hostTarget,
 } from '../package-release.mjs';
-import { sha256 } from '../lib/release-layout.mjs';
+import { ROOT_VERSION, sha256 } from '../lib/release-layout.mjs';
 import { elfWithNeeds } from './fixtures/elf.mjs';
 import { licenseTextPath } from '../lib/license-bundle.mjs';
 import { buildServer } from '../lib/server-process.mjs';
@@ -446,6 +448,15 @@ test(
       'the lock list is data',
     );
 
+    const script = join(dir, 'tools', 'package-root.sh');
+    await chmod(script, 0o644);
+    await assert.rejects(
+      verifyManifest(dir),
+      /tools\/package-root.sh is not executable/,
+    );
+    await chmod(script, 0o755);
+    await verifyManifest(dir);
+
     await rm(join(dir, 'tools', 'react-v1.lock'));
     await rewriteManifest(dir, (manifest) => {
       manifest.files = manifest.files.filter(
@@ -549,6 +560,44 @@ test(
     assert.throws(
       () => check(notARootVersion, 'linux-x64', '1.2'),
       /cannot name an execution tool root/,
+    );
+  },
+);
+
+test(
+  'the root-version pattern accepts exactly what the packaging script accepts',
+  { skip: process.platform !== 'linux' && 'the script is a bash script' },
+  () => {
+    const versions = [
+      '0.1.0',
+      '10.20.30',
+      '1.2.3-rc.1',
+      '1.2.3+build.5',
+      '1.2.3-a-b',
+      '1.2',
+      '1.2.3.4',
+      'v1.2.3',
+      '1.2.3-',
+      '1.2.3/x',
+      '1.2.3-rc_1',
+      '',
+    ];
+    // Sourcing the script only defines its functions; its main does not run.
+    const run = spawnSync(
+      'bash',
+      [
+        '-c',
+        'source "$1"; shift; for v in "$@"; do if is_version "$v"; then echo y; else echo n; fi; done',
+        'check',
+        join(root, 'scripts', 'tools', 'package-root.sh'),
+        ...versions,
+      ],
+      { encoding: 'utf8' },
+    );
+    assert.equal(run.status, 0, run.stderr);
+    assert.deepEqual(
+      run.stdout.trim().split('\n'),
+      versions.map((v) => (ROOT_VERSION.test(v) ? 'y' : 'n')),
     );
   },
 );

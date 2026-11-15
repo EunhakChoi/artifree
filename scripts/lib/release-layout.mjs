@@ -13,13 +13,16 @@ import { createHash } from 'node:crypto';
  * for an execution tool root and its lock list (rule 19), and the systemd
  * units of the server and of the execution worker (0056 rule 8), copied from
  * `scripts/tools/`. Only the x86_64 Linux server knows a build profile, so
- * only its package ships them; see docs/execution-host.md.
+ * only its package ships them; see docs/execution-host.md. `buildProfiles`
+ * are the build profiles the target's release server knows (decision 0058,
+ * R03fa), which the clean-install check requires of the unpacked server.
  */
 export const TARGET_LAYOUT = {
   'linux-x64': {
     platform: 'linux',
     arch: 'x64',
     executable: 'artifree-server',
+    buildProfiles: ['react-v1'],
     hostFiles: [
       'tools/artifree-execution.service',
       'tools/artifree.service',
@@ -31,13 +34,15 @@ export const TARGET_LAYOUT = {
     platform: 'win32',
     arch: 'x64',
     executable: 'artifree-server.exe',
+    buildProfiles: [],
     hostFiles: [],
   },
 };
 
 /**
  * A package version that may name an execution tool root, as the packaging
- * script accepts it (`is_version` in `scripts/tools/package-root.sh`).
+ * script accepts it (`is_version` in `scripts/tools/package-root.sh`; a
+ * tooling test runs that function against this pattern).
  */
 export const ROOT_VERSION = /^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$/;
 

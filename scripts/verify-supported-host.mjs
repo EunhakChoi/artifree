@@ -28,8 +28,12 @@ const TEMPLATE = [
 /** The files a build of the template publishes (decision 0058 rule 8). */
 const PUBLISHED = ['app.css', 'app.js', 'index.html'];
 
-/** Calls `probe` every 500 ms until it returns a value other than undefined. */
-async function until(what, patienceMs, probe) {
+/**
+ * Calls `probe` every 500 ms until it returns a value other than undefined.
+ * A probe that throws is tried again only with `retryErrors` (a server that
+ * is not up yet); otherwise the error ends the check at once.
+ */
+async function until(what, patienceMs, probe, { retryErrors = false } = {}) {
   const deadline = Date.now() + patienceMs;
   let last;
   for (;;) {
@@ -37,6 +41,7 @@ async function until(what, patienceMs, probe) {
       const value = await probe();
       if (value !== undefined) return value;
     } catch (error) {
+      if (!retryErrors) throw error;
       last = error;
     }
     if (Date.now() > deadline)
@@ -70,10 +75,10 @@ async function main() {
     ARTIFREE_TOKEN_FILE: tokenFile,
   };
 
-  await until('The server answering /healthz', 60_000, async () => {
-    const health = await fetch(`${server}/healthz`);
-    return health.status === 200 ? true : undefined;
-  });
+  // The shell script already waited for /healthz; this only fails fast when
+  // the server went away meanwhile.
+  const health = await fetch(`${server}/healthz`);
+  assert.equal(health.status, 200, 'GET /healthz');
   const token = (await readFile(tokenFile, 'utf8')).trim();
   // The execution worker records itself as it looks for work; the server
   // reads that from the database the two units share (decision 0058 rule 20).
@@ -160,8 +165,10 @@ async function main() {
     // The template's label and React's own code both reach the bundle.
     assert.match(bundle, /Clicks/);
     assert.match(bundle, /createRoot|react-dom/);
-    const style = await fetch(new URL('app.css', entry));
-    assert.equal(style.status, 200, 'the style sheet');
+    for (const name of PUBLISHED) {
+      const file = await fetch(new URL(name, entry));
+      assert.equal(file.status, 200, `the build's ${name}`);
+    }
     console.log(
       JSON.stringify({
         artifact: artifactId,
