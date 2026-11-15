@@ -10,7 +10,7 @@ R03cc (build tickets, the `/b/` route and the head status, below the
 wire), R03cda (the execution readiness, schema 16), R03cdb (the
 claim deadline), R03da (the public kind, contract 0.30.0) and R03db
 (build tickets and the head status on the wire, contract 0.31.0) are
-implemented, R03e and R03f are not**.
+implemented, R03ea, R03eb and R03f are not**.
 Roadmap: R03.
 
 > **Note, 2026-11-14 (slices).** R03b is split into R03ba, R03bb and R03bc,
@@ -707,6 +707,58 @@ Roadmap: R03.
 > - The web request gate still knows only the source preview route; the
 >   web's build action, status and diagnostics are R03e.
 
+> **Note, 2026-11-15 (R03e split).** R03e is split into R03ea, the build
+> in the Jobs tab, and R03eb, the build preview. Each changes the web only,
+> on the calls R03da and R03db put on the wire, and each passes the
+> component tests and the Chromium and Firefox smoke that rule 22 asks of
+> R03e. R03ea comes first, since the build preview names a build that only
+> the tab asks for. This note fixes what rule 14, rule 16 and the table
+> leave open for the web; it changes no numbered rule, and in rule 22 and
+> the earlier notes R03e now means both slices.
+>
+> - **R03ea, the build in the Jobs tab.**
+>   - The tab gains "Build revision N" beside "Verify revision N", for the
+>     revision the page shows. It asks for a `run_profile` job of `react-v1`
+>     with the press rules of 0055 rule 14: a new request key for each
+>     press, the same key for a retry of a lost answer, and its outcome
+>     shown in place.
+>   - Above the list, the tab shows the head status of rule 16 from
+>     `GET /v1/artifacts/{id}/builds/react-v1`: built, pending, failed with
+>     the failure in words and the diagnostics, or none; and the latest
+>     build's revision when it is not the head. The status is read when
+>     the tab opens and with the list, as 0055 rule 15 reads it again.
+>   - A build row of the list shows its file and byte counts once it
+>     succeeded, and its diagnostics once it failed with some.
+>   - Diagnostics are shown as plain text, each with its path, line and
+>     column when it has a location; they come from the bundler and can
+>     quote the artifact's source, so they are never rendered as markup or
+>     links.
+>   - `422 profile_unknown`, the answer of every release build until R03f,
+>     is shown as such: the status says that this server cannot build the
+>     profile, and a press of "Build revision N" shows the refusal with its
+>     code.
+>   - Proven by component tests of the status, the build rows and the
+>     diagnostics. The smoke runs against a release build, where the status
+>     and the press answer `profile_unknown`; since no smoke host runs a
+>     profile, it gives the tab the pending and failed answers by
+>     intercepting the status and the enqueue in the browser.
+> - **R03eb, the build preview.**
+>   - The page's preview gains a choice between the revision's files and
+>     its build. The build choice previews the shown revision's build when
+>     it has one; otherwise it previews the latest build with a notice
+>     that names that build's revision and the shown revision's status
+>     (pending, failed or none), so a failed or newer save never hides the
+>     last good build (rule 15). With no build at all, it says so and
+>     issues no ticket.
+>   - The web's request gate learns the build preview route as a read, as
+>     it knows the source preview route.
+>   - `profile_unknown` is shown in place of the build choice's preview.
+>   - Proven by component tests of the choice and the notice. The smoke
+>     proves the choice and the refusal on a release build, and the notice
+>     with an intercepted status; a successful build and its `/b/` preview
+>     stay proven by component tests and by the enforcement job at the
+>     HTTP level, as the table says.
+
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),
 > [0057](0057-connecting-execution-to-jobs.md) (the `run_profile` kind and
@@ -979,7 +1031,8 @@ stands.
 | R03cdb  | Rule 20's deadline, after R03cda: every worker's claim loop ends a known build profile's queued job with no attempt row, outside the trash and of an enabled actor, ten minutes after its enqueue as `execution_unavailable` while no execution worker is ready.                                                                                                                                                                               | Tests on any host with the injected clock for the deadline's edge, a ready worker, a job with an attempt row, a job in the trash, a disabled user's job, a profile that is not a build profile, an execution worker's loop, a job claimed first, a worker row seen after now and a worker's start-up wait; the enforcement job unchanged.                                  |
 | R03da   | Rule 17 and the wire half of 18: the public kind, `profile`, `profile_unknown`, the new failures, the build counts and the diagnostics on the job reads, contract 0.30.0, in the API, MCP, the client and the CLI.                                                                                                                                                                                                                             | Contract, API, MCP, client and CLI tests, including refusals and the open-job bound; web component tests and Chromium and Firefox smoke for the new names.                                                                                                                                                                                                                 |
 | R03db   | The wire half of rules 14 and 16: the build preview route and the head status read, contract 0.31.0, in the API, MCP, the client and the CLI.                                                                                                                                                                                                                                                                                                  | Contract, HTTP, MCP, client and CLI tests for both calls and their refusals.                                                                                                                                                                                                                                                                                               |
-| R03e    | The web: a build action, head status and diagnostics, and the build preview with its "latest" notice.                                                                                                                                                                                                                                                                                                                                          | Component tests, and Chromium and Firefox smoke for the request, the pending and failed states and the refusal. No smoke host runs a profile, so a successful build and its `/b/` preview are proven by component tests and by the enforcement job at the HTTP level.                                                                                                      |
+| R03ea   | The build in the Jobs tab: the build action, the head status and its diagnostics, and the build rows, after the R03e split note.                                                                                                                                                                                                                                                                                                               | Component tests, and Chromium and Firefox smoke for the request, the pending and failed states and the refusal.                                                                                                                                                                                                                                                            |
+| R03eb   | The build preview: the choice between files and build, and the "latest" notice, after R03ea.                                                                                                                                                                                                                                                                                                                                                   | Component tests, and Chromium and Firefox smoke for the choice, the notice and the refusal. No smoke host runs a profile, so a successful build and its `/b/` preview are proven by component tests and by the enforcement job at the HTTP level.                                                                                                                          |
 | R03f    | Rules 5 and 21: the release build for x86_64 Linux compiles the launch path and knows `react-v1`, and the operator documentation and the supported-host statement.                                                                                                                                                                                                                                                                             | Release-archive and clean-install checks of the launch path; the enforcement job runs the release binary's worker; review of the documentation.                                                                                                                                                                                                                            |
 
 ### What a slice still has to settle
