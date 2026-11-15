@@ -192,8 +192,15 @@ export function learnFrom(state: Knowledge, learned: Learned): Knowledge {
       // its artifact: the workspace leaves its state as it is (decision 0055,
       // rule 11), as for a data change.
       if (change === 'job_changed') return state;
-      // A kind added after this client may change anything about it.
-      if (change === 'unknown')
+      // A kind added after this client may change anything about it. A change
+      // of who may read the artifact keeps its versions but may change what
+      // this user reaches of it, so it is read again (decision 0060 rule 14).
+      if (
+        change === 'unknown' ||
+        change === 'access_granted' ||
+        change === 'access_changed' ||
+        change === 'access_revoked'
+      )
         return {
           ...state,
           news: state.news + 1,

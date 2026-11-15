@@ -807,8 +807,11 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<(), StoreError> {
     // after the commit or the rollback. Versions 8 to 14 hold job rows that other
     // tables reference, and schema 15 rebuilds `jobs` again (decision 0058 rule 9);
     // deferring the checks is not enough, because DROP TABLE's implicit delete
-    // leaves a deferred violation that fails the commit.
-    let relax = enforced && (8..15).contains(&version);
+    // leaves a deferred violation that fails the commit. Schema 19 rebuilds
+    // `changes` (decision 0060, slice S02c): with the checks on, a row an older
+    // file holds whose foreign key does not resolve would stop the copy, though
+    // the rebuild adds no broken key; `newly_broken` checks that after the steps.
+    let relax = enforced && (8..19).contains(&version);
     if relax {
         connection
             .pragma_update(None, "foreign_keys", false)

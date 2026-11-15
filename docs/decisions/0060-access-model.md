@@ -389,17 +389,23 @@ feed of the owner and of every current member, each with its own
 `actor_seq`; while the artifact is in the trash only the owner's feed gets
 rows, except the move into the trash, which every member gets as its last
 row of the artifact (rule 13). A data change and a job change stay in the
-feed of the user whose space or job it is. Schema 19 rebuilds the change
+feed of the user whose space or job it is; a job of a revoked member keeps
+running (S02b) but writes no more rows, so the revocation stays that user's
+last row. Schema 19 rebuilds the change
 table, keeping every row and number, for the new kinds `access_granted`,
 `access_changed` and `access_revoked` (rule 14): the store appends one in
 the transaction of each access change that changes something, to the owner
 and every member after the change and, for a revocation, to the revoked
-user, whose last row of the artifact it is. Contract 0.34.0 adds the three
-kinds to the wire `ChangeKind`; the TypeScript client knows them, and the
-web workspace, which has no sharing yet (S02h), treats them as a change that
-names the artifact's current revision. Behavioural tests over a real
-database (`crates/artifree-providers/tests/access_feed.rs`) fail when each
-guard is broken, except the trash branch of the fan-out: a purge deletes the
-member records before it records `purged`, so no request observes that
-branch. No route makes these rows reachable before S02e, which also wakes
+user, whose last row of the artifact it is. The upgrade to schema 19 runs
+with foreign keys off, as the job rebuilds do (decision 0057 rule 14), so a
+row an older file holds whose key does not resolve is kept, and the step may
+break no key that was whole. Contract 0.34.0 adds the three kinds to the
+wire `ChangeKind`; the TypeScript client knows them, and the web workspace,
+which has no sharing yet (S02h), takes each as news of the artifact to read
+again, as it does a kind it does not know. Behavioural tests over a real
+database (`crates/artifree-providers/tests/access_feed.rs`) and of the web
+reducer (`scripts/tests/access-change-reducer.test.mjs`) fail when each
+guard is broken. A purge deletes the member records before it records
+`purged`, so no request observes the trash branch of the fan-out; a unit
+test of the store asks it directly. No route makes these rows reachable before S02e, which also wakes
 open streams after an access change.

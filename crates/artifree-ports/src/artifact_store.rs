@@ -456,6 +456,47 @@ pub enum ChangeKind {
     AccessRevoked,
 }
 
+impl ChangeKind {
+    /// Every kind, in declaration order.
+    const ALL: [Self; 11] = [
+        Self::Created,
+        Self::Revised,
+        Self::MetadataUpdated,
+        Self::Deleted,
+        Self::Recovered,
+        Self::Purged,
+        Self::DataChanged,
+        Self::JobChanged,
+        Self::AccessGranted,
+        Self::AccessChanged,
+        Self::AccessRevoked,
+    ];
+
+    /// The kind's stable snake-case name, the one a store records.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Revised => "revised",
+            Self::MetadataUpdated => "metadata_updated",
+            Self::Deleted => "deleted",
+            Self::Recovered => "recovered",
+            Self::Purged => "purged",
+            Self::DataChanged => "data_changed",
+            Self::JobChanged => "job_changed",
+            Self::AccessGranted => "access_granted",
+            Self::AccessChanged => "access_changed",
+            Self::AccessRevoked => "access_revoked",
+        }
+    }
+
+    /// The kind that [`ChangeKind::as_str`] names `name`, if any.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == name)
+    }
+}
+
 /// One commit as recorded in the change feed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangeRecord {

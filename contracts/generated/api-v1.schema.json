@@ -635,12 +635,12 @@
         },
         {
           "const": "access_granted",
-          "description": "The artifact's owner made a user a member (decision 0060 rule 14).\nThe owner, every member and that user receive it; read the artifact\nand its member list again. The source and metadata did not change.",
+          "description": "The artifact's owner made a user a member (decision 0060 rule 14).\nThe owner, every member and that user receive it; read the artifact\nagain. The source and metadata did not change.",
           "type": "string"
         },
         {
           "const": "access_changed",
-          "description": "The owner changed a member's role. The owner and every member receive\nit; read the artifact and its member list again.",
+          "description": "The owner changed a member's role. The owner and every member receive\nit; read the artifact again.",
           "type": "string"
         },
         {

@@ -837,20 +837,8 @@ impl ArtifactStore for SqliteStore {
             changes.push(ChangeRecord {
                 sequence: stored_sequence(sequence)?,
                 artifact: artifact.parse().map_err(corrupt)?,
-                kind: match kind.as_str() {
-                    "created" => ChangeKind::Created,
-                    "revised" => ChangeKind::Revised,
-                    "metadata_updated" => ChangeKind::MetadataUpdated,
-                    "deleted" => ChangeKind::Deleted,
-                    "recovered" => ChangeKind::Recovered,
-                    "purged" => ChangeKind::Purged,
-                    "data_changed" => ChangeKind::DataChanged,
-                    "job_changed" => ChangeKind::JobChanged,
-                    "access_granted" => ChangeKind::AccessGranted,
-                    "access_changed" => ChangeKind::AccessChanged,
-                    "access_revoked" => ChangeKind::AccessRevoked,
-                    other => return Err(corrupt(format!("change kind {other}"))),
-                },
+                kind: ChangeKind::parse(&kind)
+                    .ok_or_else(|| corrupt(format!("change kind {kind}")))?,
                 revision: stored_revision(revision)?,
                 metadata_revision: stored_metadata(metadata)?,
                 data_version: data_version
@@ -1300,7 +1288,7 @@ fn readers(
     let mut readers = vec![owner];
     if !trashed || entering_trash {
         let members: Vec<String> = transaction
-            .prepare(
+            .prepare_cached(
                 "SELECT user_id FROM artifact_members
                  WHERE artifact_id = ?1 AND role IS NOT NULL ORDER BY user_id",
             )
@@ -1398,7 +1386,13 @@ fn record_job_change(transaction: &Transaction<'_>, job: &JobId) -> Result<(), S
                     "SELECT j.actor, j.artifact_id, a.current_revision, a.metadata_revision,
                          a.deleted_at IS NOT NULL OR a.purged_at IS NOT NULL OR NOT ",
                     public_job!(),
-                    "
+                    // A revoked member's job keeps running (decision 0060,
+                    // slice S02b) but its revocation ends the member's feed of
+                    // the artifact (rule 14), so its job changes are not written.
+                    " OR (a.owner <> j.actor AND NOT EXISTS (
+                         SELECT 1 FROM artifact_members m
+                         WHERE m.artifact_id = a.id AND m.user_id = j.actor
+                           AND m.role IS NOT NULL))
                      FROM jobs j JOIN artifacts a ON a.id = j.artifact_id
                      WHERE j.id = ?1"
                 ),
@@ -1452,24 +1446,7 @@ fn append_change(
     (revision, metadata): Position,
     now: UnixMillis,
 ) -> Result<(), StoreError> {
-    let kind = match kind {
-        ChangeKind::Created => "created",
-        ChangeKind::Revised => "revised",
-        ChangeKind::MetadataUpdated => "metadata_updated",
-        ChangeKind::Deleted => "deleted",
-        ChangeKind::Recovered => "recovered",
-        ChangeKind::Purged => "purged",
-        ChangeKind::DataChanged => "data_changed",
-        ChangeKind::JobChanged => "job_changed",
-        ChangeKind::AccessGranted => "access_granted",
-        ChangeKind::AccessChanged => "access_changed",
-        ChangeKind::AccessRevoked => "access_revoked",
-        _ => {
-            return Err(StoreError::Unavailable(
-                "this store cannot record that change".into(),
-            ));
-        }
-    };
+    let kind = kind.as_str();
     let (data_version, job_id) = match detail {
         ChangeDetail::None => (None, None),
         ChangeDetail::Data(version) => (Some(i64::try_from(version.0).map_err(corrupt)?), None),
@@ -1934,6 +1911,36 @@ mod tests {
         fn drop(&mut self) {
             drop(std::fs::remove_dir_all(&self.directory));
         }
+    }
+
+    /// In the trash only the move there reaches a member (decision 0060 rule
+    /// 13); any other change of the artifact reaches the owner alone. No
+    /// operation the store offers records such a change while members hold a
+    /// role (the purge erases them first), so the readers are asked directly.
+    #[test]
+    fn in_the_trash_only_the_move_there_reaches_the_members() -> TestResult {
+        let fixture = Trashed::new("readers")?;
+        let mut connection = fixture.store.connect()?;
+        let member = format!("u-{}", "a".repeat(32));
+        connection.execute(
+            "INSERT INTO users (id, label, created_at) VALUES (?1, 'Ana', '2026-11-16T00:00:00Z')",
+            [&member],
+        )?;
+        connection.execute(
+            "INSERT INTO artifact_members (artifact_id, user_id, role, access_generation)
+             VALUES (?1, ?2, 'viewer', 1)",
+            [fixture.id.as_str(), member.as_str()],
+        )?;
+        let transaction = connection.transaction()?;
+        assert_eq!(
+            readers(&transaction, &fixture.id, true)?,
+            [fixture.owner.as_str().to_owned(), member]
+        );
+        assert_eq!(
+            readers(&transaction, &fixture.id, false)?,
+            [fixture.owner.as_str().to_owned()]
+        );
+        Ok(())
     }
 
     /// The shared key space is only as wide as `KEY_TABLES`. A table that keeps

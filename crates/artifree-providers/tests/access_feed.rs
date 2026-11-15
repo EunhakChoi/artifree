@@ -10,7 +10,7 @@ use artifree_domain::access::{AccessVersion, Role};
 use artifree_domain::change::ChangeSequence;
 use artifree_domain::data::{DataChange, DataPath, DataValue};
 use artifree_domain::identity::{ActorId, UnixMillis, UserLabel};
-use artifree_domain::job::JobKind;
+use artifree_domain::job::{JobKind, WorkerId};
 use artifree_domain::{AppDataVersion, MetadataRevision, SourceRevision};
 use artifree_ports::access_store::{AccessChange, AccessRequest, AccessStore};
 use artifree_ports::artifact_store::{
@@ -18,7 +18,7 @@ use artifree_ports::artifact_store::{
     RequestIdentity, RevisionCommit,
 };
 use artifree_ports::data_store::{DataStore, DataWrite};
-use artifree_ports::job_store::{JobStore, NewJob};
+use artifree_ports::job_store::{JobClaim, JobStore, NewJob};
 use artifree_ports::user_store::{NewUser, UserStore};
 use artifree_providers::storage::SqliteStore;
 use artifree_providers::tokens::SqliteTokenStore;
@@ -102,6 +102,22 @@ impl Fixture {
             artifact: &self.created.artifact.id,
             base: SourceRevision(base),
             package: &package(&[("index.html", name), ("style.css", "h1{}")]),
+        })?;
+        Ok(())
+    }
+
+    fn enqueue(&self, by: &ActorId, name: &str) -> TestResult {
+        let job_key = key(name);
+        self.store.enqueue_job(NewJob {
+            request: RequestIdentity {
+                actor: by,
+                key: &job_key,
+                fingerprint: RequestFingerprint(digest(name)),
+            },
+            artifact: &self.created.artifact.id,
+            revision: SourceRevision(1),
+            kind: JobKind::VerifyRevision,
+            now: UnixMillis(1),
         })?;
         Ok(())
     }
@@ -254,18 +270,7 @@ fn a_members_own_data_and_jobs_reach_only_that_member() -> TestResult {
         },
         now: UnixMillis(1),
     })?;
-    let job_key = key("ana-job1");
-    f.store.enqueue_job(NewJob {
-        request: RequestIdentity {
-            actor: &f.ana,
-            key: &job_key,
-            fingerprint: RequestFingerprint(digest("job")),
-        },
-        artifact: &f.created.artifact.id,
-        revision: SourceRevision(1),
-        kind: JobKind::VerifyRevision,
-        now: UnixMillis(1),
-    })?;
+    f.enqueue(&f.ana, "ana-job1")?;
     assert_eq!(
         f.kinds(&f.ana)?,
         [AccessGranted, AccessGranted, DataChanged, JobChanged]
@@ -275,8 +280,34 @@ fn a_members_own_data_and_jobs_reach_only_that_member() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn a_revoked_members_running_job_writes_nothing_to_its_feed() -> TestResult {
+    let f = Fixture::new()?;
+    f.grant("grant-ana", &f.ana, Role::Editor)?;
+    f.enqueue(&f.ana, "ana-job1")?;
+    f.access("revoke-ana", &f.ana, AccessChange::Revoke)?;
+    let claim = f.store.claim_job(JobClaim {
+        worker: &parsed::<WorkerId>("worker-one"),
+        now: UnixMillis(2),
+        lease_ms: 1_000,
+        known_profiles: &[],
+        execution: None,
+    })?;
+    assert!(
+        claim.claimed.is_some(),
+        "the job of a revoked member still runs"
+    );
+    assert_eq!(
+        f.kinds(&f.ana)?,
+        [AccessGranted, JobChanged, AccessRevoked],
+        "the revocation stays the revoked user's last row of the artifact"
+    );
+    Ok(())
+}
+
 /// A version 18 file's change table checks the kinds it knew; the upgrade
-/// keeps every row with its numbers and accepts the access kinds.
+/// keeps every row with its numbers, also one whose job is gone, and accepts
+/// the access kinds.
 #[test]
 fn the_upgrade_to_schema_19_keeps_every_change_and_takes_access_rows() -> TestResult {
     let f = Fixture::new()?;
@@ -284,7 +315,8 @@ fn the_upgrade_to_schema_19_keeps_every_change_and_takes_access_rows() -> TestRe
     let before = f.feed(&f.owner)?;
     let path = database_in(f.dir.path());
     rusqlite::Connection::open(&path)?.execute_batch(
-        "CREATE TABLE changes_v18 (
+        "PRAGMA foreign_keys = OFF;
+        CREATE TABLE changes_v18 (
             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
             actor TEXT NOT NULL,
             actor_seq INTEGER NOT NULL CHECK (actor_seq >= 1),
@@ -297,24 +329,38 @@ fn the_upgrade_to_schema_19_keeps_every_change_and_takes_access_rows() -> TestRe
             data_version INTEGER,
             job_id TEXT,
             committed_at INTEGER NOT NULL,
-            UNIQUE (actor, actor_seq)
+            UNIQUE (actor, actor_seq),
+            FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision),
+            FOREIGN KEY (artifact_id, metadata_revision)
+                REFERENCES metadata_revisions (artifact_id, metadata_revision),
+            FOREIGN KEY (job_id) REFERENCES jobs (id)
         ) STRICT;
         INSERT INTO changes_v18 SELECT sequence, actor, actor_seq, artifact_id, kind, revision,
             metadata_revision, data_version, job_id, committed_at FROM changes;
         DROP TABLE changes;
         ALTER TABLE changes_v18 RENAME TO changes;
+        INSERT INTO changes (actor, actor_seq, artifact_id, kind, revision, metadata_revision,
+                job_id, committed_at)
+            SELECT actor, actor_seq + 1, artifact_id, 'job_changed', revision, metadata_revision,
+                'job_00000000000000000000000000000000', committed_at
+            FROM changes ORDER BY sequence DESC LIMIT 1;
+        UPDATE actor_feeds SET head = head + 1
+            WHERE actor = (SELECT actor FROM changes ORDER BY sequence DESC LIMIT 1);
         PRAGMA user_version = 18;",
     )?;
+    let orphan = before.last().map_or(0, |(sequence, _)| sequence + 1);
     let upgraded = Fixture {
         store: SqliteStore::open(&path)?,
         ..f
     };
     assert_eq!(common::user_version(&path)?, 19);
-    assert_eq!(upgraded.feed(&upgraded.owner)?, before);
+    let mut kept = before;
+    kept.push((orphan, JobChanged));
+    assert_eq!(upgraded.feed(&upgraded.owner)?, kept);
     upgraded.grant("grant-ana", &upgraded.ana, Role::Viewer)?;
     assert_eq!(
         upgraded.kinds(&upgraded.owner)?,
-        [Created, Revised, AccessGranted]
+        [Created, Revised, JobChanged, AccessGranted]
     );
     Ok(())
 }
