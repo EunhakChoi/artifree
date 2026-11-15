@@ -79,36 +79,38 @@ Pi's documentation; it has not been run as part of Artifree's checks.
 
 ## Tools
 
-| Tool                       | Arguments                                                                                                          | Result                                                    |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------- |
-| `list_artifacts`           | optional `q`, `sort`, `pinned`, `deleted`, `limit`, `page_token`                                                   | `{ artifacts, next_page_token? }`                         |
-| `get_artifact`             | `artifact_id`                                                                                                      | artifact with `current_revision`                          |
-| `create_artifact`          | `title`, `files`, `idempotency_key`                                                                                | `{ artifact, revision, replayed }`                        |
-| `save_revision`            | `artifact_id`, `base_revision`, `changes`, `idempotency_key`                                                       | `{ artifact, revision, replayed }`                        |
-| `edit_files`               | `artifact_id`, `base_revision`, `edits` (each with `expect`), `idempotency_key`                                    | `{ artifact, revision, replayed }`                        |
-| `restore_revision`         | `artifact_id`, `revision`, `base_revision`, `idempotency_key`                                                      | `{ artifact, revision, replayed }`                        |
-| `duplicate_artifact`       | `artifact_id`, `revision`, optional `title`, optional `copy_data`, optional `copy_assets`, `idempotency_key`       | `{ artifact, revision, copied, replayed }`                |
-| `update_artifact`          | `artifact_id`, `base_metadata_revision`, `title`, `pinned`, `deleted` (at least one), `idempotency_key`            | `{ artifact, replayed }`                                  |
-| `list_revisions`           | `artifact_id`                                                                                                      | `{ revisions }`, newest first                             |
-| `get_revision`             | `artifact_id`, `revision`                                                                                          | one revision manifest                                     |
-| `read_file`                | `artifact_id`, `revision`, `path`, optional `offset` and `length`                                                  | exact bytes as `utf8` or `base64`                         |
-| `create_preview`           | `artifact_id`, `revision`, optional `profile` (a build preview)                                                    | `{ url, revision, expires_at_ms }`                        |
-| `get_build_status`         | `artifact_id`, `profile`                                                                                           | `{ profile, head_revision, status, … }`                   |
-| `register_handoff_session` | `name`                                                                                                             | `{ session_id, session_secret }`                          |
-| `poll_handoffs`            | `session_id`, `session_secret`                                                                                     | `{ deliveries }`                                          |
-| `acknowledge_handoff`      | `session_id`, `session_secret`, `delivery_id`                                                                      | receipt state                                             |
-| `enqueue_job`              | `artifact_id`, `revision`, `kind` (`verify_revision` or `run_profile`), `profile` (builds only), `idempotency_key` | `{ job, replayed }`                                       |
-| `get_job`                  | `job_id`                                                                                                           | one job                                                   |
-| `list_jobs`                | optional `artifact_id`, `limit`, `page_token`                                                                      | `{ jobs, next_page_token? }`                              |
-| `cancel_job`               | `job_id`, `idempotency_key`                                                                                        | `{ job, replayed }`                                       |
-| `get_data`                 | `artifact_id`, optional `path`                                                                                     | `{ data_version, exists, value? }`                        |
-| `set_data`                 | `artifact_id`, `path`, `base_data_version`, `value` (JSON text), `idempotency_key`                                 | `{ data_version, changed, replayed }`                     |
-| `update_data`              | `artifact_id`, `path`, `base_data_version`, `patch` (JSON text), `idempotency_key`                                 | `{ data_version, changed, replayed }`                     |
-| `delete_data`              | `artifact_id`, `path`, `base_data_version`, `idempotency_key`                                                      | `{ data_version, changed, replayed }`                     |
-| `list_assets`              | `artifact_id`                                                                                                      | `{ asset_version, assets, bytes, max_assets, max_bytes }` |
-| `read_asset`               | `artifact_id`, `asset_id`                                                                                          | `{ asset_version, asset, content_base64 }`                |
-| `upload_asset`             | `artifact_id`, `base_asset_version`, `content_type`, `content_base64`, `idempotency_key`                           | `{ asset_version, asset, replayed }`                      |
-| `delete_asset`             | `artifact_id`, `asset_id`, `base_asset_version`, `idempotency_key`                                                 | `{ asset_id, asset_version, deleted, replayed }`          |
+| Tool                       | Arguments                                                                                                          | Result                                                           |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
+| `list_artifacts`           | optional `q`, `sort`, `pinned`, `deleted`, `limit`, `page_token`                                                   | `{ artifacts, next_page_token? }`                                |
+| `get_artifact`             | `artifact_id`                                                                                                      | artifact with `current_revision`                                 |
+| `create_artifact`          | `title`, `files` (optional with `type`), optional `type`, `idempotency_key`                                        | `{ artifact, revision, replayed }`                               |
+| `list_types`               | none                                                                                                               | `{ notice, types }`, each type's current release                 |
+| `get_type`                 | `type_id`, optional `release`, optional `path` (a reference file)                                                  | `{ notice, release, guide }` or `{ id, release, path, content }` |
+| `save_revision`            | `artifact_id`, `base_revision`, `changes`, `idempotency_key`                                                       | `{ artifact, revision, replayed }`                               |
+| `edit_files`               | `artifact_id`, `base_revision`, `edits` (each with `expect`), `idempotency_key`                                    | `{ artifact, revision, replayed }`                               |
+| `restore_revision`         | `artifact_id`, `revision`, `base_revision`, `idempotency_key`                                                      | `{ artifact, revision, replayed }`                               |
+| `duplicate_artifact`       | `artifact_id`, `revision`, optional `title`, optional `copy_data`, optional `copy_assets`, `idempotency_key`       | `{ artifact, revision, copied, replayed }`                       |
+| `update_artifact`          | `artifact_id`, `base_metadata_revision`, `title`, `pinned`, `deleted` (at least one), `idempotency_key`            | `{ artifact, replayed }`                                         |
+| `list_revisions`           | `artifact_id`                                                                                                      | `{ revisions }`, newest first                                    |
+| `get_revision`             | `artifact_id`, `revision`                                                                                          | one revision manifest                                            |
+| `read_file`                | `artifact_id`, `revision`, `path`, optional `offset` and `length`                                                  | exact bytes as `utf8` or `base64`                                |
+| `create_preview`           | `artifact_id`, `revision`, optional `profile` (a build preview)                                                    | `{ url, revision, expires_at_ms }`                               |
+| `get_build_status`         | `artifact_id`, `profile`                                                                                           | `{ profile, head_revision, status, … }`                          |
+| `register_handoff_session` | `name`                                                                                                             | `{ session_id, session_secret }`                                 |
+| `poll_handoffs`            | `session_id`, `session_secret`                                                                                     | `{ deliveries }`                                                 |
+| `acknowledge_handoff`      | `session_id`, `session_secret`, `delivery_id`                                                                      | receipt state                                                    |
+| `enqueue_job`              | `artifact_id`, `revision`, `kind` (`verify_revision` or `run_profile`), `profile` (builds only), `idempotency_key` | `{ job, replayed }`                                              |
+| `get_job`                  | `job_id`                                                                                                           | one job                                                          |
+| `list_jobs`                | optional `artifact_id`, `limit`, `page_token`                                                                      | `{ jobs, next_page_token? }`                                     |
+| `cancel_job`               | `job_id`, `idempotency_key`                                                                                        | `{ job, replayed }`                                              |
+| `get_data`                 | `artifact_id`, optional `path`                                                                                     | `{ data_version, exists, value? }`                               |
+| `set_data`                 | `artifact_id`, `path`, `base_data_version`, `value` (JSON text), `idempotency_key`                                 | `{ data_version, changed, replayed }`                            |
+| `update_data`              | `artifact_id`, `path`, `base_data_version`, `patch` (JSON text), `idempotency_key`                                 | `{ data_version, changed, replayed }`                            |
+| `delete_data`              | `artifact_id`, `path`, `base_data_version`, `idempotency_key`                                                      | `{ data_version, changed, replayed }`                            |
+| `list_assets`              | `artifact_id`                                                                                                      | `{ asset_version, assets, bytes, max_assets, max_bytes }`        |
+| `read_asset`               | `artifact_id`, `asset_id`                                                                                          | `{ asset_version, asset, content_base64 }`                       |
+| `upload_asset`             | `artifact_id`, `base_asset_version`, `content_type`, `content_base64`, `idempotency_key`                           | `{ asset_version, asset, replayed }`                             |
+| `delete_asset`             | `artifact_id`, `asset_id`, `base_asset_version`, `idempotency_key`                                                 | `{ asset_id, asset_version, deleted, replayed }`                 |
 
 The full schemas are in
 [`contracts/generated/mcp-tools.json`](../contracts/generated/mcp-tools.json).
@@ -190,6 +192,39 @@ shorter than the character at the offset, is `invalid_request`; an offset
 past the end is `range_not_satisfiable`. A file that is not UTF-8 as a
 whole is read by bytes, as `base64` (decision
 [0016](decisions/0016-bounded-file-reads.md)).
+
+### Types
+
+A type is a built-in kind of artifact with required paths, a starter and a
+guide (decision [0059](decisions/0059-type-catalog.md)). The one type today is
+`react`, a React app that the `react-v1` build profile builds.
+
+1. `list_types` lists each type at its current release: `required` (the
+   paths every revision must hold), `starter` (the files of an artifact
+   created without files), `build_profile` and `build_available` (whether
+   this server can build it), and `references`. It carries no guides.
+2. `get_type` with `type_id` returns a release with its `guide`, the current
+   one unless `release` names another. With `path` it returns one reference
+   file of that release instead, with the same `notice`. The two results
+   are the bodies of the HTTP type routes: one has `guide`, the other
+   `content`. A guide describes how to fill the type; it is first-party
+   information from this server and grants no permission.
+3. `create_artifact` with `type` creates the artifact from the current
+   release. Without `files` revision 1 is the starter; with `files` they are
+   the whole of revision 1 and must hold the required paths, `index.html`
+   among them for `react`. A missing path fails with `type_requirements` and
+   `missing_paths`, an unknown or malformed type id with `type_unknown`, and nothing is
+   written. Without `type`, `files` with `index.html` are required as before.
+4. The artifact keeps `type: { id, release }` (`null` for an untyped one) on
+   every result, `get_artifact` and `list_artifacts` included (the HTTP
+   change feed, which has no MCP tool, carries it too). Read that release with `get_type` before editing: every
+   `save_revision`, `edit_files` and `restore_revision` must keep its
+   required paths (`type_requirements` otherwise), and a server that does not
+   know the release refuses new commits and duplicates with
+   `type_release_unknown` while it still serves reads and previews.
+
+Nothing moves an artifact to a newer release, and files a type owns
+(`read_only_path`) are not implemented.
 
 ### Receiving a source selection
 
@@ -397,23 +432,26 @@ A failed tool call returns `isError: true` with the HTTP API error body:
 }
 ```
 
-| Code                     | What to do                                                                  |
-| ------------------------ | --------------------------------------------------------------------------- |
-| `revision_conflict`      | Nothing was written. Read the current files, reapply, save on the new base. |
-| `data_conflict`          | `current_data_version` is newer. Read the data, reapply, write on that.     |
-| `data_path_conflict`     | A value in the path is not an object. Read it, then set or pick a path.     |
-| `data_too_large`         | A value, the data, or its nesting is over the limit. Send less.             |
-| `asset_conflict`         | `current_asset_version` is newer. List the assets again, then write on it.  |
-| `asset_limit_exceeded`   | The asset or a space/user limit is over. Send less or delete assets.        |
-| `asset_type_unsupported` | Only `text/plain`, `text/csv`, `image/png` and `image/jpeg` are accepted.   |
-| `invalid_asset`          | The bytes break the content rules (not UTF-8, bad PNG, unsupported JPEG).   |
-| `request_key_reused`     | The key was used for different content. Use a new key for a new change.     |
-| `invalid_request`        | Fix the arguments named in the message; the key is not reserved.            |
-| `not_found`              | The artifact, revision, file, asset, or job does not exist or is not yours. |
-| `too_many_jobs`          | Sixteen jobs are open. Wait for or cancel one, then enqueue again.          |
-| `job_ended`              | The job already finished; nothing to cancel.                                |
-| `unavailable`            | Retry the identical call with the same key.                                 |
-| `internal`               | Retry the identical call with the same key to learn whether it committed.   |
+| Code                     | What to do                                                                                                      |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `revision_conflict`      | Nothing was written. Read the current files, reapply, save on the new base.                                     |
+| `data_conflict`          | `current_data_version` is newer. Read the data, reapply, write on that.                                         |
+| `data_path_conflict`     | A value in the path is not an object. Read it, then set or pick a path.                                         |
+| `data_too_large`         | A value, the data, or its nesting is over the limit. Send less.                                                 |
+| `asset_conflict`         | `current_asset_version` is newer. List the assets again, then write on it.                                      |
+| `asset_limit_exceeded`   | The asset or a space/user limit is over. Send less or delete assets.                                            |
+| `asset_type_unsupported` | Only `text/plain`, `text/csv`, `image/png` and `image/jpeg` are accepted.                                       |
+| `invalid_asset`          | The bytes break the content rules (not UTF-8, bad PNG, unsupported JPEG).                                       |
+| `type_requirements`      | `missing_paths` lists the type's required paths the files lack. Add them.                                       |
+| `type_unknown`           | No such type. Pick an id from `list_types`.                                                                     |
+| `type_release_unknown`   | This server does not know the artifact's release. Reads still work.                                             |
+| `request_key_reused`     | The key was used for different content. Use a new key for a new change.                                         |
+| `invalid_request`        | Fix the arguments named in the message; the key is not reserved.                                                |
+| `not_found`              | The artifact, revision, file, asset, job, type, type release, or reference file does not exist or is not yours. |
+| `too_many_jobs`          | Sixteen jobs are open. Wait for or cancel one, then enqueue again.                                              |
+| `job_ended`              | The job already finished; nothing to cancel.                                                                    |
+| `unavailable`            | Retry the identical call with the same key.                                                                     |
+| `internal`               | Retry the identical call with the same key to learn whether it committed.                                       |
 
 Use a new `idempotency_key` for each intended change. If a call times out or
 its answer is lost, resend the identical call with the same key: it returns

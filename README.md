@@ -154,8 +154,10 @@ Artifacts can be created from a built-in type
 (`index.html`, `src/main.tsx`), its guide and whether this server can build
 it, and `artifree artifact create --title <title> --type react` creates one
 from its starter, the template that the `react-v1` build tests build. Every
-later commit must keep the required files. MCP and the web workspace do not
-create from a type yet (T01ab, T01b).
+later commit must keep the required files. MCP agents do the same with
+`list_types`, `get_type` and `create_artifact` with `type` (see
+[the MCP guide](docs/mcp.md#types)). The web workspace does not create from a
+type yet (T01b).
 `artifree artifact build-status <id> --build react-v1` prints the latest build
 and whether the current revision's build is built, pending, failed (with its
 diagnostics) or none, and `artifree artifact preview <id> --build react-v1`

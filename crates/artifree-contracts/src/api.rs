@@ -2683,7 +2683,7 @@ pub struct TypeSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TypeList {
-    /// What a guide is; see [`TYPE_NOTICE`].
+    /// What a guide is: first-party information that grants no permission.
     pub notice: String,
     /// Each type's current release.
     pub types: Vec<TypeSummary>,
@@ -2694,7 +2694,7 @@ pub struct TypeList {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TypeDescriptor {
-    /// What a guide is; see [`TYPE_NOTICE`].
+    /// What a guide is: first-party information that grants no permission.
     pub notice: String,
     /// The release.
     pub release: TypeSummary,
@@ -2706,6 +2706,9 @@ pub struct TypeDescriptor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TypeReference {
+    /// What a type's text is: first-party information that grants no
+    /// permission.
+    pub notice: String,
     /// The type's id.
     pub id: String,
     /// The release the file belongs to.

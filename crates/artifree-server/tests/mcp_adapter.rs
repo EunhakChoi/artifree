@@ -775,7 +775,7 @@ async fn job_requests_that_cannot_be_served_get_the_http_error_codes() -> TestRe
 }
 
 #[tokio::test]
-async fn the_job_tools_say_what_they_change() -> TestResult {
+async fn the_job_and_type_tools_say_what_they_change() -> TestResult {
     let harness = Harness::new();
     let (_, body) = harness.post(rpc(Some(TOKEN), &list_tools())?).await?;
     let listed: Value = serde_json::from_slice(&body)?;
@@ -787,6 +787,8 @@ async fn the_job_tools_say_what_they_change() -> TestResult {
         ("list_jobs", true),
         ("cancel_job", false),
         ("get_build_status", true),
+        ("list_types", true),
+        ("get_type", true),
     ] {
         let tool = tools
             .iter()
@@ -2052,6 +2054,156 @@ async fn agents_read_the_build_status_and_preview_a_build() -> TestResult {
         error_code(&refused),
         "profile_unknown",
         "a build that knows no profile refuses react-v1"
+    );
+    Ok(())
+}
+
+/// The type tools (decision 0059 rule 12) read the catalog the HTTP routes
+/// read: a listing without guides, a release with its guide, a reference
+/// file, and `not_found` for what the catalog lacks.
+#[tokio::test]
+async fn agents_read_the_type_catalog() -> TestResult {
+    let harness = Harness::new();
+    let listed = harness.call("list_types", json!({})).await?;
+    let types = &listed["structuredContent"]["types"];
+    assert_eq!(types[0]["id"], "react", "{listed}");
+    assert_eq!(types[0]["required"], json!(["index.html", "src/main.tsx"]));
+    assert!(types[0].get("guide").is_none(), "a listing has no guide");
+    assert!(
+        listed["structuredContent"]["notice"]
+            .as_str()
+            .is_some_and(|notice| notice.contains("grants no permission")),
+        "{listed}"
+    );
+    assert_eq!(
+        error_code(&harness.call("list_types", json!({ "q": "x" })).await?),
+        "invalid_request"
+    );
+
+    let current = harness
+        .call("get_type", json!({ "type_id": "react" }))
+        .await?;
+    assert_eq!(current["structuredContent"]["release"]["release"], 1);
+    assert!(
+        current["structuredContent"]["guide"]
+            .as_str()
+            .is_some_and(|guide| !guide.is_empty()),
+        "{current}"
+    );
+    let pinned = harness
+        .call("get_type", json!({ "type_id": "react", "release": 1 }))
+        .await?;
+    assert_eq!(pinned["structuredContent"], current["structuredContent"]);
+    let reference = harness
+        .call(
+            "get_type",
+            json!({ "type_id": "react", "path": "layout-example.md" }),
+        )
+        .await?;
+    assert_eq!(
+        reference["structuredContent"]["path"], "layout-example.md",
+        "{reference}"
+    );
+    assert_eq!(reference["structuredContent"]["release"], 1);
+    assert_eq!(
+        reference["structuredContent"]["notice"], listed["structuredContent"]["notice"],
+        "a reference file carries the notice too"
+    );
+    for unknown in [
+        json!({ "type_id": "slides" }),
+        json!({ "type_id": "React" }),
+        json!({ "type_id": "react", "release": 2 }),
+        json!({ "type_id": "react", "path": "nothing.md" }),
+        json!({ "type_id": "react", "release": 2, "path": "layout-example.md" }),
+    ] {
+        let refused = harness.call("get_type", unknown.clone()).await?;
+        assert_eq!(error_code(&refused), "not_found", "{unknown}: {refused}");
+    }
+    // A release no type can have is a malformed argument, not a missing one.
+    let malformed = harness
+        .call(
+            "get_type",
+            json!({ "type_id": "react", "release": 4_294_967_296_u64 }),
+        )
+        .await?;
+    assert_eq!(error_code(&malformed), "invalid_request", "{malformed}");
+
+    Ok(())
+}
+
+/// A typed create, its refusals and the commit check answer over MCP as
+/// `POST /v1/artifacts` and a save do (decision 0059 rules 5, 6 and 12).
+#[tokio::test]
+async fn agents_create_from_a_type_with_the_http_semantics() -> TestResult {
+    let harness = Harness::new();
+    // Without files the artifact is the starter, pinned to release 1.
+    let created = harness
+        .call(
+            "create_artifact",
+            json!({ "title": "App", "type": "react", "idempotency_key": "type-create-1" }),
+        )
+        .await?;
+    let artifact = &created["structuredContent"]["artifact"];
+    assert_eq!(
+        artifact["type"],
+        json!({ "id": "react", "release": 1 }),
+        "{created}"
+    );
+    let id = artifact["id"].clone();
+    let shown = harness
+        .call("get_artifact", json!({ "artifact_id": id }))
+        .await?;
+    assert_eq!(shown["structuredContent"]["type"], artifact["type"]);
+
+    let lacking = harness
+        .call(
+            "create_artifact",
+            json!({
+                "title": "App", "type": "react", "idempotency_key": "type-create-2",
+                "files": [{ "path": "notes.txt", "encoding": "utf8", "content": "n" }]
+            }),
+        )
+        .await?;
+    assert_eq!(error_code(&lacking), "type_requirements");
+    assert_eq!(
+        lacking["structuredContent"]["error"]["missing_paths"],
+        json!(["index.html", "src/main.tsx"])
+    );
+    // An id that is not a type's, malformed ones included, is unknown.
+    for (key, type_id) in [("type-create-3", "slides"), ("type-create-5", "React")] {
+        let unknown = harness
+            .call(
+                "create_artifact",
+                json!({ "title": "App", "type": type_id, "idempotency_key": key }),
+            )
+            .await?;
+        assert_eq!(error_code(&unknown), "type_unknown", "{type_id}: {unknown}");
+    }
+    let untyped = harness
+        .call(
+            "create_artifact",
+            json!({ "title": "App", "idempotency_key": "type-create-4" }),
+        )
+        .await?;
+    assert_eq!(error_code(&untyped), "invalid_request", "{untyped}");
+
+    let deleting = harness
+        .call(
+            "save_revision",
+            json!({
+                "artifact_id": id, "base_revision": 1, "idempotency_key": "type-save-1",
+                "changes": [{ "op": "delete", "path": "src/main.tsx" }]
+            }),
+        )
+        .await?;
+    assert_eq!(error_code(&deleting), "type_requirements", "{deleting}");
+    let listed = harness.call("list_artifacts", json!({})).await?;
+    assert_eq!(
+        listed["structuredContent"]["artifacts"]
+            .as_array()
+            .map(Vec::len),
+        Some(1),
+        "the refusals wrote nothing"
     );
     Ok(())
 }
