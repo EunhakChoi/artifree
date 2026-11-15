@@ -9,12 +9,12 @@ import { ArtifreeApiError, newIdempotencyKey } from '@artifree/client';
 import type { FeedChange } from '@artifree/client';
 import type {
   BackgroundStatus,
-  BuildStatus,
   Job,
   JobKind,
   JobList,
   JobState,
 } from '@artifree/contracts';
+import type { BuildStatusState } from './build-status';
 import { describeFailure, mayHaveCommitted } from './failure';
 
 /** Jobs per page of the list; "Load more" reads the next page (rule 13). */
@@ -443,32 +443,8 @@ export function workerNoticeOf(
   return { kind: 'no_worker', status: background };
 }
 
-/**
- * What the tab knows of the head build status (decision 0058, rule 16, and
- * R03ea): not read yet, read, refused as `profile_unknown`, or a read that
- * failed, in words.
- */
-export type BuildStatusState =
-  | { readonly kind: 'unread' }
-  | { readonly kind: 'read'; readonly status: BuildStatus }
-  | { readonly kind: 'profile_unknown' }
-  | { readonly kind: 'failed'; readonly message: string };
-
-/** The head build status before its first read. */
-export const STATUS_UNREAD: BuildStatusState = { kind: 'unread' };
-
-/**
- * The status state after a read of it failed with `error`. A refusal as
- * `profile_unknown` says that the server cannot build the profile, which a
- * later read does not change until the feed resets; any other failure is shown
- * in words.
- */
-export function statusAfterFailure(error: unknown): BuildStatusState {
-  if (error instanceof ArtifreeApiError && error.code === 'profile_unknown') {
-    return { kind: 'profile_unknown' };
-  }
-  return { kind: 'failed', message: describeFailure(error) };
-}
+export { STATUS_UNREAD, statusAfterFailure } from './build-status';
+export type { BuildStatusState } from './build-status';
 
 /**
  * Everything the Jobs tab shows for one artifact. `rows` stays undefined until

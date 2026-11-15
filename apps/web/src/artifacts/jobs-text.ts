@@ -16,7 +16,7 @@ import type {
   JobState,
   JobVerdict,
 } from '@artifree/contracts';
-import { BUILD_PROFILE } from './build-profile';
+import { PROFILE_UNKNOWN_TEXT } from './build-profile';
 import type { NamedRefusal, Refusal } from './jobs-model';
 
 /** The name of each kind of job. */
@@ -126,11 +126,7 @@ export function workerText(status: BackgroundStatus): string {
   return `Worker mode: ${status.worker.mode}. Worker state: ${status.worker.state}.`;
 }
 
-/**
- * What the tab says while the server cannot build the profile: the banner and
- * a refused "Build revision N" (decision 0058, R03ea).
- */
-export const PROFILE_UNKNOWN_TEXT = `This server cannot build the ${BUILD_PROFILE} profile (profile_unknown).`;
+export { PROFILE_UNKNOWN_TEXT } from './build-profile';
 
 /** The words of each refusal that has its own words (rule 14). */
 const REFUSAL_TEXT: Record<NamedRefusal, string> = {

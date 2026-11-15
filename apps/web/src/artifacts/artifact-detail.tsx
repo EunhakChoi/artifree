@@ -35,6 +35,9 @@ import { RecoverNotice } from './trash-list';
 import { useChoice } from './use-choice';
 import { isNewer, versionOf } from './use-live-workspace';
 import type { FeedState, TrashState, Version } from './use-live-workspace';
+import { BuildPreview } from './build-preview';
+import type { PreviewSource } from './build-preview-model';
+import { BUILD_PROFILE } from './build-profile';
 import { PreviewFrame } from './preview-frame';
 import { SourcePanel } from './source-editor';
 import { SourceRecovery } from './source-recovery';
@@ -227,6 +230,9 @@ export function ArtifactDetail({
   // A revision chosen for the preview, kept across tabs; none follows the
   // latest. It belongs to the read it was chosen from.
   const [chosen, setChosen] = useChoice<number>(shown?.resets ?? resets);
+  // Whether the preview shows the revision's files or its build, kept across
+  // tabs (decision 0058, R03eb).
+  const [previewSource, setPreviewSource] = useState<PreviewSource>('files');
   if (details.status === 'loading')
     return (
       <output className="text-sm text-muted-foreground">
@@ -372,6 +378,10 @@ export function ArtifactDetail({
                   stale={stale}
                   chosen={chosen}
                   onChoose={setChosen}
+                  source={previewSource}
+                  onSource={setPreviewSource}
+                  changes={artifactChanges}
+                  resets={resets}
                 />
               )}
             </TabsContent>
@@ -529,6 +539,13 @@ interface PreviewPanelProps {
   /** A revision chosen for the preview; none follows the latest. */
   chosen: number | undefined;
   onChoose: (revision: number | undefined) => void;
+  /** Whether the preview shows the revision's files or its build. */
+  source: PreviewSource;
+  onSource: (source: PreviewSource) => void;
+  /** The artifact's change feed, which the build choice follows. */
+  changes: ArtifactChanges;
+  /** How often the server's data may have been replaced so far. */
+  resets: number;
 }
 
 function PreviewPanel({
@@ -540,6 +557,10 @@ function PreviewPanel({
   stale,
   chosen,
   onChoose,
+  source,
+  onSource,
+  changes,
+  resets,
 }: PreviewPanelProps) {
   const latest = artifact.current_revision;
   // A chosen revision that is not listed falls back to the latest.
@@ -571,27 +592,58 @@ function PreviewPanel({
             ))}
           </NativeSelect>
         </Field>
+        <Field orientation="horizontal">
+          <FieldLabel htmlFor="preview-source">Preview of</FieldLabel>
+          <NativeSelect
+            id="preview-source"
+            value={source}
+            onChange={(event) =>
+              onSource(event.target.value === 'build' ? 'build' : 'files')
+            }
+          >
+            <NativeSelectOption value="files">Files</NativeSelectOption>
+            <NativeSelectOption value="build">
+              Build ({BUILD_PROFILE})
+            </NativeSelectOption>
+          </NativeSelect>
+        </Field>
       </FieldGroup>
-      <PreviewFrame
-        client={client}
-        dataChanges={dataChanges}
-        artifactId={artifact.id}
-        revision={revision}
-        epoch={epoch}
-        stale={stale}
-        following={kept === undefined}
-        latest={latest}
-        onShowLatest={() => onChoose(undefined)}
-        title={`Preview of ${artifact.title}, revision ${revision}`}
-        className="h-128 w-full rounded-lg border"
-      />
+      {source === 'build' ? (
+        <BuildPreview
+          client={client}
+          artifactId={artifact.id}
+          revision={revision}
+          newest={latest}
+          epoch={epoch}
+          stale={stale}
+          changes={changes}
+          resets={resets}
+          artifactTitle={artifact.title}
+          className="h-128 w-full rounded-lg border"
+        />
+      ) : (
+        <PreviewFrame
+          client={client}
+          dataChanges={dataChanges}
+          artifactId={artifact.id}
+          revision={revision}
+          epoch={epoch}
+          stale={stale}
+          following={kept === undefined}
+          latest={latest}
+          onShowLatest={() => onChoose(undefined)}
+          title={`Preview of ${artifact.title}, revision ${revision}`}
+          className="h-128 w-full rounded-lg border"
+        />
+      )}
       <p className="text-xs text-muted-foreground">
         Content runs in a sandboxed frame on a separate origin. It cannot read
         this page, the API, or other artifacts, and loads and connects only to
         its own origin. Scripts can still navigate the frame to another site, so
         treat what you type into an untrusted artifact as visible to its author.
         Model capabilities are not available yet. Source, uploaded file and
-        saved data access need your permission when the artifact asks for it.
+        saved data access need your permission when the artifact asks for it. A
+        build preview runs the same way and has no such access.
       </p>
     </div>
   );

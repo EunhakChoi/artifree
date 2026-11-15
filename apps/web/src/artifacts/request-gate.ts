@@ -32,16 +32,17 @@ function literal(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// Group 1 is set for `previews` and a bare `runtime-views`, which issue a
-// preview or a view; a longer tail below `runtime-views` is a frame call
-// when it is one of the client's frame route tails (decision 0052, rule 9).
+// Group 1 is set for `previews`, a build's `builds/{profile}/previews`
+// (decision 0058, rule 14) and a bare `runtime-views`, which issue a preview
+// or a view; a longer tail below `runtime-views` is a frame call when it is one
+// of the client's frame route tails (decision 0052, rule 9).
 const REVISION_ROUTE = new RegExp(
-  `/v1/artifacts/[^/]+/revisions/\\d+/(?:(previews|runtime-views)|runtime-views/[^/]+/\\d+/(?:${FRAME_ROUTE_TAILS.map((tail) => literal(tail)).join('|')}))$`,
+  `/v1/artifacts/[^/]+/revisions/\\d+/(?:(previews|builds/[^/]+/previews|runtime-views)|runtime-views/[^/]+/\\d+/(?:${FRAME_ROUTE_TAILS.map((tail) => literal(tail)).join('|')}))$`,
 );
 
 /**
  * Reads change nothing: every `GET` except the change feed, and issuing a
- * preview or runtime view. The feed is one long request. A runtime frame's
+ * preview, a build preview or a runtime view. The feed is one long request. A runtime frame's
  * calls (the client's frame route tails), which the workspace sends on its
  * behalf, are `frame` requests. Everything
  * else, including closing a runtime view, writes. `url` may carry the server's

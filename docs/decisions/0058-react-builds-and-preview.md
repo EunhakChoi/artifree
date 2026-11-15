@@ -9,8 +9,9 @@ diagnostics), R03cb (the worker's composition, diagnostics and failures),
 R03cc (build tickets, the `/b/` route and the head status, below the
 wire), R03cda (the execution readiness, schema 16), R03cdb (the
 claim deadline), R03da (the public kind, contract 0.30.0) and R03db
-(build tickets and the head status on the wire, contract 0.31.0) and R03ea
-(the build in the Jobs tab) are implemented, R03eb and R03f are not**.
+(build tickets and the head status on the wire, contract 0.31.0), R03ea
+(the build in the Jobs tab) and R03eb (the build preview) are implemented,
+R03f is not**.
 Roadmap: R03.
 
 > **Note, 2026-11-14 (slices).** R03b is split into R03ba, R03bb and R03bc,
@@ -802,6 +803,47 @@ Roadmap: R03.
 >   `build-intercepted` (pending, the execution notice from the server's real
 >   `GET /v1/background`, and failed with diagnostics as text) in Chromium and
 >   Firefox. R03eb, the build preview, is not implemented.
+
+> **Note, 2026-11-15 (R03eb).** The preview implements R03eb as the R03e
+> split note fixes it; no numbered rule changes and the wire is unchanged.
+>
+> - The preview gains "Preview of: Files | Build (react-v1)", kept while the page
+>   shows the artifact. The build is shown in a plain frame with the
+>   preview's sandbox on the content origin; it has no runtime view, so no
+>   capability or bridge reaches it.
+> - A revision older than the newest one the page knows gets a ticket for its
+>   own build, without a status read; `not_found` says "Revision N has no
+>   build." The newest revision reads the head status and follows the note:
+>   a built head is shown, the latest older build is shown with a notice that
+>   names it and the head's status, and with no build at all no ticket is
+>   asked for. A status of another head than the newest the page knows
+>   waits, and the build shown before stays meanwhile: a newer head is shown
+>   once the page reads the save, and a status of an older head is read
+>   again, once for each newest revision.
+> - The status is read again on each `job_changed` and `revised` change of
+>   the artifact and after a reset, and not after `profile_unknown` until a
+>   reset. A read in flight is never abandoned for a change: changes during
+>   it owe one more read after it, and every answer is shown, so a stream of
+>   changes cannot keep the status from being read. A reset drops the status
+>   and the read in flight.
+> - A ticket is asked for again when the build to show changes, when
+>   "Refresh preview" is pressed, and, for a revision said to have no build,
+>   on a `job_changed` change or when "Check again" is pressed. Once the
+>   ticket's expiry passes, the preview says it has expired and to refresh.
+> - The request gate holds `POST .../builds/{profile}/previews` as a read,
+>   as it holds the source preview.
+> - Proven by the model tests of the choice and the words, the reader tests
+>   of coalesced reads, resets and stops, the request gate tests, and the Jobs smoke cases in Chromium and Firefox:
+>   - `preview-build-unknown` runs on the release build: `profile_unknown`,
+>     no ticket and one status read.
+>   - `preview-build-notice` intercepts the status, the tickets and the build
+>     page. The notice names revision 1 while revision 2 is pending, and only
+>     revision 1's ticket is asked for. A real `job_changed` then reads a
+>     built head, so the notice goes and revision 2's build is asked for.
+>   - `preview-build-missing` intercepts too: revision 1 without a build is
+>     said to have none, and no other ticket is asked for.
+>   - A successful build served by `/b/` stays proven by the enforcement job
+>     at the HTTP level.
 
 > Builds on [0042](0042-linux-untrusted-execution.md) (the boundary),
 > [0056](0056-linux-provider-delivery.md) (the provider),
