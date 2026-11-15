@@ -55,14 +55,16 @@ The units assume the paths of this guide: the release under
 Run these as an administrator on a fresh Ubuntu 24.04 x86_64 machine. They
 change system settings, so read each step first.
 
-1. **Check and unpack the archive** into its own directory, and point
-   `/opt/artifree/current` at it:
+1. **Keep the parents of the tool root writable by root only**, before
+   anything is made under `/opt`: while `/opt` is writable by others, another
+   account could replace `/opt/artifree` before the root is in it. The root is
+   `/opt/artifree/tools/<version>`, and the worker refuses it when `/`, `/opt`,
+   `/opt/artifree` or `/opt/artifree/tools` is writable by anyone but root. A
+   stock Ubuntu `/opt` is `0755`; some images make it `0777`:
 
    ```sh
-   sha256sum -c artifree-<version>-linux-x64.tar.gz.sha256
-   sudo install -d -o root -g root -m 0755 /opt/artifree /opt/artifree/releases
-   sudo tar -xzf artifree-<version>-linux-x64.tar.gz -C /opt/artifree/releases --no-same-owner
-   sudo ln -sfn /opt/artifree/releases/artifree-<version>-linux-x64 /opt/artifree/current
+   stat -c '%a %U' /opt    # must print: 755 root
+   sudo chmod 0755 /opt    # only if it did not
    ```
 
 2. **Route core dumps to a plain file.** The worker refuses a host that pipes
@@ -81,14 +83,14 @@ change system settings, so read each step first.
    If `systemd-coredump` is installed, its own pipe comes from an earlier
    `sysctl.d` file, which the `99-` file overrides.
 
-3. **Keep the parents of the tool root writable by root only.** The root is
-   `/opt/artifree/tools/<version>`, and the worker refuses it when `/`, `/opt`,
-   `/opt/artifree` or `/opt/artifree/tools` is writable by anyone but root. A
-   stock Ubuntu `/opt` is `0755`; some images make it `0777`:
+3. **Check and unpack the archive** into its own directory, and point
+   `/opt/artifree/current` at it:
 
    ```sh
-   stat -c '%a %U' /opt    # must print: 755 root
-   sudo chmod 0755 /opt    # only if it did not
+   sha256sum -c artifree-<version>-linux-x64.tar.gz.sha256
+   sudo install -d -o root -g root -m 0755 /opt/artifree /opt/artifree/releases
+   sudo tar -xzf artifree-<version>-linux-x64.tar.gz -C /opt/artifree/releases --no-same-owner
+   sudo ln -sfn /opt/artifree/releases/artifree-<version>-linux-x64 /opt/artifree/current
    ```
 
 4. **Prepare the tool root of this release** with the package's own script and
@@ -177,7 +179,7 @@ its bootstrap. An upgrade therefore prepares the new root beside the old one,
 switches both units over, and removes the old root last:
 
 1. Take a backup ([release packages](release-packages.md#upgrade-in-place)).
-2. Unpack the new archive into `/opt/artifree/releases` (step 1, without the
+2. Unpack the new archive into `/opt/artifree/releases` (step 3, without the
    link) and prepare its root with its own script and server (step 4). The
    two roots and their AppArmor profiles sit side by side.
 3. Stop both units, the execution worker first:

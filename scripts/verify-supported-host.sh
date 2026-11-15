@@ -39,14 +39,11 @@ shopt -u nullglob
 archive=${archives[0]}
 name=$(basename -- "$archive" .tar.gz)
 
-say "check and unpack the archive (docs/release-packages.md, Obtain and check)"
-(cd -- "$release" && sha256sum -c -- "$name.tar.gz.sha256")
-sudo install -d -o root -g root -m 0755 /opt/artifree /opt/artifree/releases
-sudo tar -xzf "$archive" -C /opt/artifree/releases --no-same-owner
-package=/opt/artifree/releases/$name
-sudo ln -sfn -- "$package" /opt/artifree/current
+say "1. keep the parents of the tool root writable by root only, before anything is made under /opt"
+# The hosted runner's /opt is mode 0777.
+sudo chmod 0755 /opt
 
-say "1. route core dumps to a plain file"
+say "2. route core dumps to a plain file"
 if systemctl cat apport.service > /dev/null 2>&1; then
   sudo systemctl disable --now apport.service
 fi
@@ -54,21 +51,24 @@ printf 'kernel.core_pattern = core\n' | sudo tee /etc/sysctl.d/99-artifree-core.
 sudo sysctl -p /etc/sysctl.d/99-artifree-core.conf > /dev/null
 [[ "$(cat /proc/sys/kernel/core_pattern)" == core ]] || fail "kernel.core_pattern does not read core"
 
-say "2. keep the parents of the tool root writable by root only"
-# The hosted runner's /opt is mode 0777.
-sudo chmod 0755 /opt
+say "3. check and unpack the archive"
+(cd -- "$release" && sha256sum -c -- "$name.tar.gz.sha256")
+sudo install -d -o root -g root -m 0755 /opt/artifree /opt/artifree/releases
+sudo tar -xzf "$archive" -C /opt/artifree/releases --no-same-owner
+package=/opt/artifree/releases/$name
+sudo ln -sfn -- "$package" /opt/artifree/current
 
-say "3. prepare the tool root of this release"
+say "4. prepare the tool root of this release"
 root=$(sudo "$package/tools/package-root.sh" "$package/bin/artifree-server")
 version=$("$package/bin/artifree-server" --version)
 [[ "$root" == "/opt/artifree/tools/${version#artifree-server }" ]] \
   || fail "the script prepared $root for $version"
 
-say "4. create the account and its directories"
+say "5. create the account and its directories"
 sudo useradd --system --user-group --home-dir /var/lib/artifree --shell /usr/sbin/nologin artifree
 sudo install -d -o artifree -g artifree -m 0700 /var/lib/artifree /var/lib/artifree/execution
 
-say "5. install and start the two units"
+say "6. install and start the two units"
 sudo install -o root -g root -m 0644 -t /etc/systemd/system \
   "$package/tools/artifree.service" "$package/tools/artifree-execution.service"
 sudo systemctl daemon-reload
@@ -83,7 +83,7 @@ curl --silent --show-error --fail --output /dev/null http://127.0.0.1:7410/healt
 sudo test -f /var/lib/artifree/data/access-token || fail "the server made no access token"
 sudo systemctl enable --now artifree-execution.service
 
-say "6. readiness and a react-v1 build of the template"
+say "7. readiness, then a react-v1 build of the template"
 token_file=${RUNNER_TEMP:?}/artifree-access-token
 sudo install -o "$(id -u)" -g "$(id -g)" -m 0600 /var/lib/artifree/data/access-token "$token_file"
 node "$checkout/scripts/verify-supported-host.mjs" \
