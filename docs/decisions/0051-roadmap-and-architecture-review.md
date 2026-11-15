@@ -8,6 +8,13 @@ citation of "decision N" always means the first list. The record adds no
 executable behavior, contract, schema or dependency and changes no numbered
 rule of another record.
 
+> **Note, 2026-11-15 ([0059](0059-type-catalog.md)).** Decision 4 is amended.
+> R03 is complete, so the first React template becomes the catalog's first
+> type and lands in T01a, which therefore needs R03 too. T01b is the web
+> workspace's creation from a type and its first build. The catalog keeps no
+> per-type contract pin (0059 rule 9); its instances pin a type release
+> instead.
+
 ## Context
 
 R09 (uploaded assets, including the three runtime asset capabilities) is

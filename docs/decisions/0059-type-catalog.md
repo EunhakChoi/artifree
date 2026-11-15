@@ -61,20 +61,19 @@ repository. Where this record departs from the observations, it says so.
 ### The catalog
 
 1. **A fixed, built-in catalog.** The server holds the catalog. Each type is
-   compiled into the server from first-party files in the repository, under
-   `types/<id>/`. Users and organizations cannot publish types; that is a
-   later decision, if ever.
+   compiled into the server from first-party files in the repository. Users
+   and organizations cannot publish types; that is a later decision, if ever.
    - A type has an `id`: a lowercase slug of 1 to 32 letters, digits and
      hyphens, such as `react`.
    - The catalog is listed in a fixed order.
    - Its entries are trusted, first-party text. A listing still says that a
      guide describes how to fill the type and grants no authority, because an
      agent may pass it on.
-2. **A type's descriptor.** Each type has one current release, whose
-   descriptor holds:
-   - `id`, `title` and a `description` of at most 280 characters;
-   - `release`, a string `<id>-<n>` with a positive integer `n`, such as
-     `react-1`;
+2. **Releases and their descriptors.** A type has numbered releases, `1`,
+   `2` and so on. The newest is its current release. Each release lives in
+   its own directory, `types/<id>/<release>/`, and its descriptor holds:
+   - `id`, `release` (the positive integer), `title` and a `description` of
+     at most 280 characters;
    - `kind`: the artifact kind its instances get, as defined today (`app`,
      `document`, ...);
    - `required`: the package paths that every revision of an instance must
@@ -82,26 +81,35 @@ repository. Where this record departs from the observations, it says so.
    - `starter`: the files a new instance gets when its creator sends none;
    - `build_profile`: the build profile that builds an instance, or none;
    - `guide`: a Markdown text of at most 32 KiB;
-   - `references`: further Markdown files, each at most 32 KiB, read by
-     path.
+   - `references`: further Markdown files, each at most 32 KiB, read by path.
 
-   Starter files and references are package-style paths under the type's
-   directory.
+   Starter files and references are package-style paths in the release's
+   directory. The wire names a release as `<id>-<release>`, such as
+   `react-1`, for people only; every field and the store carry the id and
+   the integer apart.
 
-3. **Releases are append-only.** A published release never changes.
-   - Changing a guide, a starter file, the required paths or the build
-     profile means a new release, `n + 1`.
-   - The server keeps the descriptor of every release it ever shipped, so an
-     instance pinned to an old release keeps its rules. Starters and guides
-     need to be kept only for the current release.
-   - A checked-in lock lists each release with the SHA-256 of its
-     descriptor. `npm run check` refuses a change to a locked entry and a
-     removed one.
-4. **The first type is `react`** (`react-1`, kind `app`, build profile
-   `react-v1`). It is the 0058 template layout as a type.
+3. **Releases are append-only.** A published release never changes, and no
+   release is removed.
+   - Changing a guide, a reference, a starter file, the required paths or
+     the build profile means a new release with a new directory.
+   - The server keeps every release whole, so an instance pinned to an old
+     release keeps its rules, and an agent can read the guide it was made
+     with.
+   - A checked-in lock lists each release with the SHA-256 of every file in
+     its directory. `npm run check` refuses a changed or removed locked
+     release, and a release directory the lock does not list.
+   - A release's build profile names a profile of 0058 rule 1. A later build
+     that no longer knows that profile answers `profile_unknown` for it, as
+     0058 rule 17 does today; the release does not change.
+4. **The first type is `react`** (release 1, kind `app`, build profile
+   `react-v1`). It is the 0058 template layout as a type, and it is the first
+   React template that 0051 decision 4 gave to T01b (see the note at the end).
    - It requires `index.html` and `src/main.tsx`.
-   - Its starter is the bundler template that 0058's tests already build:
-     `index.html`, `src/main.tsx` and `src/app.css`.
+   - Its starter is the bundler template that 0058's tests build:
+     `index.html`, `src/main.tsx` and `src/app.css`. T01aa moves those files
+     to `types/react/1/starter/`, and the provider's and server's build tests
+     read them from there. There is one copy, so the starter is what the tests
+     prove builds.
    - Its guide covers:
      - the layout of 0058 rule 7;
      - the packages and versions that `react-v1` can import (the lock list of
@@ -110,6 +118,11 @@ repository. Where this record departs from the observations, it says so.
      - that a build is asked for on request (rule 17);
      - how to read the build status and the build preview;
      - what a frame on `/b/` can and cannot do today.
+   - **This server's builds.** Every descriptor carries `build_available`:
+     whether this server's build knows the release's build profile (0058
+     rule 5). A `react` instance can be created and edited on every server,
+     but only a server with `build_available: true` builds it. The guide
+     tells an agent to read the field before it asks for a build.
 
 ### Instances
 
@@ -124,8 +137,10 @@ repository. Where this record departs from the observations, it says so.
        the missing paths.
      - The artifact gets the type's kind and records `type: {id, release}`
        with the current release.
-     - The request fingerprint includes the type id and the release, so a
-       retry after a release change is a different request.
+     - The request fingerprint covers what the caller sent: the type id and
+       the files, or the absence of files. It does not cover the release.
+       So a retry with the same key after a server upgrade replays the
+       original receipt, which names the release it was created with.
    - **An unknown type** is refused with `422 type_unknown`.
    - **Without a type:** creation is unchanged. `index.html` is required,
      the kind is `app` and there is no type.
@@ -136,16 +151,17 @@ repository. Where this record departs from the observations, it says so.
 6. **The type stays with the artifact.** `type` is fixed at creation. No
    operation in T01a changes it, removes it or moves it to a newer release.
    - A duplicate keeps it, and so does a restored revision.
-   - Every commit (save, edit, restore) checks the release's required paths
-     and refuses `422 type_requirements` before anything is written. A
-     restore of a revision that lacks one is refused the same way; it can only
-     happen if a later release added the path, and T01a never moves an
-     artifact to a later release.
-7. **A pin the server no longer knows.** A server started on data that names
-   a type or release it does not know serves the artifact as before: reads,
-   previews and listings. It refuses every commit to that artifact with
-   `409 type_release_unknown`. Since releases are append-only (rule 3), this
-   happens only after a downgrade, which 0027 already discourages.
+   - Every commit (save, edit, restore) checks the required paths of the
+     artifact's own release and refuses `422 type_requirements` before
+     anything is written. Since the release never changes, a revision that
+     passed once passes again, so a restore is refused only if the store was
+     changed outside the server.
+7. **A pin the server does not know.** A server started on data that names a
+   type or release it does not know serves the artifact as before: reads,
+   previews and listings. It refuses every commit to that artifact, and a
+   duplicate of it, with `409 type_release_unknown`. Since releases are
+   append-only (rule 3), this happens only after a downgrade, which 0027
+   already discourages.
 8. **The type is visible.** Every surface that shows an artifact shows
    `type: {id, release}`, or `null` for an untyped artifact: the artifact
    reads, the listings, the change feed's artifact rows, MCP and the CLI.
@@ -176,37 +192,47 @@ repository. Where this record departs from the observations, it says so.
 ### Surfaces
 
 11. **HTTP.**
-    - `GET /v1/types` lists the current releases, without guides.
-    - `GET /v1/types/{id}` returns one current descriptor with its guide.
-    - `GET /v1/types/{id}/references/{path}` returns one reference file.
+    - `GET /v1/types` lists each type's current release, without guides.
+    - `GET /v1/types/{id}` returns the current release's descriptor with its
+      guide.
+    - `GET /v1/types/{id}/releases/{release}` returns that release's
+      descriptor with its guide, so an agent editing an older instance
+      reads its own rules.
+    - `GET /v1/types/{id}/releases/{release}/references/{path}` returns one
+      reference file.
     - `POST /v1/artifacts` takes `type`.
 
     Each route requires the same access token as other reads. None is
-    public. An unknown id or path is `404 not_found`.
+    public. An unknown id, release or path is `404 not_found`.
 
 12. **MCP.**
-    - `list_types` and `get_type` (read-only), with `get_type` taking an
-      optional `path` for a reference file.
+    - `list_types` and `get_type` (read-only). `get_type` takes an optional
+      `release` (the current one by default) and an optional `path` for a
+      reference file.
     - `create_artifact` takes `type`.
     - `create_artifact`'s description tells an agent to read the type first.
 13. **CLI.**
-    - `artifree type list` and `artifree type show <id> [--reference <path>]`.
-    - `artifree artifact create --type <id>`, where `--dir` becomes optional
-      with a type.
+    - `artifree type list` and
+      `artifree type show <id> [--release <n>] [--reference <path>]`.
+    - `artifree artifact create --type <id>`. With `--type`, `--dir` and
+      `--file` are both optional: with neither, the artifact gets the
+      starter; with one, its files are the whole of revision 1, as without a
+      type. Without `--type`, one of them is required, as today.
 14. **The web workspace** creates from a type and shows an artifact's type
     in T01b, not T01a.
 15. **The contract** gains the type routes and descriptors, the `type` field
     and the three error codes, with the minor version bump that the
-    contract checks ask for. The schema gains the artifact's type id and
-    release as two nullable columns. Existing artifacts read back as untyped.
+    contract checks ask for. The schema gains the artifact's type id (text)
+    and release (integer), both null or both set, which the store checks.
+    Existing artifacts read back as untyped.
 
 ### Slices
 
-| Slice | Scope                                                                                                                                                       | Proven by                                                                                                                                                                                                                                                                                    |
-| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| T01aa | Rules 1 to 9, 11, 13 and 15: the catalog, the `react` type, the release lock, the schema, the core's create and commit checks, the HTTP routes and the CLI. | Core tests for creation with and without files, `type_requirements`, `type_unknown`, the commit checks, a duplicate and a restore, and `type_release_unknown`; the lock check refusing a changed release; HTTP and CLI tests; the packaged CLI creating a `react` instance from its starter. |
-| T01ab | Rule 12: the MCP tools, and the agent guide.                                                                                                                | MCP tests through the same core behavior, and the catalog test listing the new tools.                                                                                                                                                                                                        |
-| T01b  | Rule 14 and the first build from a type: the web workspace creates a `react` instance, shows its type, and offers its build and build preview.              | A browser smoke that creates from the type, builds on the real release server where a worker is ready (otherwise intercepted, as 0058's smokes are), and opens the build preview.                                                                                                            |
+| Slice | Scope                                                                                                                                                       | Proven by                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| T01aa | Rules 1 to 9, 11, 13 and 15: the catalog, the `react` type, the release lock, the schema, the core's create and commit checks, the HTTP routes and the CLI. | Core tests for creation with and without files, `type_requirements`, `type_unknown`, a replayed create across a release change, the commit checks, a duplicate and a restore, and `type_release_unknown` for a commit and a duplicate; the build tests reading the moved starter; the lock check refusing a changed release; HTTP and CLI tests; the packaged CLI creating a `react` instance from its starter. |
+| T01ab | Rule 12: the MCP tools, and the agent guide.                                                                                                                | MCP tests through the same core behavior, and the catalog test listing the new tools.                                                                                                                                                                                                                                                                                                                           |
+| T01b  | Rule 14 and the first build from a type: the web workspace creates a `react` instance, shows its type, and offers its build and build preview.              | A browser smoke that creates from the type, builds on the real release server where a worker is ready (otherwise intercepted, as 0058's smokes are), and opens the build preview.                                                                                                                                                                                                                               |
 
 Rule 10 is decided here and implemented by the first type with an owned file.
 
@@ -235,3 +261,11 @@ Rule 10 is decided here and implemented by the first type with an owned file.
 - Releases accumulate in the server and in the lock. Moving instances to a
   newer release is a later decision with its own rules.
 - The first type that owns a file brings `read_only_path` with it.
+
+> **Amends 0051 decision 4 and 0058.** 0051 decision 4 gave T01a the catalog
+> and T01b the first React template, so that only T01b needed R03. R03 is
+> complete, so the first type is that template and lands with the catalog in
+> T01a, which now needs R03 as well. T01b becomes the web workspace's
+> creation from a type and its first build. 0058's "the real templates stay
+> T01b's" and its consequence that T01b adds the first React template now
+> mean T01a.

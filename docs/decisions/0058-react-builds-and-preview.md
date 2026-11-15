@@ -1063,6 +1063,12 @@ gate`, runs `scripts/verify-supported-host.sh` on the archive with a
 > a directory that holds such a file reports that artifact as corrupt. Going
 > back needs a backup taken before the upgrade (0027).
 
+> **Note, 2026-11-15 ([0059](0059-type-catalog.md)).** "The real templates
+> stay T01b's" and the consequence that T01b adds the first React template
+> now mean T01a. Its `react` type takes the bundler template of R03bcba as
+> its starter, moved to `types/react/1/starter/` with one copy, and no
+> numbered rule here changes.
+
 ## Context
 
 R02 ends with an untrusted worker that runs one profile, the repository's
