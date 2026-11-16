@@ -20,11 +20,13 @@ use artifree_domain::AppDataVersion;
 use artifree_domain::artifact_type::TypeId;
 use artifree_domain::change::ChangeSequence;
 use artifree_domain::data::DataError;
-use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, UserLabel};
+use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, UnixMillis, UserLabel};
 use artifree_domain::job::JobState;
 use artifree_domain::package::{FileChange, FilePackage, FileSet, PackageError, PackagePath};
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
-use artifree_ports::access_store::AccessStore;
+use artifree_ports::access_store::{
+    AccessChange, AccessReceipt, AccessRequest, AccessStore, AccessStoreError,
+};
 use artifree_ports::artifact_store::{
     ArtifactListing, ArtifactRecord, ArtifactStore, ChangePage, CleanupReceipt, CleanupRequest,
     CommitReceipt, ConditionalCommit, ContentSetDigest, CopySource, Delivery, FileEdit, FileEntry,
@@ -82,6 +84,9 @@ pub enum Missing {
     Job,
     /// The revision has no build for the profile (decision 0058 rule 14).
     Build,
+    /// The user to revoke is not a member of the artifact (decision 0060
+    /// rule 6).
+    Member,
 }
 
 /// What a source export holds; see [`ArtifactService::export`].
@@ -187,6 +192,16 @@ pub enum ArtifactError {
     /// takes no new commit and no new duplicate (decision 0059 rule 7);
     /// nothing was written.
     TypeReleaseUnknown,
+    /// The change of access was prepared against an older access version;
+    /// nothing was written (decision 0060 rule 6).
+    AccessConflict {
+        /// The access version the artifact is at.
+        current: AccessVersion,
+    },
+    /// A grant to a user who is not registered, is disabled, or is the
+    /// owner: one answer for all three, so it does not tell them apart
+    /// (decision 0060 rule 6); nothing was written.
+    NotGrantable,
     /// Storage failed. The request may be retried with the same key.
     Unavailable(String),
 }
@@ -200,6 +215,15 @@ impl fmt::Display for ArtifactError {
             Self::NotFound(Missing::File) => formatter.write_str("file not found in revision"),
             Self::NotFound(Missing::Job) => formatter.write_str("job not found"),
             Self::NotFound(Missing::Build) => formatter.write_str("revision has no build"),
+            Self::NotFound(Missing::Member) => formatter.write_str("the user is not a member"),
+            Self::AccessConflict { current } => write!(
+                formatter,
+                "access changed; current access version is {}",
+                current.0
+            ),
+            Self::NotGrantable => formatter.write_str(
+                "the user cannot be granted access: not a registered, enabled user other than the owner",
+            ),
             Self::Forbidden => formatter.write_str("the actor's role does not allow this"),
             Self::RevisionConflict { current } => write!(
                 formatter,
@@ -273,6 +297,19 @@ impl ArtifactError {
 }
 
 impl std::error::Error for ArtifactError {}
+
+impl From<AccessStoreError> for ArtifactError {
+    fn from(error: AccessStoreError) -> Self {
+        match error {
+            AccessStoreError::NotFound => Self::NotFound(Missing::Artifact),
+            AccessStoreError::RequestKeyReused => Self::RequestKeyReused,
+            AccessStoreError::VersionConflict { current } => Self::AccessConflict { current },
+            AccessStoreError::NotGrantable => Self::NotGrantable,
+            AccessStoreError::NotMember => Self::NotFound(Missing::Member),
+            AccessStoreError::Unavailable(reason) => Self::Unavailable(reason),
+        }
+    }
+}
 
 impl From<StoreError> for ArtifactError {
     fn from(error: StoreError) -> Self {
@@ -1012,6 +1049,65 @@ impl<S: ArtifactStore + AccessStore> ArtifactService<S> {
         id: &ArtifactId,
     ) -> Result<ArtifactRecord, ArtifactError> {
         self.authorized(actor, id)
+    }
+
+    /// Grants `user` a role on the actor's artifact, changes it, or revokes
+    /// it (decision 0060 rule 6), if the artifact is at `base`. Only the
+    /// owner may: a member is refused for their role, and anyone else, or
+    /// anyone while the artifact is in the trash, finds no artifact. The key
+    /// is in the owner's key space; a retry with the same key and the same
+    /// change returns the first receipt, delivered as a replay. Each change
+    /// raises the access version by one; a grant of the role the member
+    /// already has changes nothing. The store cancels the queued jobs a
+    /// revocation or a downgrade takes (rule 15) and appends the change rows
+    /// (rule 14) in the same transaction. What the user holds in memory is the
+    /// caller's to remove once the receipt says the change committed.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::NotFound`] for a missing, inaccessible, trashed, or
+    /// purged artifact, or ([`Missing::Member`]) a revocation of a user who
+    /// is not a member; [`ArtifactError::Forbidden`] for a member;
+    /// [`ArtifactError::AccessConflict`] when `base` is not current;
+    /// [`ArtifactError::NotGrantable`]; [`ArtifactError::RequestKeyReused`];
+    /// or [`ArtifactError::Unavailable`].
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Each argument is one part of the change request; a struct would only rename them."
+    )]
+    pub fn change_access(
+        &self,
+        actor: &ActorId,
+        key: &RequestKey,
+        id: &ArtifactId,
+        user: &ActorId,
+        change: AccessChange,
+        base: AccessVersion,
+        now: UnixMillis,
+    ) -> Result<AccessReceipt, ArtifactError> {
+        // A member is refused for its role (rule 4) before the store, which
+        // finds nothing that is not the actor's own.
+        self.owned(actor, id, Need::Own)?;
+        let mut hasher = Fingerprint::new("access");
+        hasher.field(id.as_str().as_bytes());
+        hasher.field(user.as_str().as_bytes());
+        hasher.field(match change {
+            AccessChange::Grant(role) => role.as_str().as_bytes(),
+            AccessChange::Revoke => b"revoke".as_slice(),
+        });
+        hasher.field(&base.0.to_be_bytes());
+        Ok(self.store.change_access(AccessRequest {
+            request: RequestIdentity {
+                actor,
+                key,
+                fingerprint: hasher.finish(),
+            },
+            artifact: id,
+            user,
+            change,
+            base,
+            now,
+        })?)
     }
 
     /// The access list of an artifact the actor owns or is a member of
@@ -1815,6 +1911,50 @@ mod tests {
         assert_eq!(disabled(shown.access(&owner, &id)?), [Some(true)]);
         let trashed = service(list(vec![member], true));
         assert_eq!(disabled(trashed.access(&owner, &id)?), [Some(true)]);
+        Ok(())
+    }
+
+    /// Decision 0060 rules 4 and 6: the core refuses a member's change of
+    /// access for its role before the store is asked, so every adapter
+    /// answers `403` and not what the store would.
+    #[test]
+    fn a_member_changes_no_access_and_the_store_is_not_asked()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let owner: ActorId = "owner".parse()?;
+        let editor = ActorId::user([3; 16]);
+        let id: ArtifactId = "art_0123456789abcdef0123456789abcdef".parse()?;
+        let service = ArtifactService::new(PurgedAfterTheCheck {
+            record: ArtifactRecord {
+                id: id.clone(),
+                owner,
+                kind: ArtifactKind::App,
+                artifact_type: None,
+                title: "Demo".parse()?,
+                pinned: false,
+                current_revision: SourceRevision(1),
+                metadata_revision: MetadataRevision(1),
+                deleted_at: None,
+                created_at: UnixMillis(1),
+                updated_at: UnixMillis(1),
+            },
+            role: Some(Role::Editor),
+            list: None,
+        });
+        // The fixture's store answers every change as unavailable.
+        assert_eq!(
+            service
+                .change_access(
+                    &editor,
+                    &"access-by-editor".parse()?,
+                    &id,
+                    &ActorId::user([4; 16]),
+                    AccessChange::Revoke,
+                    AccessVersion(1),
+                    UnixMillis(1),
+                )
+                .err(),
+            Some(ArtifactError::Forbidden)
+        );
         Ok(())
     }
 

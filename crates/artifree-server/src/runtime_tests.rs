@@ -3509,3 +3509,168 @@ fn a_downgraded_editors_view_reports_only_what_a_viewer_is_offered() -> Result<(
             Ok(())
         })
 }
+
+/// A change of access through the access routes' commit, as `owner`.
+async fn change_access(
+    state: &AppState,
+    owner: &ActorId,
+    key: &str,
+    artifact: &ArtifactId,
+    user: &ActorId,
+    change: artifree_ports::access_store::AccessChange,
+    base: u64,
+) -> Result<artifree_contracts::api::AccessChangeResponse, Box<dyn Error>> {
+    let axum::Json(response) = crate::access::change(
+        state,
+        owner.clone(),
+        key.parse()?,
+        artifact.clone(),
+        user.clone(),
+        change,
+        artifree_domain::access::AccessVersion(base),
+    )
+    .await
+    .map_err(|error| error.body.message)?;
+    Ok(response)
+}
+
+/// Decision 0060 rule 15: revoking a member closes, for that user and that
+/// artifact only, its preview tickets, the grants scoped to it on the
+/// user's connections, its room participation and its handoff deliveries
+/// that name it. The connection stays open, and what the user holds of
+/// another artifact, and the owner's own of the artifact, stay.
+#[test]
+fn a_revocation_closes_what_the_member_holds_of_that_artifact_only() -> Result<(), Box<dyn Error>> {
+    use artifree_ports::access_store::AccessChange;
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let (owner, ana) = (registered_user(&state, 1)?, registered_user(&state, 2)?);
+        let shared = create_keyed_artifact(&state, &owner, "create-shared").await?;
+        let kept = create_keyed_artifact(&state, &owner, "create-kept").await?;
+        grant_viewer(&directory, &owner, &shared, &ana)?;
+        grant_viewer(&directory, &owner, &kept, &ana)?;
+        let (anas, owners) = (Holder::new(&state, &ana)?, Holder::new(&state, &owner)?);
+        let anas_shared = anas.hold(&state, &shared).await?;
+        let anas_kept = anas.hold(&state, &kept).await?;
+        let owners_shared = owners.hold(&state, &shared).await?;
+        assert_eq!(state.rooms().counts().map(|counts| counts.rooms), Some(3));
+
+        let revoked = change_access(
+            &state,
+            &owner,
+            "key-revoke",
+            &shared,
+            &ana,
+            AccessChange::Revoke,
+            1,
+        )
+        .await?;
+        assert_eq!((revoked.access_version, revoked.replayed), (2, false));
+
+        assert_eq!(anas.holds(&state, &shared, &anas_shared)?, [false; 3]);
+        assert_eq!(anas.holds(&state, &kept, &anas_kept)?, [true; 3]);
+        assert_eq!(owners.holds(&state, &shared, &owners_shared)?, [true; 3]);
+        assert!(
+            state.runtime_sessions().get(&ana, &anas.tab).is_ok(),
+            "the connection stays"
+        );
+        assert_eq!(state.rooms().counts().map(|counts| counts.rooms), Some(2));
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+/// A replayed revocation closes nothing: after a new grant, what the user
+/// holds again stays (decision 0060 rule 15).
+#[test]
+fn a_replayed_revocation_closes_nothing_after_a_new_grant() -> Result<(), Box<dyn Error>> {
+    use artifree_domain::access::Role;
+    use artifree_ports::access_store::AccessChange;
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let (owner, ana) = (registered_user(&state, 1)?, registered_user(&state, 2)?);
+        let shared = create_keyed_artifact(&state, &owner, "create-shared").await?;
+        grant_viewer(&directory, &owner, &shared, &ana)?;
+        change_access(
+            &state,
+            &owner,
+            "key-revoke",
+            &shared,
+            &ana,
+            AccessChange::Revoke,
+            1,
+        )
+        .await?;
+        let regrant = AccessChange::Grant(Role::Viewer);
+        change_access(&state, &owner, "key-regrant", &shared, &ana, regrant, 2).await?;
+        let anas = Holder::new(&state, &ana)?;
+        let held = anas.hold(&state, &shared).await?;
+        let replay = change_access(
+            &state,
+            &owner,
+            "key-revoke",
+            &shared,
+            &ana,
+            AccessChange::Revoke,
+            1,
+        )
+        .await?;
+        assert_eq!((replay.access_version, replay.replayed), (2, true));
+        assert_eq!(anas.holds(&state, &shared, &held)?, [true; 3]);
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+/// Decision 0060 rule 15: a downgrade from editor to viewer removes, on
+/// the user's connections, only the artifact's grants of `source.write`;
+/// the other capabilities, the tickets, room, handoffs, and the grants of
+/// another artifact the user edits stay.
+#[test]
+fn a_downgrade_narrows_the_artifacts_grants_and_keeps_the_rest() -> Result<(), Box<dyn Error>> {
+    use artifree_domain::access::Role;
+    use artifree_ports::access_store::AccessChange;
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            let (owner, other) = (registered_user(&state, 1)?, registered_user(&state, 2)?);
+            let ed = registered_user(&state, 3)?;
+            let writing = create_writing_artifact(&state, &owner).await?;
+            let elsewhere = create_writing_artifact(&state, &other).await?;
+            grant_role(&directory, &owner, &writing, &ed, Role::Editor, 0)?;
+            grant_role(&directory, &other, &elsewhere, &ed, Role::Editor, 0)?;
+            let mut frame = Frame::open(&state, &ed, &writing)?;
+            let mut kept = Frame::open(&state, &ed, &elsewhere)?;
+            // Its own view ids, apart from the first frame's.
+            kept.views = 100;
+            frame.offered().await?;
+            kept.offered().await?;
+            let holder = Holder::new(&state, &ed)?;
+            let handoff = holder.hold(&state, &writing).await?;
+            assert_eq!(frame.held()?, ["metadata.read", "source.write"]);
+            // The frames' views hold tickets of the artifact too, so the
+            // ticket count is compared, not taken as one.
+            let tickets = state.previews().live_tickets_of(&ed, &writing);
+            let before = holder.holds(&state, &writing, &handoff)?;
+            assert_eq!(before[1..], [true, true]);
+
+            let downgrade = AccessChange::Grant(Role::Viewer);
+            change_access(&state, &owner, "downgrade", &writing, &ed, downgrade, 1).await?;
+
+            assert_eq!(frame.held()?, ["metadata.read"]);
+            assert_eq!(kept.held()?, ["metadata.read", "source.write"]);
+            assert_eq!(holder.holds(&state, &writing, &handoff)?, before);
+            assert_eq!(state.previews().live_tickets_of(&ed, &writing), tickets);
+            assert!(tickets > 0);
+            Ok(())
+        })
+}

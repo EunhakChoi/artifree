@@ -154,6 +154,8 @@ try {
       );
     if (error.currentDataVersion !== undefined)
       console.error(`current_data_version=${error.currentDataVersion}`);
+    if (error.currentAccessVersion !== undefined)
+      console.error(`current_access_version=${error.currentAccessVersion}`);
     const currentAssetVersion = currentAssetVersionOf(error);
     if (currentAssetVersion !== undefined)
       console.error(`current_asset_version=${currentAssetVersion}`);

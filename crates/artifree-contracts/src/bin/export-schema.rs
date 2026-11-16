@@ -15,28 +15,29 @@
 )]
 
 use artifree_contracts::api::{
-    AgentSessionList, AppData, Artifact, ArtifactAccess, ArtifactChange, ArtifactList, AssetList,
-    AssetResponse, BackgroundStatus, BuildStatus, CancelJobRequest, CancelJobResponse,
-    CommitResponse, CreateArtifactRequest, CreateRuntimeViewRequest, CreateTokenRequest,
-    CreateTokenResponse, CreateUserRequest, DataMembers, DataOutboxBinding, DataWriteResponse,
-    DeleteAssetRequest, DeleteAssetResponse, DeleteDataRequest, DuplicateArtifactRequest,
-    DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse,
-    ErrorResponse, FeedPosition, Handoff, HandoffActionRequest, Job, JobList, ListArtifactsQuery,
-    ListJobsQuery, Me, Preview, PurgeArtifactRequest, PurgeArtifactResponse, ReadDataMembersQuery,
-    ReadDataQuery, RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse,
-    RestoreRevisionRequest, Revision, RevisionList, RoomEventReceipt, RoomEventRequest,
-    RoomHeartbeatRequest, RoomJoinRequest, RoomSnapshot, RotateTokenResponse,
-    RuntimeAssetDeleteRequest, RuntimeAssetDownloadOffer, RuntimeAssetDownloadRequest,
-    RuntimeAssetListRequest, RuntimeAssetPart, RuntimeAssetReadRequest, RuntimeAssetUploadRequest,
-    RuntimeConnection, RuntimeDataDeleteRequest, RuntimeDataReadRequest, RuntimeDataSetRequest,
+    AccessChangeResponse, AgentSessionList, AppData, Artifact, ArtifactAccess, ArtifactChange,
+    ArtifactList, AssetList, AssetResponse, BackgroundStatus, BuildStatus, CancelJobRequest,
+    CancelJobResponse, CommitResponse, CreateArtifactRequest, CreateRuntimeViewRequest,
+    CreateTokenRequest, CreateTokenResponse, CreateUserRequest, DataMembers, DataOutboxBinding,
+    DataWriteResponse, DeleteAssetRequest, DeleteAssetResponse, DeleteDataRequest,
+    DuplicateArtifactRequest, DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest,
+    EnqueueJobResponse, ErrorResponse, FeedPosition, Handoff, HandoffActionRequest, Job, JobList,
+    ListArtifactsQuery, ListJobsQuery, Me, Preview, PurgeArtifactRequest, PurgeArtifactResponse,
+    ReadDataMembersQuery, ReadDataQuery, RemoveUnreferencedContentRequest,
+    RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionList,
+    RevokeAccessRequest, RoomEventReceipt, RoomEventRequest, RoomHeartbeatRequest, RoomJoinRequest,
+    RoomSnapshot, RotateTokenResponse, RuntimeAssetDeleteRequest, RuntimeAssetDownloadOffer,
+    RuntimeAssetDownloadRequest, RuntimeAssetListRequest, RuntimeAssetPart,
+    RuntimeAssetReadRequest, RuntimeAssetUploadRequest, RuntimeConnection,
+    RuntimeDataDeleteRequest, RuntimeDataReadRequest, RuntimeDataSetRequest,
     RuntimeDataUpdateRequest, RuntimeDataValue, RuntimeDownloadOffer, RuntimeDownloadRequest,
     RuntimeGrant, RuntimeMetadata, RuntimeMetadataRequest, RuntimeSourceList,
     RuntimeSourceListRequest, RuntimeSourcePart, RuntimeSourceReadRequest,
     RuntimeSourceWriteReceipt, RuntimeSourceWriteRequest, RuntimeView, SaveRevisionRequest,
-    SetDataRequest, SetRuntimeGrantRequest, SourceExportManifest, StageHandoffRequest, TokenInfo,
-    TokenList, TypeDescriptor, TypeList, TypeReference, UnreferencedContent, UpdateArtifactRequest,
-    UpdateArtifactResponse, UpdateDataRequest, UploadAssetRequest, UploadAssetResponse, UserInfo,
-    UserList,
+    SetAccessRequest, SetDataRequest, SetRuntimeGrantRequest, SourceExportManifest,
+    StageHandoffRequest, TokenInfo, TokenList, TypeDescriptor, TypeList, TypeReference,
+    UnreferencedContent, UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest,
+    UploadAssetRequest, UploadAssetResponse, UserInfo, UserList,
 };
 use artifree_contracts::{ServiceDescription, mcp};
 use schemars::generate::SchemaSettings;
@@ -47,7 +48,7 @@ use schemars::{Schema, SchemaGenerator};
 /// them as bodies.
 fn api_bodies(generator: &mut SchemaGenerator) -> Vec<Schema> {
     // A vector: Serde serializes arrays of up to 32 elements only.
-    let bodies = vec![
+    let mut bodies = vec![
         generator.subschema_for::<AssetList>(),
         generator.subschema_for::<AssetResponse>(),
         generator.subschema_for::<UploadAssetRequest>(),
@@ -120,8 +121,6 @@ fn api_bodies(generator: &mut SchemaGenerator) -> Vec<Schema> {
         generator.subschema_for::<CreateUserRequest>(),
         generator.subschema_for::<UserInfo>(),
         generator.subschema_for::<UserList>(),
-        generator.subschema_for::<Me>(),
-        generator.subschema_for::<ArtifactAccess>(),
         generator.subschema_for::<EnqueueJobRequest>(),
         generator.subschema_for::<EnqueueJobResponse>(),
         generator.subschema_for::<CancelJobResponse>(),
@@ -140,6 +139,7 @@ fn api_bodies(generator: &mut SchemaGenerator) -> Vec<Schema> {
         generator.subschema_for::<TypeDescriptor>(),
         generator.subschema_for::<TypeReference>(),
     ];
+    bodies.extend(access_bodies(generator));
     // Registers these definitions for generated clients.
     generator.subschema_for::<ListArtifactsQuery>();
     generator.subschema_for::<DuplicateArtifactRequest>();
@@ -151,6 +151,17 @@ fn api_bodies(generator: &mut SchemaGenerator) -> Vec<Schema> {
     // The cancel body has no fields, so the root would accept any empty object.
     generator.subschema_for::<CancelJobRequest>();
     bodies
+}
+
+/// The bodies of the access routes (decision 0060 rule 6).
+fn access_bodies(generator: &mut SchemaGenerator) -> [Schema; 5] {
+    [
+        generator.subschema_for::<Me>(),
+        generator.subschema_for::<ArtifactAccess>(),
+        generator.subschema_for::<SetAccessRequest>(),
+        generator.subschema_for::<RevokeAccessRequest>(),
+        generator.subschema_for::<AccessChangeResponse>(),
+    ]
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -95,6 +95,7 @@ impl ApiError {
                 message: message.into(),
                 current_revision: None,
                 current_metadata_revision: None,
+                current_access_version: None,
                 current_data_version: None,
                 current_asset_version: None,
                 conflicting_files: None,
@@ -178,6 +179,13 @@ impl ApiError {
         conflict
     }
 
+    /// An `access_conflict` that names the access version the artifact is at.
+    fn access_conflict(current: u64, message: String) -> Self {
+        let mut conflict = Self::new(StatusCode::CONFLICT, ErrorCode::AccessConflict, message);
+        conflict.body.current_access_version = Some(current);
+        conflict
+    }
+
     /// A `type_requirements` refusal that names the `missing` paths (decision
     /// 0059 rules 5 and 6).
     fn missing_paths(missing: &[PackagePath], message: String) -> Self {
@@ -217,6 +225,7 @@ impl From<ArtifactError> for ApiError {
                 conflict.body.current_metadata_revision = Some(current.0);
                 conflict
             }
+            ArtifactError::AccessConflict { current } => Self::access_conflict(current.0, message),
             ArtifactError::NotInTrash => {
                 Self::new(StatusCode::CONFLICT, ErrorCode::NotInTrash, message)
             }
@@ -269,7 +278,8 @@ impl From<ArtifactError> for ApiError {
             ArtifactError::InvalidRange(RangeError::PastEnd { size }) => {
                 Self::unsatisfiable(size, message)
             }
-            ArtifactError::InvalidRange(_) => Self::invalid(message),
+            // One body for an unregistered, a disabled and the owner's id.
+            ArtifactError::InvalidRange(_) | ArtifactError::NotGrantable => Self::invalid(message),
             ArtifactError::AssetLimitExceeded => Self::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 ErrorCode::AssetLimitExceeded,

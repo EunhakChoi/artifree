@@ -495,6 +495,8 @@ impl Ids {
             ("agent_secret", self.agent_secret.clone()),
             ("sha", self.sha.clone()),
             ("path", "notes.txt".to_owned()),
+            // A user id nobody registered: a grant to it is refused, not lost.
+            ("user", format!("u-{}", "e".repeat(32))),
             ("profile", "react-v1".to_owned()),
             ("participant", self.participant.to_string()),
             ("epoch", self.epoch.to_string()),
@@ -795,6 +797,11 @@ enum Holder {
     /// a token issued to the owner profile is an agent token and is refused
     /// (`403`) before the name is read (decisions 0029 and 0036).
     Purges,
+    /// A change of the holder's access (decision 0060 rule 6): the holder
+    /// gets anything but not-found or a server error (the fixture's grant
+    /// names a user nobody registered), and anyone else is answered as for
+    /// [`Self::Purges`].
+    Shares,
 
     /// Closing is idempotent: the holder gets a success, and anyone else the
     /// same success, which closes nothing of the holder's.
@@ -851,7 +858,7 @@ const ROOM_ROUTE: &str = "/v1/runtime-sessions/{session}/artifacts/{artifact}/ro
     reason = "A table of every route reads best as one list."
 )]
 fn http_cases() -> Vec<Case> {
-    use Holder::{Closes, Purges, Reaches, Succeeds, Unbuilt};
+    use Holder::{Closes, Purges, Reaches, Shares, Succeeds, Unbuilt};
     vec![
         case("show", "GET", "/v1/artifacts/{artifact}", None, Succeeds),
         case(
@@ -931,6 +938,16 @@ fn http_cases() -> Vec<Case> {
             "/v1/artifacts/{artifact}/access",
             None,
             Succeeds,
+        ),
+        // The holder's grant to an unregistered id is refused for the user;
+        // anyone else is told the artifact does not exist, and the owner
+        // profile's agent token is refused first (decision 0060 rule 6).
+        case(
+            "change access",
+            "PUT",
+            "/v1/artifacts/{artifact}/access/{user}",
+            Some(r#"{"role":"viewer","base_access_version":0}"#),
+            Shares,
         ),
         case(
             "agent sessions",
@@ -1442,7 +1459,9 @@ async fn others_find_nothing(
                 answers.push((reply.status, names.scrub(&reply.text)));
             }
             let expected = match case.holder {
-                Holder::Purges if *credential == Credential::OwnerAgent => StatusCode::FORBIDDEN,
+                Holder::Purges | Holder::Shares if *credential == Credential::OwnerAgent => {
+                    StatusCode::FORBIDDEN
+                }
                 Holder::Closes => StatusCode::NO_CONTENT,
                 _ => StatusCode::NOT_FOUND,
             };
@@ -1540,7 +1559,7 @@ async fn the_holder_is_not_refused(harness: &Harness, alice: &Person, ids: &Ids)
                 reply.status,
                 reply.text
             ),
-            Holder::Reaches => assert!(
+            Holder::Reaches | Holder::Shares => assert!(
                 reply.status != StatusCode::NOT_FOUND && !reply.status.is_server_error(),
                 "alice: {} ({} {}): {} {}",
                 case.name,

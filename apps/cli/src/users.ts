@@ -18,8 +18,8 @@ Connection:
 
 Every command needs the owner profile's bootstrap token; a token issued to any
 user is refused. A user owns its own artifacts and reaches another user's only
-as a member (artifree artifact access list <id>); no command grants a role
-yet. A user holds no credential until a token is issued for it:
+as a member: the owner grants, changes and revokes roles with artifree
+artifact access grant|revoke. A user holds no credential until a token is issued for it:
 artifree token create <name> --user <id>, and artifree me prints its id.
 
 Subcommands:

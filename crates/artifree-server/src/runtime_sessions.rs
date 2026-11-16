@@ -281,6 +281,31 @@ impl RuntimeSessions {
         }
     }
 
+    /// Narrows, on every connection of each of `users`, the grants scoped to
+    /// `artifact` to the capabilities in `offered` (decision 0060 rule 15, a
+    /// downgrade). Grants for other artifacts stay as they are.
+    pub(crate) fn narrow_members(
+        &self,
+        users: &[ActorId],
+        artifact: &ArtifactId,
+        offered: CapabilitySet,
+    ) {
+        if let Ok(sessions) = self.sessions.lock() {
+            for ((owner, _), session) in sessions.iter() {
+                if !users.contains(owner) {
+                    continue;
+                }
+                if let Ok(mut state) = session.state.lock() {
+                    for (scope, grant) in &mut state.grants {
+                        if &scope.artifact == artifact {
+                            grant.capabilities = grant.capabilities.and(offered);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// How many connections `actor` holds, for tests.
     #[cfg(test)]
     pub(crate) fn held_by(&self, actor: &ActorId) -> usize {

@@ -1,5 +1,36 @@
 {
   "$defs": {
+    "AccessChangeResponse": {
+      "additionalProperties": false,
+      "description": "Response of a change of access.",
+      "properties": {
+        "access_version": {
+          "description": "The access version the request left the artifact at. A grant of the\nrole the member already has leaves it where it was.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "artifact_id": {
+          "description": "The artifact.",
+          "type": "string"
+        },
+        "replayed": {
+          "description": "True when an earlier request with the same key already made the\nchange. The access version is then the one that request left, which\nlater changes may have passed; read the access list for the current\none.",
+          "type": "boolean"
+        },
+        "user_id": {
+          "description": "The user whose access the request changed.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "user_id",
+        "access_version",
+        "replayed"
+      ],
+      "type": "object"
+    },
     "AccessMember": {
       "additionalProperties": false,
       "description": "One member of an artifact.",
@@ -1297,6 +1328,15 @@
             "null"
           ]
         },
+        "current_access_version": {
+          "description": "The current access version, present for `access_conflict`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "current_asset_version": {
           "description": "Current independent state for `asset_conflict`.",
           "format": "uint64",
@@ -1395,6 +1435,11 @@
         {
           "const": "metadata_conflict",
           "description": "The base metadata revision is not current; reload and reapply the\nchange.",
+          "type": "string"
+        },
+        {
+          "const": "access_conflict",
+          "description": "The base access version is not current; read the access list again\nand reapply the change. Nothing was written.",
           "type": "string"
         },
         {
@@ -2698,6 +2743,22 @@
       ],
       "type": "object"
     },
+    "RevokeAccessRequest": {
+      "additionalProperties": false,
+      "description": "Body of `DELETE /v1/artifacts/{id}/access/{user_id}`: ends the user's\nmembership (decision 0060 rule 6). Owner only; it needs an\n`Idempotency-Key`.",
+      "properties": {
+        "base_access_version": {
+          "description": "The access version the change was prepared against. Another version\nis `access_conflict`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "base_access_version"
+      ],
+      "type": "object"
+    },
     "RoomEvent": {
       "additionalProperties": false,
       "description": "One ephemeral event, as the viewer of a [`RoomSnapshot`] sees it.",
@@ -3871,6 +3932,27 @@
       ],
       "type": "object"
     },
+    "SetAccessRequest": {
+      "additionalProperties": false,
+      "description": "Body of `PUT /v1/artifacts/{id}/access/{user_id}`: grants the user a role\non the artifact, or changes the role they have (decision 0060 rule 6).\nOwner only; it needs an `Idempotency-Key`.",
+      "properties": {
+        "base_access_version": {
+          "description": "The access version the change was prepared against, from\n`GET /v1/artifacts/{id}/access`. Another version is\n`access_conflict`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "role": {
+          "$ref": "#/$defs/MemberRole",
+          "description": "The role to grant."
+        }
+      },
+      "required": [
+        "role",
+        "base_access_version"
+      ],
+      "type": "object"
+    },
     "SetDataRequest": {
       "additionalProperties": false,
       "description": "Body of `PUT /v1/artifacts/{id}/data`, with an `Idempotency-Key` header:\nreplaces the value at a path.",
@@ -4844,12 +4926,6 @@
       "$ref": "#/$defs/UserList"
     },
     {
-      "$ref": "#/$defs/Me"
-    },
-    {
-      "$ref": "#/$defs/ArtifactAccess"
-    },
-    {
       "$ref": "#/$defs/EnqueueJobRequest"
     },
     {
@@ -4899,6 +4975,21 @@
     },
     {
       "$ref": "#/$defs/TypeReference"
+    },
+    {
+      "$ref": "#/$defs/Me"
+    },
+    {
+      "$ref": "#/$defs/ArtifactAccess"
+    },
+    {
+      "$ref": "#/$defs/SetAccessRequest"
+    },
+    {
+      "$ref": "#/$defs/RevokeAccessRequest"
+    },
+    {
+      "$ref": "#/$defs/AccessChangeResponse"
     }
   ],
   "description": "Any JSON request or response body of HTTP API v1, the data of a change feed event, or the manifest of a source export.",

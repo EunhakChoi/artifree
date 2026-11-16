@@ -27,7 +27,7 @@ export type { DataEvent, FollowDataOptions } from './follow-data.js';
 export type { FollowJobOptions } from './follow-job.js';
 export { FileConflictError, editFiles, readRevision } from './file-edits.js';
 export { createUser, listUsers, setUserDisabled } from './users.js';
-export { readAccess, readMe } from './access.js';
+export { readAccess, readMe, revokeAccess, setAccess } from './access.js';
 export { getAsset, listAssets, readAsset } from './assets.js';
 export { toBase64 } from './base64.js';
 export { FRAME_ROUTE_TAILS } from './runtime-frame.js';

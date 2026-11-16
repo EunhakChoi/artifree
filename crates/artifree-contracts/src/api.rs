@@ -2349,6 +2349,49 @@ pub struct ArtifactAccess {
     pub access_version: u64,
 }
 
+/// Body of `PUT /v1/artifacts/{id}/access/{user_id}`: grants the user a role
+/// on the artifact, or changes the role they have (decision 0060 rule 6).
+/// Owner only; it needs an `Idempotency-Key`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetAccessRequest {
+    /// The role to grant.
+    pub role: MemberRole,
+    /// The access version the change was prepared against, from
+    /// `GET /v1/artifacts/{id}/access`. Another version is
+    /// `access_conflict`.
+    pub base_access_version: u64,
+}
+
+/// Body of `DELETE /v1/artifacts/{id}/access/{user_id}`: ends the user's
+/// membership (decision 0060 rule 6). Owner only; it needs an
+/// `Idempotency-Key`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RevokeAccessRequest {
+    /// The access version the change was prepared against. Another version
+    /// is `access_conflict`.
+    pub base_access_version: u64,
+}
+
+/// Response of a change of access.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AccessChangeResponse {
+    /// The artifact.
+    pub artifact_id: String,
+    /// The user whose access the request changed.
+    pub user_id: String,
+    /// The access version the request left the artifact at. A grant of the
+    /// role the member already has leaves it where it was.
+    pub access_version: u64,
+    /// True when an earlier request with the same key already made the
+    /// change. The access version is then the one that request left, which
+    /// later changes may have passed; read the access list for the current
+    /// one.
+    pub replayed: bool,
+}
+
 /// Data of a `change` event of `GET /v1/changes`: one commit that wrote a
 /// revision or changed metadata, one data write that changed the actor's data
 /// space, or one job that was created or changed. Retries that replay a
@@ -2610,6 +2653,9 @@ pub enum ErrorCode {
     /// The base metadata revision is not current; reload and reapply the
     /// change.
     MetadataConflict,
+    /// The base access version is not current; read the access list again
+    /// and reapply the change. Nothing was written.
+    AccessConflict,
     /// The artifact is not in the trash, so it cannot be purged. Move it to
     /// the trash first.
     NotInTrash,
@@ -2696,6 +2742,9 @@ pub struct ErrorBody {
     /// The current metadata revision, present for `metadata_conflict`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_metadata_revision: Option<u64>,
+    /// The current access version, present for `access_conflict`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_access_version: Option<u64>,
     /// The current data version, present for `data_conflict` (of a write, or
     /// of a listing whose `at_data_version` is not current).
     #[serde(default, skip_serializing_if = "Option::is_none")]

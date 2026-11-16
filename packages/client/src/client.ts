@@ -2265,6 +2265,7 @@ export class ArtifreeClient {
       currentRevision: failure.current_revision ?? undefined,
       currentMetadataRevision: failure.current_metadata_revision ?? undefined,
       currentDataVersion: failure.current_data_version ?? undefined,
+      currentAccessVersion: failure.current_access_version ?? undefined,
       missingPaths: failure.missing_paths ?? undefined,
       ...(retryAfter === undefined ? {} : { retryAfterSeconds: retryAfter }),
     });

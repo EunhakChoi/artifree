@@ -1,17 +1,19 @@
 import type {
+  AccessChangeResponse,
   AccessMember,
   AccessUser,
   ArtifactAccess,
   Me,
+  MemberRole,
 } from '@artifree/contracts';
-import type { ArtifreeClient, ReadOptions } from './client.js';
+import type { ArtifreeClient, MutationOptions, ReadOptions } from './client.js';
 import { isCount, isRecord, list } from './responses.js';
 
 /**
  * The access reads of decision 0060 rule 6: functions, not methods of the
  * client class, for the same reason as the user management functions. They
- * read who the caller is and who may reach an artifact; nothing here changes
- * access.
+ * read who the caller is and who may reach an artifact, and let its owner
+ * grant, change and revoke a role.
  */
 
 /** Parses the answer of `GET /v1/me`. */
@@ -89,5 +91,95 @@ export async function readAccess(
       return access?.artifact_id === artifactId ? access : undefined;
     },
     { signal: options.signal },
+  );
+}
+
+/** Parses the answer of a change of access. */
+export function parseAccessChange(
+  value: unknown,
+): AccessChangeResponse | undefined {
+  if (!isRecord(value)) return undefined;
+  const { artifact_id, user_id, access_version, replayed } = value;
+  if (
+    typeof artifact_id !== 'string' ||
+    typeof user_id !== 'string' ||
+    !isCount(access_version) ||
+    typeof replayed !== 'boolean'
+  )
+    return undefined;
+  return { artifact_id, user_id, access_version, replayed };
+}
+
+function accessPath(artifactId: string, userId: string): string {
+  return `/v1/artifacts/${encodeURIComponent(artifactId)}/access/${encodeURIComponent(userId)}`;
+}
+
+function sameChange(
+  artifactId: string,
+  userId: string,
+): (value: unknown) => AccessChangeResponse | undefined {
+  return (value) => {
+    const change = parseAccessChange(value);
+    return change?.artifact_id === artifactId && change.user_id === userId
+      ? change
+      : undefined;
+  };
+}
+
+/**
+ * Grants `userId` `role` on the caller's artifact, or changes the role they
+ * have, if the artifact's access is at `baseAccessVersion`. Rejects with
+ * `access_conflict` and `currentAccessVersion` when it is not, with
+ * `invalid_request` for a user who is not registered, is disabled, or is
+ * the owner (one answer for all three), with `forbidden` for a member or a
+ * token issued to the owner profile, and with `not_found` for an artifact
+ * the caller cannot reach or that is in the trash. A retry with the same key
+ * and request resolves with `replayed: true`.
+ */
+export async function setAccess(
+  client: ArtifreeClient,
+  artifactId: string,
+  userId: string,
+  request: { role: MemberRole; baseAccessVersion: number },
+  options: MutationOptions,
+): Promise<AccessChangeResponse> {
+  return client.json(
+    'PUT',
+    accessPath(artifactId, userId),
+    sameChange(artifactId, userId),
+    {
+      mutation: {
+        body: {
+          role: request.role,
+          base_access_version: request.baseAccessVersion,
+        },
+        idempotencyKey: options.idempotencyKey,
+      },
+    },
+  );
+}
+
+/**
+ * Ends `userId`'s membership of the caller's artifact, if its access is at
+ * `baseAccessVersion`. Rejects as {@link setAccess} does, and with
+ * `not_found` for a user who is not a member.
+ */
+export async function revokeAccess(
+  client: ArtifreeClient,
+  artifactId: string,
+  userId: string,
+  baseAccessVersion: number,
+  options: MutationOptions,
+): Promise<AccessChangeResponse> {
+  return client.json(
+    'DELETE',
+    accessPath(artifactId, userId),
+    sameChange(artifactId, userId),
+    {
+      mutation: {
+        body: { base_access_version: baseAccessVersion },
+        idempotencyKey: options.idempotencyKey,
+      },
+    },
   );
 }
