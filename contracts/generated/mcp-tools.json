@@ -11957,6 +11957,29 @@
           "artifact_id": {
             "description": "Artifact identifier.",
             "type": "string"
+          },
+          "space": {
+            "anyOf": [
+              {
+                "description": "Which data space of an artifact a request names (decision 0060 rule 10).",
+                "oneOf": [
+                  {
+                    "const": "own",
+                    "description": "The caller's own space, which only the caller reads and writes.",
+                    "type": "string"
+                  },
+                  {
+                    "const": "shared",
+                    "description": "The space the artifact's head revision declares in its runtime\nmanifest (`\"shared\": \"editors\"` or `\"members\"`): its owner and every\nmember read it, and the declaration names who writes it. An artifact\nwhose head declares none answers `not_found`.",
+                    "type": "string"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The asset space: `own` (the default) or `shared`, the space the\nartifact's head revision declares in `artifree-runtime.json`, which\nevery member reads and the declared roles write."
           }
         },
         "required": [
@@ -12337,6 +12360,29 @@
           "asset_id": {
             "description": "Asset identifier from `list_assets` or `upload_asset`: 64 lowercase\nhexadecimal digits.",
             "type": "string"
+          },
+          "space": {
+            "anyOf": [
+              {
+                "description": "Which data space of an artifact a request names (decision 0060 rule 10).",
+                "oneOf": [
+                  {
+                    "const": "own",
+                    "description": "The caller's own space, which only the caller reads and writes.",
+                    "type": "string"
+                  },
+                  {
+                    "const": "shared",
+                    "description": "The space the artifact's head revision declares in its runtime\nmanifest (`\"shared\": \"editors\"` or `\"members\"`): its owner and every\nmember read it, and the declaration names who writes it. An artifact\nwhose head declares none answers `not_found`.",
+                    "type": "string"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The asset space: `own` (the default) or `shared`, the space the\nartifact's head revision declares in `artifree-runtime.json`, which\nevery member reads and the declared roles write."
           }
         },
         "required": [
@@ -12713,6 +12759,29 @@
           "idempotency_key": {
             "description": "Retry key: 8-128 ASCII letters, digits, `-`, `_`, `.`, or `:`. Use a\nnew value for each intended change and resend it unchanged to retry.",
             "type": "string"
+          },
+          "space": {
+            "anyOf": [
+              {
+                "description": "Which data space of an artifact a request names (decision 0060 rule 10).",
+                "oneOf": [
+                  {
+                    "const": "own",
+                    "description": "The caller's own space, which only the caller reads and writes.",
+                    "type": "string"
+                  },
+                  {
+                    "const": "shared",
+                    "description": "The space the artifact's head revision declares in its runtime\nmanifest (`\"shared\": \"editors\"` or `\"members\"`): its owner and every\nmember read it, and the declaration names who writes it. An artifact\nwhose head declares none answers `not_found`.",
+                    "type": "string"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The asset space: `own` (the default) or `shared`, the space the\nartifact's head revision declares in `artifree-runtime.json`, which\nevery member reads and the declared roles write."
           }
         },
         "required": [
@@ -13088,6 +13157,29 @@
           "idempotency_key": {
             "description": "Retry key: 8-128 ASCII letters, digits, `-`, `_`, `.`, or `:`. Use a\nnew value for each intended change and resend it unchanged to retry.",
             "type": "string"
+          },
+          "space": {
+            "anyOf": [
+              {
+                "description": "Which data space of an artifact a request names (decision 0060 rule 10).",
+                "oneOf": [
+                  {
+                    "const": "own",
+                    "description": "The caller's own space, which only the caller reads and writes.",
+                    "type": "string"
+                  },
+                  {
+                    "const": "shared",
+                    "description": "The space the artifact's head revision declares in its runtime\nmanifest (`\"shared\": \"editors\"` or `\"members\"`): its owner and every\nmember read it, and the declaration names who writes it. An artifact\nwhose head declares none answers `not_found`.",
+                    "type": "string"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The asset space: `own` (the default) or `shared`, the space the\nartifact's head revision declares in `artifree-runtime.json`, which\nevery member reads and the declared roles write."
           }
         },
         "required": [

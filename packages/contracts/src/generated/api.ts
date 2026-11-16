@@ -238,7 +238,8 @@ export type ChangeKind =
   | 'access_granted'
   | 'access_changed'
   | 'access_revoked'
-  | 'shared_data_changed';
+  | 'shared_data_changed'
+  | 'shared_assets_changed';
 /**
  * Version of a source export manifest.
  */

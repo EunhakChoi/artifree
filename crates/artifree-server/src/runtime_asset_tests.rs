@@ -6,6 +6,7 @@
 //! a deleted asset, a withdrawn grant, a revoked connection or a moved head
 //! each turn the reply into a refusal.
 
+use artifree_domain::access::Space;
 use std::error::Error;
 use std::future::{Future, poll_fn};
 use std::path::PathBuf;
@@ -150,7 +151,7 @@ async fn granted_view(
         state,
         actor.clone(),
         "asset-race-upload".parse()?,
-        &artifact,
+        (&artifact, Space::Own),
         UploadAssetRequest {
             base_asset_version: 0,
             content_type: "image/png".into(),
@@ -412,7 +413,7 @@ fn a_read_pending_on_a_deleted_asset_releases_no_bytes() -> Result<(), Box<dyn E
             &state,
             actor.clone(),
             "asset-race-delete".parse()?,
-            &view.artifact_id,
+            (&view.artifact_id, Space::Own),
             &asset,
             DeleteAssetRequest {
                 base_asset_version: 1,
@@ -553,7 +554,7 @@ fn a_read_whose_asset_is_deleted_during_the_final_check_releases_no_bytes()
             &state,
             actor.clone(),
             "asset-race-delete".parse()?,
-            &view.artifact_id,
+            (&view.artifact_id, Space::Own),
             &asset,
             DeleteAssetRequest {
                 base_asset_version: 1,
@@ -712,7 +713,7 @@ fn a_read_whose_asset_is_deleted_during_the_association_lookup_still_returns_its
             &state,
             actor.clone(),
             "asset-race-delete".parse()?,
-            &view.artifact_id,
+            (&view.artifact_id, Space::Own),
             &asset,
             DeleteAssetRequest {
                 base_asset_version: 1,

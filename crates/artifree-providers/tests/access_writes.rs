@@ -366,14 +366,14 @@ fn every_member_writes_its_own_data_space_and_copies_while_a_member() -> TestRes
 fn a_member_reaches_its_own_asset_space_while_a_member() -> TestResult {
     let f = Fixture::new()?;
     let id = &f.created.artifact.id;
-    assert!(f.store.assets(&f.viewer, id)?.assets.is_empty());
+    assert!(f.store.assets(&f.viewer, id, Space::Own)?.assets.is_empty());
     assert!(matches!(
-        f.store.assets(&f.stranger, id),
+        f.store.assets(&f.stranger, id, Space::Own),
         Err(AssetStoreError::NotFound)
     ));
     f.set_role("revoke", &f.viewer, None, f.access)?;
     assert!(matches!(
-        f.store.assets(&f.viewer, id),
+        f.store.assets(&f.viewer, id, Space::Own),
         Err(AssetStoreError::NotFound)
     ));
     Ok(())

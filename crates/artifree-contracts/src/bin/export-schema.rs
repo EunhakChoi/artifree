@@ -16,20 +16,20 @@
 
 use artifree_contracts::api::{
     AccessChangeResponse, AgentSessionList, AppData, Artifact, ArtifactAccess, ArtifactChange,
-    ArtifactList, AssetList, AssetResponse, BackgroundStatus, BuildStatus, CancelJobRequest,
-    CancelJobResponse, CommitResponse, CreateArtifactRequest, CreateRuntimeViewRequest,
-    CreateTokenRequest, CreateTokenResponse, CreateUserRequest, DataMembers, DataOutboxBinding,
-    DataWriteQuery, DataWriteResponse, DeleteAssetRequest, DeleteAssetResponse, DeleteDataRequest,
-    DuplicateArtifactRequest, DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest,
-    EnqueueJobResponse, ErrorResponse, FeedPosition, Handoff, HandoffActionRequest, Job, JobList,
-    ListArtifactsQuery, ListJobsQuery, Me, Preview, PurgeArtifactRequest, PurgeArtifactResponse,
-    ReadDataMembersQuery, ReadDataQuery, RemoveUnreferencedContentRequest,
-    RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionList,
-    RevokeAccessRequest, RoomEventReceipt, RoomEventRequest, RoomHeartbeatRequest, RoomJoinRequest,
-    RoomSnapshot, RotateTokenResponse, RuntimeAssetDeleteRequest, RuntimeAssetDownloadOffer,
-    RuntimeAssetDownloadRequest, RuntimeAssetListRequest, RuntimeAssetPart,
-    RuntimeAssetReadRequest, RuntimeAssetUploadRequest, RuntimeConnection,
-    RuntimeDataDeleteRequest, RuntimeDataReadRequest, RuntimeDataSetRequest,
+    ArtifactList, AssetList, AssetQuery, AssetResponse, BackgroundStatus, BuildStatus,
+    CancelJobRequest, CancelJobResponse, CommitResponse, CreateArtifactRequest,
+    CreateRuntimeViewRequest, CreateTokenRequest, CreateTokenResponse, CreateUserRequest,
+    DataMembers, DataOutboxBinding, DataWriteQuery, DataWriteResponse, DeleteAssetRequest,
+    DeleteAssetResponse, DeleteDataRequest, DuplicateArtifactRequest, DuplicateArtifactResponse,
+    EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorResponse, FeedPosition, Handoff,
+    HandoffActionRequest, Job, JobList, ListArtifactsQuery, ListJobsQuery, Me, Preview,
+    PurgeArtifactRequest, PurgeArtifactResponse, ReadDataMembersQuery, ReadDataQuery,
+    RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse, RestoreRevisionRequest,
+    Revision, RevisionList, RevokeAccessRequest, RoomEventReceipt, RoomEventRequest,
+    RoomHeartbeatRequest, RoomJoinRequest, RoomSnapshot, RotateTokenResponse,
+    RuntimeAssetDeleteRequest, RuntimeAssetDownloadOffer, RuntimeAssetDownloadRequest,
+    RuntimeAssetListRequest, RuntimeAssetPart, RuntimeAssetReadRequest, RuntimeAssetUploadRequest,
+    RuntimeConnection, RuntimeDataDeleteRequest, RuntimeDataReadRequest, RuntimeDataSetRequest,
     RuntimeDataUpdateRequest, RuntimeDataValue, RuntimeDownloadOffer, RuntimeDownloadRequest,
     RuntimeGrant, RuntimeMetadata, RuntimeMetadataRequest, RuntimeSourceList,
     RuntimeSourceListRequest, RuntimeSourcePart, RuntimeSourceReadRequest,
@@ -140,7 +140,13 @@ fn api_bodies(generator: &mut SchemaGenerator) -> Vec<Schema> {
         generator.subschema_for::<TypeReference>(),
     ];
     bodies.extend(access_bodies(generator));
-    // Registers these definitions for generated clients.
+    register_queries(generator);
+    bodies
+}
+
+/// Registers the query and cancel types for generated clients, without
+/// listing them as bodies.
+fn register_queries(generator: &mut SchemaGenerator) {
     generator.subschema_for::<ListArtifactsQuery>();
     generator.subschema_for::<DuplicateArtifactRequest>();
     generator.subschema_for::<ListJobsQuery>();
@@ -148,11 +154,11 @@ fn api_bodies(generator: &mut SchemaGenerator) -> Vec<Schema> {
     // empty object.
     generator.subschema_for::<ReadDataQuery>();
     generator.subschema_for::<ReadDataMembersQuery>();
-    // The write query has one optional field, as the read query.
+    // The write and asset queries have one optional field, as the read query.
     generator.subschema_for::<DataWriteQuery>();
+    generator.subschema_for::<AssetQuery>();
     // The cancel body has no fields, so the root would accept any empty object.
     generator.subschema_for::<CancelJobRequest>();
-    bodies
 }
 
 /// The bodies of the access routes (decision 0060 rule 6).

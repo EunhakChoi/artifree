@@ -10,6 +10,7 @@
 use artifree_core::artifacts::ArtifactService;
 use artifree_core::assets::{AssetDeletion, AssetUpload};
 use artifree_domain::SourceRevision;
+use artifree_domain::access::Space;
 use artifree_domain::assets::{AssetId, AssetMediaType, AssetVersion};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, UnixMillis};
 use artifree_domain::package::{FileChange, FilePackage, PackagePath};
@@ -87,6 +88,7 @@ fn database_in(directory: &Path) -> PathBuf {
 
 fn upload_input(content_type: &AssetMediaType, base: u64) -> AssetUpload<'_> {
     AssetUpload {
+        space: Space::Own,
         base: AssetVersion(base),
         content_type,
         bytes: b"private bytes",
@@ -185,6 +187,7 @@ impl Fixture {
             &key(name),
             &self.artifact,
             AssetDeletion {
+                space: Space::Own,
                 base: AssetVersion(base),
                 id,
                 now: UnixMillis(20),
@@ -194,7 +197,7 @@ impl Fixture {
     }
 
     fn snapshot(&self) -> Result<AssetSnapshot, AssetStoreError> {
-        self.service.assets(&self.owner, &self.artifact)
+        self.service.assets(&self.owner, &self.artifact, Space::Own)
     }
 
     /// Rows of assets, asset spaces, asset receipts and blobs, read from disk.

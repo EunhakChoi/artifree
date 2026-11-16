@@ -16,7 +16,8 @@ import {
  * `data_version` is the version a data write left the space at, a safe
  * integer of at least 1: present exactly when `change` is `'data_changed'`
  * (the caller's own space) or `'shared_data_changed'` (the artifact's shared
- * space).
+ * space). `'shared_assets_changed'` carries no version: list the artifact's
+ * shared asset space again.
  * `job_id` names the job that changed, `job_` and 32 lowercase hex digits:
  * present exactly when `change` is `'job_changed'`. Read the job with
  * `getJob`; the change carries no state.

@@ -1,5 +1,5 @@
 import type { Asset, AssetList, AssetResponse } from '@artifree/contracts';
-import type { ArtifreeClient, ReadOptions } from './client.js';
+import type { ArtifreeClient, DataSpace, ReadOptions } from './client.js';
 import { ArtifreeApiError } from './errors.js';
 import { isCount, isRecord } from './responses.js';
 import {
@@ -96,6 +96,28 @@ function invalidResponse(): ArtifreeApiError {
   );
 }
 
+/**
+ * Options of an asset read: cancellation, and the space read. `shared` names
+ * the space the artifact's head revision declares in `artifree-runtime.json`
+ * (decision 0060 rule 10); the caller's own when absent.
+ */
+export interface AssetReadOptions extends ReadOptions {
+  readonly space?: DataSpace;
+}
+
+/**
+ * The query naming an asset space, empty for the caller's own. Any value
+ * other than `own` or `shared` is refused before a request is sent.
+ */
+export function assetSpaceQuery(space: unknown): string {
+  if (space === undefined || space === 'own') return '';
+  if (space === 'shared') return '?space=shared';
+  throw new ArtifreeApiError('space must be "own" or "shared".', {
+    status: 0,
+    code: 'invalid_request',
+  });
+}
+
 /** The asset route for a validated artifact (and asset) identifier. */
 export function pathOf(artifactId: string, assetId?: string): string {
   if (
@@ -119,9 +141,10 @@ export function pathOf(artifactId: string, assetId?: string): string {
 export async function listAssets(
   client: ArtifreeClient,
   artifactId: string,
-  options: ReadOptions = {},
+  options: AssetReadOptions = {},
 ): Promise<AssetList> {
-  return client.json('GET', pathOf(artifactId), parseAssetList, {
+  const path = `${pathOf(artifactId)}${assetSpaceQuery(options.space)}`;
+  return client.json('GET', path, parseAssetList, {
     cache: 'no-store',
     redirect: 'error',
     successBodyLimit: 65_536,
@@ -136,11 +159,11 @@ export async function getAsset(
   client: ArtifreeClient,
   artifactId: string,
   assetId: string,
-  options: ReadOptions = {},
+  options: AssetReadOptions = {},
 ): Promise<AssetResponse> {
   return client.json(
     'GET',
-    pathOf(artifactId, assetId),
+    `${pathOf(artifactId, assetId)}${assetSpaceQuery(options.space)}`,
     (value) => {
       if (
         !isRecord(value) ||
@@ -181,11 +204,11 @@ export async function readAsset(
   client: ArtifreeClient,
   artifactId: string,
   assetId: string,
-  options: ReadOptions = {},
+  options: AssetReadOptions = {},
 ): Promise<AssetBytes> {
   const metadata = await getAsset(client, artifactId, assetId, options);
   const content = await client.boundedBytes(
-    `${pathOf(artifactId, assetId)}/content`,
+    `${pathOf(artifactId, assetId)}/content${assetSpaceQuery(options.space)}`,
     metadata.asset.size_bytes,
     options,
   );

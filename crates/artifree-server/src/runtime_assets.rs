@@ -28,6 +28,8 @@
 //! `403`, and the commit is not undone. A write wakes no change stream, as the
 //! owner's asset routes do not.
 
+// A runtime frame reaches only the caller's own asset space until slice
+// S02f3 gives frames the shared space (decision 0060 rule 10).
 use artifree_contracts::api::{
     AssetList, DeleteAssetResponse, ErrorCode, MAX_RUNTIME_ASSET_PART_BYTES,
     MAX_RUNTIME_ASSET_UPLOAD_BASE64, MAX_RUNTIME_ASSET_UPLOAD_BYTES, RuntimeAssetDeleteRequest,
@@ -36,6 +38,7 @@ use artifree_contracts::api::{
 };
 use artifree_core::artifacts::ArtifactService;
 use artifree_core::assets::{AssetDeletion, AssetUpload};
+use artifree_domain::access::Space;
 use artifree_domain::assets::{AssetId, AssetMediaType, AssetMetadata};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey};
 use artifree_ports::artifact_store::Delivery;
@@ -63,7 +66,7 @@ const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// pinned revision is still refused as stale (`409`), as for source reads.
 pub(crate) async fn list(state: &AppState, call: &FrameCall<'_>) -> Result<AssetList, ApiError> {
     authorize(state, call, Capability::AssetsRead).await?;
-    let listing = list_assets(state, call.actor.clone(), call.artifact).await?;
+    let listing = list_assets(state, call.actor.clone(), call.artifact, Space::Own).await?;
     authorize(state, call, Capability::AssetsRead).await?;
     Ok(listing)
 }
@@ -95,7 +98,7 @@ pub(crate) async fn read(
     // asset is at most 5 MiB.
     let (actor, artifact, wanted) = (call.actor.clone(), granted.artifact.clone(), asset.clone());
     let content = state
-        .run_assets(move |service| service.asset_content(&actor, &artifact, &wanted))
+        .run_assets(move |service| service.asset_content(&actor, &artifact, Space::Own, &wanted))
         .await?;
     let size = content.metadata.size;
     if request.offset > size {
@@ -198,7 +201,7 @@ pub(crate) async fn download(
         .map_err(|_| busy())?;
     let (actor, artifact, wanted) = (call.actor.clone(), granted.artifact.clone(), asset.clone());
     let content = state
-        .run_assets(move |service| service.asset_content(&actor, &artifact, &wanted))
+        .run_assets(move |service| service.asset_content(&actor, &artifact, Space::Own, &wanted))
         .await?;
     let size = content.metadata.size;
     // `stored_part` also checks that the bytes are exactly as many as the
@@ -243,7 +246,7 @@ async fn associated_asset(
 ) -> Result<AssetMetadata, ApiError> {
     let (actor, artifact) = (actor.clone(), artifact.clone());
     let listed = state
-        .run_assets(move |service| service.assets(&actor, &artifact))
+        .run_assets(move |service| service.assets(&actor, &artifact, Space::Own))
         .await?;
     // Identifiers are unique within one artifact's space (the table's primary
     // key), so the first match is the only match.
@@ -309,6 +312,7 @@ pub(crate) async fn upload(
             &key,
             &artifact,
             AssetUpload {
+                space: Space::Own,
                 base,
                 content_type: &media,
                 bytes: &bytes,
@@ -362,6 +366,7 @@ pub(crate) async fn delete(
             &key,
             &artifact,
             AssetDeletion {
+                space: Space::Own,
                 base,
                 id: &asset,
                 now,

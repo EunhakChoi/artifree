@@ -65,7 +65,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-core/src/artifacts.rs",
         ComponentStatus::Implemented,
-        "Create, also from a built-in type (react) whose required paths every commit keeps, conditional revisions, per-file edits, restores, duplicates (files, and data or uploaded assets when asked), metadata updates, and a recoverable trash with permanent purge, retry keys, pinned reads with digests, parts of files, source exports, list queries; separate private UTF-8 text/CSV, static PNG and sequential JPEG uploads with atomic quotas and replay, copied into a duplicate on request; publish planned.",
+        "Create, also from a built-in type (react) whose required paths every commit keeps, conditional revisions, per-file edits, restores, duplicates (files, and data or uploaded assets when asked), metadata updates, and a recoverable trash with permanent purge, retry keys, pinned reads with digests, parts of files, source exports, list queries; separate private UTF-8 text/CSV, static PNG and sequential JPEG uploads with atomic quotas and replay, copied into a duplicate on request, and a shared asset space for an artifact that declares one, each upload charged to its uploader and not copied; publish planned.",
     ),
     (
         "policy",
@@ -74,7 +74,7 @@ pub(super) const COMPONENTS: [ComponentRow; 17] = [
         "Rust",
         "crates/artifree-core/src/policy.rs",
         ComponentStatus::Implemented,
-        "Per-user artifact access checked on every read and write, with owner, editor and viewer roles; an artifact may declare a shared data space that its members read and the declared roles write. The server separately checks runtime capability grants.",
+        "Per-user artifact access checked on every read and write, with owner, editor and viewer roles; an artifact may declare a shared data and asset space that its members read and the declared roles write. The server separately checks runtime capability grants.",
     ),
     (
         "documents",

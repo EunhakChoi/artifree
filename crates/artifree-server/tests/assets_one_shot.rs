@@ -3,6 +3,7 @@
 
 use artifree_core::artifacts::ArtifactService;
 use artifree_core::assets::AssetUpload;
+use artifree_domain::access::Space;
 use artifree_domain::assets::AssetVersion;
 use artifree_domain::identity::UnixMillis;
 use artifree_domain::package::FilePackage;
@@ -125,6 +126,7 @@ fn store_upload(path: &std::path::Path) -> TestResult {
         &key,
         &created.artifact.id,
         AssetUpload {
+            space: Space::Own,
             base: AssetVersion(0),
             content_type: &media,
             bytes: b"one-shot private bytes",
@@ -133,7 +135,7 @@ fn store_upload(path: &std::path::Path) -> TestResult {
     )?;
     assert_eq!(
         service
-            .asset_content(&actor, &created.artifact.id, &receipt.id)?
+            .asset_content(&actor, &created.artifact.id, Space::Own, &receipt.id)?
             .bytes,
         b"one-shot private bytes"
     );

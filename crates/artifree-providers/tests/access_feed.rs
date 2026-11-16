@@ -367,6 +367,8 @@ fn the_upgrade_to_schema_19_keeps_every_change_and_takes_access_rows() -> TestRe
         UPDATE actor_feeds SET head = head + 1
             WHERE actor = (SELECT actor FROM changes ORDER BY sequence DESC LIMIT 1);
         DROP TABLE shared_data;
+        DROP INDEX assets_by_charge;
+        ALTER TABLE assets DROP COLUMN charged_to;
         PRAGMA user_version = 18;",
     )?;
     let orphan = before.last().map_or(0, |(sequence, _)| sequence + 1);

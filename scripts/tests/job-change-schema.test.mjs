@@ -36,6 +36,7 @@ const OTHER_KINDS = [
   { kind: 'access_changed', fields: {} },
   { kind: 'access_revoked', fields: {} },
   { kind: 'shared_data_changed', fields: { data_version: 1 } },
+  { kind: 'shared_assets_changed', fields: {} },
 ];
 
 /** The members every ArtifactChange has, whatever its kind. */

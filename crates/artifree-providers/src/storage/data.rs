@@ -73,7 +73,7 @@ fn head_declaration(
 /// space needs read access. The shared space needs a head that declares it ([`StoreError::NotFound`]
 /// without one) and read access; a write needs the role the declaration
 /// names as well ([`StoreError::Forbidden`]).
-fn reach(
+pub(super) fn reach(
     connection: &Connection,
     artifact: &ArtifactId,
     actor: &ActorId,

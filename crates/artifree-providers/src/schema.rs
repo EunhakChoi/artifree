@@ -19,7 +19,7 @@ use crate::storage::{random_bytes, unavailable};
 
 /// The schema version this build creates and reads. It is the database's
 /// `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i64 = 20;
+pub const SCHEMA_VERSION: i64 = 21;
 
 // Asset associations and receipts deliberately retain no bytes outside `blobs`.
 const ASSET_SCHEMA: &str = "
@@ -816,6 +816,47 @@ DROP TABLE changes;
 ALTER TABLE changes_v20 RENAME TO changes;
 ";
 
+/// Added in schema version 21 (decision 0060 rule 10, slice S02f2): the
+/// shared asset space. Its rows are the rows of `assets` and `asset_spaces`
+/// held by the reserved holder `*shared`, which no actor id can spell;
+/// `charged_to` names the user a shared upload is charged to, and is null for
+/// an actor's own asset. The change kind `shared_assets_changed` carries no
+/// version.
+const SHARED_ASSET_SCHEMA: &str = "
+ALTER TABLE assets ADD COLUMN charged_to TEXT;
+CREATE INDEX assets_by_charge ON assets (charged_to) WHERE charged_to IS NOT NULL;
+CREATE TABLE changes_v21 (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor TEXT NOT NULL,
+    actor_seq INTEGER NOT NULL CHECK (actor_seq >= 1),
+    artifact_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN
+        ('created', 'revised', 'metadata_updated', 'deleted', 'recovered', 'purged',
+         'data_changed', 'job_changed', 'access_granted', 'access_changed',
+         'access_revoked', 'shared_data_changed', 'shared_assets_changed')),
+    revision INTEGER NOT NULL,
+    metadata_revision INTEGER NOT NULL,
+    data_version INTEGER,
+    job_id TEXT,
+    committed_at INTEGER NOT NULL,
+    UNIQUE (actor, actor_seq),
+    FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision),
+    FOREIGN KEY (artifact_id, metadata_revision)
+        REFERENCES metadata_revisions (artifact_id, metadata_revision),
+    FOREIGN KEY (job_id) REFERENCES jobs (id),
+    CHECK ((kind IN ('data_changed', 'shared_data_changed')) = (data_version IS NOT NULL)),
+    CHECK (data_version IS NULL OR data_version >= 1),
+    CHECK ((kind = 'job_changed') = (job_id IS NOT NULL))
+) STRICT;
+INSERT INTO changes_v21 (sequence, actor, actor_seq, artifact_id, kind, revision,
+        metadata_revision, data_version, job_id, committed_at)
+    SELECT sequence, actor, actor_seq, artifact_id, kind, revision, metadata_revision,
+        data_version, job_id, committed_at
+    FROM changes;
+DROP TABLE changes;
+ALTER TABLE changes_v21 RENAME TO changes;
+";
+
 /// The steps that only add tables or columns, by the version they bring.
 const ADDED_TABLES: [(i64, &str); 3] = [
     (16, PRESENCE_SCHEMA),
@@ -856,9 +897,9 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<(), StoreError> {
     // `changes` (decision 0060, slice S02c): with the checks on, a row an older
     // file holds whose foreign key does not resolve would stop the copy, though
     // the rebuild adds no broken key; `newly_broken` checks that after the steps.
-    // Schema 20 rebuilds `changes` again (decision 0060, slice S02f1), so a
-    // version 19 file is relaxed for the same reason.
-    let relax = enforced && (8..20).contains(&version);
+    // Schemas 20 and 21 rebuild `changes` again (decision 0060, slices S02f1
+    // and S02f2), so version 19 and 20 files are relaxed for the same reason.
+    let relax = enforced && (8..21).contains(&version);
     if relax {
         connection
             .pragma_update(None, "foreign_keys", false)
@@ -898,7 +939,11 @@ fn steps_from_11(transaction: &Transaction<'_>, version: i64) -> Result<(), Stor
             transaction.execute_batch(schema).map_err(unavailable)?;
         }
     }
-    for (step, schema) in [(19, ACCESS_CHANGE_SCHEMA), (20, SHARED_DATA_SCHEMA)] {
+    for (step, schema) in [
+        (19, ACCESS_CHANGE_SCHEMA),
+        (20, SHARED_DATA_SCHEMA),
+        (21, SHARED_ASSET_SCHEMA),
+    ] {
         if version < step {
             rebuild_changes(transaction, schema, step)?;
         }

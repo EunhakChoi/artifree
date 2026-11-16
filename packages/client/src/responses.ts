@@ -143,6 +143,7 @@ const CHANGE_KINDS: Record<ChangeKind, true> = {
   access_changed: true,
   access_revoked: true,
   shared_data_changed: true,
+  shared_assets_changed: true,
 };
 
 // A record for the same reason as the error codes: a part added later must

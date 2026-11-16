@@ -334,6 +334,11 @@ pub struct DeleteDataArguments {
 pub struct ListAssetsArguments {
     /// Artifact identifier.
     pub artifact_id: String,
+    /// The asset space: `own` (the default) or `shared`, the space the
+    /// artifact's head revision declares in `artifree-runtime.json`, which
+    /// every member reads and the declared roles write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<DataSpaceName>,
 }
 
 /// Arguments of `read_asset`.
@@ -345,6 +350,11 @@ pub struct ReadAssetArguments {
     /// Asset identifier from `list_assets` or `upload_asset`: 64 lowercase
     /// hexadecimal digits.
     pub asset_id: String,
+    /// The asset space: `own` (the default) or `shared`, the space the
+    /// artifact's head revision declares in `artifree-runtime.json`, which
+    /// every member reads and the declared roles write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<DataSpaceName>,
 }
 
 /// Arguments of `upload_asset`.
@@ -366,6 +376,11 @@ pub struct UploadAssetArguments {
     /// Retry key: 8-128 ASCII letters, digits, `-`, `_`, `.`, or `:`. Use a
     /// new value for each intended change and resend it unchanged to retry.
     pub idempotency_key: String,
+    /// The asset space: `own` (the default) or `shared`, the space the
+    /// artifact's head revision declares in `artifree-runtime.json`, which
+    /// every member reads and the declared roles write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<DataSpaceName>,
 }
 
 /// Arguments of `delete_asset`.
@@ -383,6 +398,11 @@ pub struct DeleteAssetArguments {
     /// Retry key: 8-128 ASCII letters, digits, `-`, `_`, `.`, or `:`. Use a
     /// new value for each intended change and resend it unchanged to retry.
     pub idempotency_key: String,
+    /// The asset space: `own` (the default) or `shared`, the space the
+    /// artifact's head revision declares in `artifree-runtime.json`, which
+    /// every member reads and the declared roles write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<DataSpaceName>,
 }
 
 /// Arguments of `enqueue_job`.

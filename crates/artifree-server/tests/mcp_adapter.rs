@@ -1,6 +1,7 @@
 //! MCP endpoint guards and owner checks, exercised in process through the real
 //! router, MCP SDK, application core, and `SQLite` store. Tool behavior with
 //! a real MCP client is covered by `scripts/tests/mcp.test.mjs`.
+use artifree_domain::access::Space;
 use std::fmt::Display;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -1168,6 +1169,7 @@ async fn duplicate_artifact_copies_assets_only_when_asked() -> TestResult {
         &parsed("dup-asset-upload-1"),
         &parsed(&artifact),
         AssetUpload {
+            space: Space::Own,
             base: AssetVersion(0),
             content_type: &parsed("text/plain"),
             bytes: b"asset bytes",
@@ -1196,7 +1198,12 @@ async fn duplicate_artifact_copies_assets_only_when_asked() -> TestResult {
         json!(["files"]),
         "{plain}"
     );
-    assert_eq!(service.assets(&actor, &copy_of(&plain)?)?.assets, []);
+    assert_eq!(
+        service
+            .assets(&actor, &copy_of(&plain)?, Space::Own)?
+            .assets,
+        []
+    );
 
     let with = duplicate("dup-asset-with-1", Some(true)).await?;
     assert_eq!(
@@ -1204,7 +1211,7 @@ async fn duplicate_artifact_copies_assets_only_when_asked() -> TestResult {
         json!(["files", "assets"]),
         "{with}"
     );
-    let copied = service.asset_content(&actor, &copy_of(&with)?, &uploaded.id)?;
+    let copied = service.asset_content(&actor, &copy_of(&with)?, Space::Own, &uploaded.id)?;
     assert_eq!(copied.bytes, b"asset bytes");
     Ok(())
 }

@@ -15,11 +15,11 @@ use std::sync::Arc;
 use artifree_contracts::api::ErrorCode;
 use artifree_contracts::api::{
     CancelJobResponse, CommitResponse, ContentEncoding, CreateArtifactRequest, DataSpaceName,
-    DataWriteResponse, DeleteAssetRequest, DeleteDataRequest, DuplicateArtifactRequest,
-    DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse,
-    ErrorResponse, JsonValue, ListArtifactsQuery, ListJobsQuery, RestoreRevisionRequest,
-    SaveRevisionRequest, SetDataRequest, UpdateArtifactRequest, UpdateArtifactResponse,
-    UpdateDataRequest, UploadAssetRequest,
+    DataWriteResponse, DeleteAssetRequest, DeleteAssetResponse, DeleteDataRequest,
+    DuplicateArtifactRequest, DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest,
+    EnqueueJobResponse, ErrorResponse, JsonValue, ListArtifactsQuery, ListJobsQuery,
+    RestoreRevisionRequest, SaveRevisionRequest, SetDataRequest, UpdateArtifactRequest,
+    UpdateArtifactResponse, UpdateDataRequest, UploadAssetRequest, UploadAssetResponse,
 };
 use artifree_contracts::mcp::{
     self, AcknowledgeHandoffArguments, ArtifactArguments, BuildStatusArguments, CancelJobArguments,
@@ -466,45 +466,15 @@ async fn dispatch_assets(
     let outcome = match name {
         "list_assets" => {
             json(async {
-                let ListAssetsArguments { artifact_id } = parse(arguments)?;
-                operations::list_assets(state, actor, &artifact_id).await
+                let ListAssetsArguments { artifact_id, space } = parse(arguments)?;
+                let space = operations::data_space(space);
+                operations::list_assets(state, actor, &artifact_id, space).await
             })
             .await
         }
         "read_asset" => json(read_asset(state, actor, arguments)).await,
-        "upload_asset" => {
-            json(async {
-                let UploadAssetArguments {
-                    artifact_id,
-                    base_asset_version,
-                    content_type,
-                    content_base64,
-                    idempotency_key,
-                } = parse(arguments)?;
-                let key = operations::request_key("idempotency_key", &idempotency_key)?;
-                let request = UploadAssetRequest {
-                    base_asset_version,
-                    content_type,
-                    content_base64,
-                };
-                operations::upload_asset(state, actor, key, &artifact_id, request).await
-            })
-            .await
-        }
-        "delete_asset" => {
-            json(async {
-                let DeleteAssetArguments {
-                    artifact_id,
-                    asset_id,
-                    base_asset_version,
-                    idempotency_key,
-                } = parse(arguments)?;
-                let key = operations::request_key("idempotency_key", &idempotency_key)?;
-                let request = DeleteAssetRequest { base_asset_version };
-                operations::delete_asset(state, actor, key, &artifact_id, &asset_id, request).await
-            })
-            .await
-        }
+        "upload_asset" => json(upload_asset(state, actor, arguments)).await,
+        "delete_asset" => json(delete_asset(state, actor, arguments)).await,
         _ => return dispatch_handoffs(state, actor, generation, name, arguments).await,
     };
     Some(outcome)
@@ -811,13 +781,73 @@ async fn read_asset(
     let ReadAssetArguments {
         artifact_id,
         asset_id,
+        space,
     } = parse(arguments)?;
-    let content = operations::asset_content(state, actor, &artifact_id, &asset_id).await?;
+    let space = operations::data_space(space);
+    let content = operations::asset_content(state, actor, (&artifact_id, space), &asset_id).await?;
     Ok(ReadAssetResponse {
         asset_version: content.version.0,
         asset: operations::asset_dto(&content.metadata),
         content_base64: BASE64.encode(&content.bytes),
     })
+}
+
+/// The asset space a write names, once the caller may write it: for the
+/// shared space, access, the declaration and the writer role are checked
+/// before the key and the content are read (decision 0060 rule 4).
+async fn writable_asset_space(
+    state: &AppState,
+    actor: &ActorId,
+    artifact_id: &str,
+    space: Option<DataSpaceName>,
+) -> Result<Space, ApiError> {
+    let space = operations::data_space(space);
+    operations::admit_asset_space(state, actor, &operations::artifact_id(artifact_id)?, space)
+        .await?;
+    Ok(space)
+}
+
+/// The `upload_asset` tool.
+async fn upload_asset(
+    state: &AppState,
+    actor: ActorId,
+    arguments: Value,
+) -> Result<UploadAssetResponse, ApiError> {
+    let UploadAssetArguments {
+        artifact_id,
+        base_asset_version,
+        content_type,
+        content_base64,
+        idempotency_key,
+        space,
+    } = parse(arguments)?;
+    let space = writable_asset_space(state, &actor, &artifact_id, space).await?;
+    let key = operations::request_key("idempotency_key", &idempotency_key)?;
+    let request = UploadAssetRequest {
+        base_asset_version,
+        content_type,
+        content_base64,
+    };
+    operations::upload_asset(state, actor, key, (&artifact_id, space), request).await
+}
+
+/// The `delete_asset` tool.
+async fn delete_asset(
+    state: &AppState,
+    actor: ActorId,
+    arguments: Value,
+) -> Result<DeleteAssetResponse, ApiError> {
+    let DeleteAssetArguments {
+        artifact_id,
+        asset_id,
+        base_asset_version,
+        idempotency_key,
+        space,
+    } = parse(arguments)?;
+    let space = writable_asset_space(state, &actor, &artifact_id, space).await?;
+    let key = operations::request_key("idempotency_key", &idempotency_key)?;
+    let request = DeleteAssetRequest { base_asset_version };
+    operations::delete_asset(state, actor, key, (&artifact_id, space), &asset_id, request).await
 }
 
 /// The error tool result: the HTTP error body with `isError: true`.

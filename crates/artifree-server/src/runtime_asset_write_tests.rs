@@ -9,6 +9,7 @@
 //! receipt or asset identifier behind. A withdrawal after the commit withholds
 //! only the reply, and the association stays.
 
+use artifree_domain::access::Space;
 use std::error::Error;
 use std::future::{Future, poll_fn};
 use std::path::PathBuf;
@@ -160,7 +161,7 @@ async fn owner_upload(
         state,
         actor.clone(),
         "asset-write-owner".parse()?,
-        artifact,
+        (artifact, Space::Own),
         UploadAssetRequest {
             base_asset_version: 0,
             content_type: "image/png".into(),
@@ -412,7 +413,7 @@ async fn assert_listing(
     version: u64,
     digests: &[&str],
 ) -> Result<(), Box<dyn Error>> {
-    let listing = operations::list_assets(state, actor.clone(), artifact)
+    let listing = operations::list_assets(state, actor.clone(), artifact, Space::Own)
         .await
         .map_err(|error| error.body.message)?;
     assert_eq!(

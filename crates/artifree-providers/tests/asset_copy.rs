@@ -5,6 +5,7 @@
 mod common;
 
 use artifree_domain::ArtifactKind;
+use artifree_domain::access::Space;
 use artifree_domain::assets::{AssetMediaType, AssetVersion};
 use artifree_domain::identity::{ActorId, ArtifactId, Title, UnixMillis};
 use artifree_domain::{MetadataRevision, SourceRevision};
@@ -60,6 +61,7 @@ impl Fixture {
         let media: AssetMediaType = parsed("image/png");
         self.store.upload_asset(
             AssetWrite {
+                space: Space::Own,
                 request: RequestIdentity {
                     actor: &self.owner,
                     key: &request_key,
@@ -86,6 +88,7 @@ impl Fixture {
         let request_key = key(name);
         self.store.delete_asset(
             AssetWrite {
+                space: Space::Own,
                 request: RequestIdentity {
                     actor: &self.owner,
                     key: &request_key,
@@ -198,7 +201,7 @@ fn a_default_duplicate_copies_no_assets() -> TestResult {
     let f = Fixture::new()?;
     f.upload(f.id(), "one", 0, b"png bytes")?;
     let copy = f.copy("copy", false)?;
-    let listed = f.store.assets(&f.owner, &copy.artifact.id)?;
+    let listed = f.store.assets(&f.owner, &copy.artifact.id, Space::Own)?;
     assert_eq!(
         (listed.assets.len(), listed.bytes, listed.version),
         (0, 0, AssetVersion(0))
@@ -216,8 +219,8 @@ fn an_asset_copy_takes_every_association_with_its_id_at_version_one() -> TestRes
 
     let copy = f.copy("copy", true)?;
 
-    let source = f.store.assets(&f.owner, f.id())?;
-    let copied = f.store.assets(&f.owner, &copy.artifact.id)?;
+    let source = f.store.assets(&f.owner, f.id(), Space::Own)?;
+    let copied = f.store.assets(&f.owner, &copy.artifact.id, Space::Own)?;
     assert_eq!(
         copied.assets, source.assets,
         "same IDs, types, sizes, digests, times"
@@ -227,7 +230,7 @@ fn an_asset_copy_takes_every_association_with_its_id_at_version_one() -> TestRes
     assert_eq!(source.version, AssetVersion(2), "the source is not touched");
     assert_eq!(
         f.store
-            .asset_content(&f.owner, &copy.artifact.id, &second.id)?
+            .asset_content(&f.owner, &copy.artifact.id, Space::Own, &second.id)?
             .bytes,
         b"second"
     );
@@ -245,7 +248,9 @@ fn an_asset_copy_of_an_empty_space_writes_no_space() -> TestResult {
     let before = f.rows()?;
     let copy = f.copy("copy", true)?;
     assert_eq!(
-        f.store.assets(&f.owner, &copy.artifact.id)?.version,
+        f.store
+            .assets(&f.owner, &copy.artifact.id, Space::Own)?
+            .version,
         AssetVersion(0)
     );
     let after = f.rows()?;
@@ -283,7 +288,10 @@ fn a_copy_over_the_actor_limit_is_refused_whole_and_leaves_its_key_free() -> Tes
         "the refusal kept no key"
     );
     assert_eq!(
-        f.store.assets(&f.owner, &copy.artifact.id)?.assets.len(),
+        f.store
+            .assets(&f.owner, &copy.artifact.id, Space::Own)?
+            .assets
+            .len(),
         64
     );
     assert_eq!(f.copy("copy", true)?.delivery, Delivery::Replayed);
@@ -355,19 +363,20 @@ fn later_changes_to_either_space_leave_the_other_as_it_was() -> TestResult {
     f.delete(f.id(), "delete-in-source", 1, &shared)?;
     let added = f.upload(&copy.artifact.id, "copy-only", 1, b"copy only")?;
 
-    let copied = f.store.assets(&f.owner, &copy.artifact.id)?;
+    let copied = f.store.assets(&f.owner, &copy.artifact.id, Space::Own)?;
     assert_eq!(copied.version, AssetVersion(2));
     assert_eq!(
         f.store
-            .asset_content(&f.owner, &copy.artifact.id, &shared.id)?
+            .asset_content(&f.owner, &copy.artifact.id, Space::Own, &shared.id)?
             .bytes,
         b"shared bytes"
     );
     assert_eq!(
-        f.store.asset_content(&f.owner, f.id(), &added.id),
+        f.store
+            .asset_content(&f.owner, f.id(), Space::Own, &added.id),
         Err(AssetStoreError::NotFound)
     );
-    assert_eq!(f.store.assets(&f.owner, f.id())?.assets, []);
+    assert_eq!(f.store.assets(&f.owner, f.id(), Space::Own)?.assets, []);
     Ok(())
 }
 
@@ -379,7 +388,7 @@ fn purging_the_source_keeps_the_copys_assets_and_their_bytes() -> TestResult {
     f.purge(&f.source, "source")?;
     assert_eq!(
         f.store
-            .asset_content(&f.owner, &copy.artifact.id, &shared.id)?
+            .asset_content(&f.owner, &copy.artifact.id, Space::Own, &shared.id)?
             .bytes,
         b"shared bytes"
     );
@@ -393,7 +402,9 @@ fn purging_the_copy_keeps_the_sources_assets() -> TestResult {
     let shared = f.upload(f.id(), "shared", 0, b"shared bytes")?;
     let copy = f.copy("copy", true)?;
     f.purge(&copy, "copy")?;
-    let read = f.store.asset_content(&f.owner, f.id(), &shared.id)?;
+    let read = f
+        .store
+        .asset_content(&f.owner, f.id(), Space::Own, &shared.id)?;
     assert_eq!(
         (read.bytes.as_slice(), read.version),
         (b"shared bytes".as_slice(), AssetVersion(1))

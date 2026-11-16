@@ -12,6 +12,7 @@ import {
   ArtifreeClient,
   createUser,
   deleteAsset,
+  getAsset,
   listAssets,
   readAsset,
   uploadAsset,
@@ -329,6 +330,87 @@ for (const [name, key] of [
     assert.equal(calls.length, 0);
   });
 }
+
+// Decision 0060 rule 10: every asset route names the shared space in its
+// query, after the path, and a space other than own or shared is refused
+// before anything is sent.
+test('the shared asset space is named in the query of every asset route', async () => {
+  const { client, calls } = (() => {
+    const answer = recorder((url) => {
+      if (url.includes('/content'))
+        return new Response(BYTES, {
+          status: 200,
+          headers: { 'content-type': 'text/plain' },
+        });
+      if (url.endsWith(`/assets?space=shared`))
+        return new Response(
+          JSON.stringify({
+            asset_version: 0,
+            assets: [],
+            bytes: 0,
+            max_assets: 64,
+            max_bytes: 25 * MIB,
+          }),
+          { status: 200 },
+        );
+      return new Response(JSON.stringify({ asset_version: 1, asset: ASSET }), {
+        status: 200,
+      });
+    });
+    return { ...answer, client: clientWith(answer.fetch) };
+  })();
+  const shared = { space: 'shared' };
+  await listAssets(client, ARTIFACT, shared);
+  await getAsset(client, ARTIFACT, ID, shared);
+  await readAsset(client, ARTIFACT, ID, shared);
+  const base = `http://localhost:7410/v1/artifacts/${ARTIFACT}/assets`;
+  assert.deepEqual(
+    calls.map(({ url }) => url),
+    [
+      `${base}?space=shared`,
+      `${base}/${ID}?space=shared`,
+      `${base}/${ID}?space=shared`,
+      `${base}/${ID}/content?space=shared`,
+    ],
+  );
+  const writes = clientAnswering(UPLOAD_RECEIPT);
+  await upload(writes.client, uploadRequest(), {
+    idempotencyKey: KEY,
+    space: 'shared',
+  });
+  const removal = clientAnswering(DELETE_RECEIPT, 200);
+  await remove(removal.client, undefined, {
+    idempotencyKey: 'delete-key-0001',
+    space: 'shared',
+  });
+  assert.deepEqual(
+    [writes.calls[0].url, removal.calls[0].url],
+    [`${base}?space=shared`, `${base}/${ID}?space=shared`],
+  );
+  // The caller's own space is the route without a query.
+  const own = clientAnswering(UPLOAD_RECEIPT);
+  await upload(own.client, uploadRequest(), {
+    idempotencyKey: KEY,
+    space: 'own',
+  });
+  assert.equal(own.calls[0].url, base);
+  const refused = clientAnswering(UPLOAD_RECEIPT);
+  for (const attempt of [
+    () => listAssets(refused.client, ARTIFACT, { space: 'everyone' }),
+    () =>
+      upload(refused.client, uploadRequest(), {
+        idempotencyKey: KEY,
+        space: 'Shared',
+      }),
+    () =>
+      remove(refused.client, undefined, {
+        idempotencyKey: 'delete-key-0001',
+        space: 1,
+      }),
+  ])
+    await assert.rejects(attempt(), { code: 'invalid_request' });
+  assert.equal(refused.calls.length, 0);
+});
 
 test('identifiers, a missing request and a value that is not a signal are refused with no request', async () => {
   const { client, calls } = clientAnswering(UPLOAD_RECEIPT);
