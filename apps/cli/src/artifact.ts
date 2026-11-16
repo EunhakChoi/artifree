@@ -23,6 +23,7 @@ import {
   writeNewFile,
 } from './files.js';
 import { runAccess } from './access.js';
+import { mutate } from './mutate.js';
 import { resolveConnection } from './profiles.js';
 
 export { UsageError };
@@ -54,6 +55,7 @@ export const ARTIFACT_HELP = `Usage:
   artifree artifact preview <id> [--revision <n>] [--build <profile>]
   artifree artifact build-status <id> --build <profile>
   artifree artifact access list <id> [--json]
+  artifree artifact access grant|revoke <id> <user-id> ... (see artifree artifact access --help)
 
 Connection:
   --server <url>         API URL [env ARTIFREE_SERVER, ARTIFREE_URL, default http://127.0.0.1:7410]
@@ -130,8 +132,8 @@ the current revision's build: built, pending (job_id names the build job),
 failed (with job_id, failure and diagnostics, whose messages come from the
 bundler), or none (queue one with artifree job enqueue --build). A server
 whose build cannot build the profile refuses both with 422 profile_unknown.
-access list prints the owner and the members with their roles; see
-artifree artifact access --help.
+access list prints the owner and the members with their roles, and access
+grant and revoke change them; see artifree artifact access --help.
 
 create, save, edit, restore, duplicate, rename, pin, unpin, delete, recover, and
 purge accept --idempotency-key <key>. Without it a new key is
@@ -310,41 +312,6 @@ async function show(
   const client = await connect(values);
   if (command === 'show') print(await client.getArtifact(id));
   else print({ revisions: await client.listRevisions(id) });
-}
-
-/**
- * Runs one mutation under `key`. For an unknown outcome or a rate-limited
- * attempt, prints a retry hint on stderr before rethrowing. `sameRequest`
- * lists what a retry must keep identical; it completes the hint's "and the
- * same ..." clause.
- */
-export async function mutate<T>(
-  key: string,
-  operation: (idempotencyKey: string) => Promise<T>,
-  sameRequest?: string,
-): Promise<T> {
-  const sameClause =
-    sameRequest === undefined ? '' : ` and the same ${sameRequest}`;
-  try {
-    return await operation(key);
-  } catch (error: unknown) {
-    if (
-      error instanceof ArtifreeApiError &&
-      ['network_error', 'unavailable', 'internal', 'invalid_response'].includes(
-        error.code,
-      )
-    )
-      process.stderr.write(
-        `The outcome is unknown. Retry with --idempotency-key ${key}${sameClause} to receive the original result.\n`,
-      );
-    else if (error instanceof ArtifreeApiError && error.code === 'rate_limited')
-      // Only this attempt was refused. An earlier attempt with the same key
-      // may have committed; retrying with the key then returns its result.
-      process.stderr.write(
-        `This attempt was not processed. Retry after ${error.retryAfterSeconds ?? 1}s with --idempotency-key ${key}${sameClause}.\n`,
-      );
-    throw error;
-  }
 }
 
 async function create(args: string[]): Promise<void> {

@@ -11,7 +11,7 @@ import {
   toBase64,
   uploadAsset,
 } from '@artifree/client';
-import { mutate } from './artifact.js';
+import { mutate } from './mutate.js';
 import { UsageError } from './errors.js';
 import { readBoundedRegularFile, writeNewFile } from './files.js';
 import { resolveConnection } from './profiles.js';

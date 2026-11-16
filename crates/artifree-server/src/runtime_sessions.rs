@@ -269,13 +269,38 @@ impl RuntimeSessions {
     /// hold grants for other artifacts, so the connections stay open and
     /// those grants stay.
     pub(crate) fn revoke_members(&self, users: &[ActorId], artifact: &ArtifactId) {
+        self.each_state_of(users, |state| {
+            state.grants.retain(|scope, _| &scope.artifact != artifact);
+        });
+    }
+
+    /// Narrows, on every connection of each of `users`, the grants scoped to
+    /// `artifact` to the capabilities in `offered` (decision 0060 rule 15, a
+    /// downgrade). Grants for other artifacts stay as they are.
+    pub(crate) fn narrow_members(
+        &self,
+        users: &[ActorId],
+        artifact: &ArtifactId,
+        offered: CapabilitySet,
+    ) {
+        self.each_state_of(users, |state| {
+            for (scope, grant) in &mut state.grants {
+                if &scope.artifact == artifact {
+                    grant.capabilities = grant.capabilities.and(offered);
+                }
+            }
+        });
+    }
+
+    /// Runs `change` on the state of every connection of each of `users`.
+    fn each_state_of(&self, users: &[ActorId], mut change: impl FnMut(&mut SessionState)) {
         if let Ok(sessions) = self.sessions.lock() {
             for ((owner, _), session) in sessions.iter() {
                 if !users.contains(owner) {
                     continue;
                 }
                 if let Ok(mut state) = session.state.lock() {
-                    state.grants.retain(|scope, _| &scope.artifact != artifact);
+                    change(&mut state);
                 }
             }
         }

@@ -1,7 +1,7 @@
 import { parseArgs } from 'node:util';
 import { ArtifreeClient, newIdempotencyKey } from '@artifree/client';
 import type { ListJobsQuery } from '@artifree/contracts';
-import { mutate } from './artifact.js';
+import { mutate } from './mutate.js';
 import { UsageError } from './errors.js';
 import { resolveConnection } from './profiles.js';
 

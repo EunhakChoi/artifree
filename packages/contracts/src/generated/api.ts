@@ -76,8 +76,6 @@ export type ApiBody =
   | CreateUserRequest
   | UserInfo
   | UserList
-  | Me
-  | ArtifactAccess
   | EnqueueJobRequest
   | EnqueueJobResponse
   | CancelJobResponse
@@ -94,7 +92,12 @@ export type ApiBody =
   | DataOutboxBinding
   | TypeList
   | TypeDescriptor
-  | TypeReference;
+  | TypeReference
+  | Me
+  | ArtifactAccess
+  | SetAccessRequest
+  | RevokeAccessRequest
+  | AccessChangeResponse;
 /**
  * Byte encoding of a file's `content` string.
  */
@@ -191,6 +194,7 @@ export type ErrorCode =
   | 'revision_conflict'
   | 'file_conflict'
   | 'metadata_conflict'
+  | 'access_conflict'
   | 'not_in_trash'
   | 'content_conflict'
   | 'data_conflict'
@@ -237,10 +241,6 @@ export type SourceExportFormat = 'artifree.source-export.v1' | 'artifree.source-
  * What exported files need from a host to run as they do in Artifree.
  */
 export type ExportRuntime = 'none' | 'metadata';
-/**
- * What a member of an artifact may do (decision 0060 rule 3).
- */
-export type MemberRole = 'editor' | 'viewer';
 /**
  * What a job does (decisions 0030 and 0058). A verification is trusted
  * in-repository code that runs in the Artifree worker process. A build runs
@@ -302,6 +302,10 @@ export type JsonValue =
   | number
   | boolean
   | null;
+/**
+ * What a member of an artifact may do (decision 0060 rule 3).
+ */
+export type MemberRole = 'editor' | 'viewer';
 
 /**
  * Bounded current metadata and usage from one snapshot.
@@ -1831,6 +1835,10 @@ export interface ErrorBody {
    */
   conflicting_files_total?: number | null;
   /**
+   * The current access version, present for `access_conflict`.
+   */
+  current_access_version?: number | null;
+  /**
    * Current independent state for `asset_conflict`.
    */
   current_asset_version?: number | null;
@@ -2110,73 +2118,6 @@ export interface UserList {
    * The users.
    */
   users: UserInfo[];
-}
-/**
- * Response of `GET /v1/me`: the caller, so that a user can hand their id to
- * an owner who shares an artifact with them (decision 0060 rule 6).
- */
-export interface Me {
-  /**
-   * The caller's user id: `local` for the owner profile, otherwise `u-`
-   * and 32 lowercase hexadecimal digits.
-   */
-  id: string;
-  /**
-   * The caller's label (1-64 characters).
-   */
-  label: string;
-}
-/**
- * Response of `GET /v1/artifacts/{id}/access`: who may reach the artifact
- * (decision 0060 rule 6). Its owner and its members may read it.
- */
-export interface ArtifactAccess {
-  /**
-   * The artifact's access version, which a change of access is based on.
-   */
-  access_version: number;
-  /**
-   * The artifact.
-   */
-  artifact_id: string;
-  /**
-   * The members, ordered by user id.
-   */
-  members: AccessMember[];
-  owner: AccessUser;
-}
-/**
- * One member of an artifact.
- */
-export interface AccessMember {
-  /**
-   * Whether the member's user is disabled: told to the owner only, and
-   * null in a member's answer (decision 0060 rules 6 and 18). A disabled
-   * member stays a member; nothing they hold authenticates meanwhile.
-   */
-  disabled: boolean | null;
-  /**
-   * The member's id.
-   */
-  id: string;
-  /**
-   * The member's label.
-   */
-  label: string;
-  role: MemberRole;
-}
-/**
- * A user named in an access list: their id and label (decision 0060 rule 8).
- */
-export interface AccessUser {
-  /**
-   * The user's id.
-   */
-  id: string;
-  /**
-   * The user's label.
-   */
-  label: string;
 }
 /**
  * Body of `POST /v1/artifacts/{id}/jobs`, with an `Idempotency-Key` header:
@@ -2754,6 +2695,124 @@ export interface TypeReference {
    * The release the file belongs to.
    */
   release: number;
+}
+/**
+ * Response of `GET /v1/me`: the caller, so that a user can hand their id to
+ * an owner who shares an artifact with them (decision 0060 rule 6).
+ */
+export interface Me {
+  /**
+   * The caller's user id: `local` for the owner profile, otherwise `u-`
+   * and 32 lowercase hexadecimal digits.
+   */
+  id: string;
+  /**
+   * The caller's label (1-64 characters).
+   */
+  label: string;
+}
+/**
+ * Response of `GET /v1/artifacts/{id}/access`: who may reach the artifact
+ * (decision 0060 rule 6). Its owner and its members may read it.
+ */
+export interface ArtifactAccess {
+  /**
+   * The artifact's access version, which a change of access is based on.
+   */
+  access_version: number;
+  /**
+   * The artifact.
+   */
+  artifact_id: string;
+  /**
+   * The members, ordered by user id.
+   */
+  members: AccessMember[];
+  owner: AccessUser;
+}
+/**
+ * One member of an artifact.
+ */
+export interface AccessMember {
+  /**
+   * Whether the member's user is disabled: told to the owner only, and
+   * null in a member's answer (decision 0060 rules 6 and 18). A disabled
+   * member stays a member; nothing they hold authenticates meanwhile.
+   */
+  disabled: boolean | null;
+  /**
+   * The member's id.
+   */
+  id: string;
+  /**
+   * The member's label.
+   */
+  label: string;
+  role: MemberRole;
+}
+/**
+ * A user named in an access list: their id and label (decision 0060 rule 8).
+ */
+export interface AccessUser {
+  /**
+   * The user's id.
+   */
+  id: string;
+  /**
+   * The user's label.
+   */
+  label: string;
+}
+/**
+ * Body of `PUT /v1/artifacts/{id}/access/{user_id}`: grants the user a role
+ * on the artifact, or changes the role they have (decision 0060 rule 6).
+ * Owner only; it needs an `Idempotency-Key`.
+ */
+export interface SetAccessRequest {
+  /**
+   * The access version the change was prepared against, from
+   * `GET /v1/artifacts/{id}/access`. Another version is
+   * `access_conflict`.
+   */
+  base_access_version: number;
+  role: MemberRole;
+}
+/**
+ * Body of `DELETE /v1/artifacts/{id}/access/{user_id}`: ends the user's
+ * membership (decision 0060 rule 6). Owner only; it needs an
+ * `Idempotency-Key`.
+ */
+export interface RevokeAccessRequest {
+  /**
+   * The access version the change was prepared against. Another version
+   * is `access_conflict`.
+   */
+  base_access_version: number;
+}
+/**
+ * Response of a change of access.
+ */
+export interface AccessChangeResponse {
+  /**
+   * The access version the request left the artifact at. A grant of the
+   * role the member already has leaves it where it was.
+   */
+  access_version: number;
+  /**
+   * The artifact.
+   */
+  artifact_id: string;
+  /**
+   * True when an earlier request with the same key already made the
+   * change. The access version is then the one that request left, which
+   * later changes may have passed; read the access list for the current
+   * one.
+   */
+  replayed: boolean;
+  /**
+   * The user whose access the request changed.
+   */
+  user_id: string;
 }
 
 /**

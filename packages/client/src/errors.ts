@@ -14,6 +14,8 @@ export class ArtifreeApiError extends Error {
   readonly currentMetadataRevision: number | undefined;
   /** The current data version when `code` is `data_conflict`. */
   readonly currentDataVersion: number | undefined;
+  /** The current access version when `code` is `access_conflict`. */
+  readonly currentAccessVersion: number | undefined;
   /** The paths a type requires that are missing, when `code` is `type_requirements`. */
   readonly missingPaths: readonly string[] | undefined;
   /** Seconds to wait before retrying, from `Retry-After`, when given. */
@@ -33,6 +35,7 @@ export class ArtifreeApiError extends Error {
       currentRevision?: number | undefined;
       currentMetadataRevision?: number | undefined;
       currentDataVersion?: number | undefined;
+      currentAccessVersion?: number | undefined;
       missingPaths?: readonly string[] | undefined;
       retryAfterSeconds?: number | undefined;
       body?: unknown;
@@ -46,6 +49,7 @@ export class ArtifreeApiError extends Error {
     this.currentRevision = details.currentRevision;
     this.currentMetadataRevision = details.currentMetadataRevision;
     this.currentDataVersion = details.currentDataVersion;
+    this.currentAccessVersion = details.currentAccessVersion;
     this.missingPaths = details.missingPaths;
     this.retryAfterSeconds = details.retryAfterSeconds;
     this.body = details.body;

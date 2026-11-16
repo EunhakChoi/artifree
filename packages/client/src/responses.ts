@@ -101,6 +101,7 @@ const ERROR_CODES: Record<ErrorCode, true> = {
   revision_conflict: true,
   file_conflict: true,
   metadata_conflict: true,
+  access_conflict: true,
   not_in_trash: true,
   job_ended: true,
   too_many_jobs: true,
@@ -1115,6 +1116,7 @@ export function parseError(value: unknown): ErrorBody | undefined {
     current_revision,
     current_metadata_revision,
     current_data_version,
+    current_access_version,
     missing_paths,
   } = value.error;
   if (code === undefined || typeof message !== 'string') return undefined;
@@ -1131,6 +1133,7 @@ export function parseError(value: unknown): ErrorBody | undefined {
     ['current_revision', current_revision],
     ['current_metadata_revision', current_metadata_revision],
     ['current_data_version', current_data_version],
+    ['current_access_version', current_access_version],
   ] as const) {
     if (count === undefined || count === null) continue;
     if (!isCount(count)) return undefined;

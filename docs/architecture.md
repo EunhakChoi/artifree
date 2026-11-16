@@ -205,6 +205,7 @@ in the Rust core.
 | `GET /v1/artifacts/{id}/data/members`                                              | One page of an object's member names (`?path=`)         |
 | `GET /v1/me`                                                                       | The caller's user id and label                          |
 | `GET /v1/artifacts/{id}/access`                                                    | Owner, members with roles, access version (0060)        |
+| `PUT/DELETE /v1/artifacts/{id}/access/{user_id}`                                   | Owner grants, changes or revokes a role (base version)  |
 
 The table lists the main routes. The contract in
 `crates/artifree-contracts/src/api.rs` and the generated schema are

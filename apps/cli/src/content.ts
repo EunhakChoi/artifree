@@ -1,6 +1,6 @@
 import { parseArgs } from 'node:util';
 import { ArtifreeClient, newIdempotencyKey } from '@artifree/client';
-import { mutate } from './artifact.js';
+import { mutate } from './mutate.js';
 import { UsageError } from './errors.js';
 import { resolveConnection } from './profiles.js';
 

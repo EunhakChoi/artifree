@@ -68,6 +68,7 @@ use crate::origin::normalize_origin;
 use crate::preview::{self, PreviewTarget, PreviewTickets};
 use crate::ranges::{self, Requested};
 use crate::rooms::{self, ProcessClock, RoomClock, RoomHub, RoomNames};
+use crate::runtime_policy::CapabilitySet;
 use crate::runtime_sessions::RuntimeSessions;
 use crate::supervisor::WorkerStatusHandle;
 use crate::tokens;
@@ -479,8 +480,8 @@ impl AppState {
     /// (decision 0060 rule 15): its preview, build preview and view tickets
     /// of the artifact, the grants scoped to it on each of its connections,
     /// its participation in the artifact's room, and its handoff deliveries
-    /// that name it. A move to the trash runs it for every member; revoking
-    /// one member will run it for that user once a route revokes (S02e). The
+    /// that name it. A move to the trash runs it for every member, and a
+    /// revocation for the revoked user. The
     /// connections and change streams stay open, unlike a disable's
     /// [`Self::revoke_actor`]; the streams carry the change rows. A request
     /// that passed its access check before this runs and registers afterwards
@@ -490,6 +491,18 @@ impl AppState {
         self.shared.runtime_sessions.revoke_members(users, artifact);
         self.shared.rooms.leave_members(users, artifact);
         self.shared.handoffs.revoke_members(users, artifact);
+    }
+
+    /// Narrows what each of `users`, now a viewer of `artifact`, holds in
+    /// memory for it (decision 0060 rule 15): on each of its connections, the
+    /// artifact's grants lose the capabilities a viewer is not offered
+    /// (`source.write`). Tickets, views, room participation, handoffs and the
+    /// other grants stay. A request that passed its role check before this
+    /// runs and registers afterwards is closed by its own confirmation.
+    pub(crate) fn downgrade_members(&self, users: &[ActorId], artifact: &ArtifactId) {
+        self.shared
+            .runtime_sessions
+            .narrow_members(users, artifact, CapabilitySet::offered(false));
     }
 
     /// The access generation `actor` holds on `artifact`, read before the
@@ -1363,11 +1376,7 @@ impl<S: Sync> FromRequestParts<S> for RequirePurge {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, ApiError> {
-        let auth = parts
-            .extensions
-            .get::<AuthContext>()
-            .ok_or_else(ApiError::unauthenticated)?;
-        if auth.is_admin || !auth.actor.is_owner() {
+        if personal_credential(parts)? {
             Ok(Self)
         } else {
             Err(ApiError::forbidden(
@@ -1375,6 +1384,39 @@ impl<S: Sync> FromRequestParts<S> for RequirePurge {
             ))
         }
     }
+}
+
+/// Requires the credentials [`RequirePurge`] requires, for a change of
+/// access (decision 0060 rule 6): the owner profile's agent token may not
+/// share an artifact, and is refused before the key, the identifiers or the
+/// body are read. The cost is purge's: an agent holding another user's token
+/// can share that user's artifacts.
+#[derive(Debug, Clone)]
+pub(crate) struct RequireAccessChange;
+
+impl<S: Sync> FromRequestParts<S> for RequireAccessChange {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, ApiError> {
+        if personal_credential(parts)? {
+            Ok(Self)
+        } else {
+            Err(ApiError::forbidden(
+                "changing access needs the administrative credential or a user's own token",
+            ))
+        }
+    }
+}
+
+/// Whether the request holds the administrative credential or a token of a
+/// user other than the owner profile: a credential that is not the agent
+/// token of decision 0029.
+fn personal_credential(parts: &Parts) -> Result<bool, ApiError> {
+    let auth = parts
+        .extensions
+        .get::<AuthContext>()
+        .ok_or_else(ApiError::unauthenticated)?;
+    Ok(auth.is_admin || !auth.actor.is_owner())
 }
 
 /// The credentials of a `Bearer` authorization value. The scheme is
@@ -1388,7 +1430,7 @@ fn bearer_token(value: &str) -> Option<&str> {
 }
 
 /// The required `Idempotency-Key` header.
-struct IdempotencyKey(RequestKey);
+pub(crate) struct IdempotencyKey(pub(crate) RequestKey);
 
 impl<S: Sync> FromRequestParts<S> for IdempotencyKey {
     type Rejection = ApiError;
