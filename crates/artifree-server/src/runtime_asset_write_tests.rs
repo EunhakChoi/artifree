@@ -511,9 +511,16 @@ fn a_queued_upload_whose_grant_is_withdrawn_commits_nothing() -> Result<(), Box<
             pends(&mut upload).await,
             "the commit must wait behind the second blocker"
         );
-        withdrawal.await?;
+        // The withdrawal takes effect in memory, then its confirmation against
+        // the access generation (decision 0060 rule 16) queues behind the
+        // commit.
+        assert!(
+            pends(&mut withdrawal).await,
+            "the withdrawal's confirmation must wait behind the commit"
+        );
         release.send(())?;
         blocker.await?;
+        withdrawal.await?;
         refusal(upload.await, StatusCode::FORBIDDEN)?;
         assert_eq!(
             asset_rows(&directory)?,

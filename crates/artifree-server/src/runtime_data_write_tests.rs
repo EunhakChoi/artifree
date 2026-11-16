@@ -624,9 +624,16 @@ fn grant_withdrawn_while_queued(kind: Kind) -> Result<(), Box<dyn Error>> {
             pends(&mut write).await,
             "{kind:?}: the commit must wait behind the second blocker"
         );
-        withdrawal.await?;
+        // The withdrawal takes effect in memory, then its confirmation against
+        // the access generation (decision 0060 rule 16) queues behind the
+        // commit.
+        assert!(
+            pends(&mut withdrawal).await,
+            "{kind:?}: the withdrawal's confirmation must wait behind the commit"
+        );
         release.send(())?;
         blocker.await?;
+        withdrawal.await?;
         let outcome = write.await;
         assert_eq!(
             space(&directory, &actor, &fixture.artifact)?,

@@ -34,10 +34,11 @@ use artifree_contracts::api::{
     StageHandoffRequest, TypeDescriptor, TypeList, TypeReference, UnreferencedContent,
     UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest,
 };
-use artifree_core::artifacts::{ArtifactError, ArtifactService};
+use artifree_core::artifacts::{ArtifactError, ArtifactService, Missing};
 use artifree_core::catalog::Catalog;
 use artifree_core::jobs::{Clock, SystemClock};
 use artifree_core::parts::{Boundary, ByteRange};
+use artifree_domain::access::AccessGeneration;
 use artifree_domain::change::ChangeCursor;
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, StateGeneration};
 use artifree_domain::job::ProfileName;
@@ -174,12 +175,14 @@ impl DatabaseUsers {
     }
 }
 
-/// Test-only boundary between the completed binding snapshot and confirmation.
+/// Test-only boundary between what a request has done and its confirmation:
+/// the outbox binding's snapshot, or a registration that is confirmed
+/// against the access generation.
 #[cfg(test)]
 #[derive(Debug, Default)]
-struct OutboxBindingGate {
-    snapshot: tokio::sync::Notify,
-    resume: tokio::sync::Notify,
+pub(crate) struct ConfirmGate {
+    pub(crate) snapshot: tokio::sync::Notify,
+    pub(crate) resume: tokio::sync::Notify,
 }
 
 /// Shared request state for the API and content routers.
@@ -191,7 +194,9 @@ pub struct AppState {
 #[derive(Debug)]
 struct Shared {
     #[cfg(test)]
-    outbox_binding_gate: Option<Arc<OutboxBindingGate>>,
+    outbox_binding_gate: Option<Arc<ConfirmGate>>,
+    #[cfg(test)]
+    access_confirm_gate: Option<Arc<ConfirmGate>>,
     artifacts: ArtifactService<SqliteStore>,
     token_store: Arc<SqliteTokenStore>,
     token: AccessToken,
@@ -263,6 +268,8 @@ impl AppState {
             shared: Arc::new(Shared {
                 #[cfg(test)]
                 outbox_binding_gate: None,
+                #[cfg(test)]
+                access_confirm_gate: None,
                 artifacts: ArtifactService::new(store).with_catalog(catalog),
                 token_store: Arc::new(token_store),
                 token,
@@ -476,14 +483,59 @@ impl AppState {
     /// one member will run it for that user once a route revokes (S02e). The
     /// connections and change streams stay open, unlike a disable's
     /// [`Self::revoke_actor`]; the streams carry the change rows. A request
-    /// that passed its access check before this runs may still register
-    /// afterwards: confirming it against the access generation (rule 16) is
-    /// not implemented yet.
+    /// that passed its access check before this runs and registers afterwards
+    /// is closed by its own confirmation ([`Self::confirm_access`]).
     pub(crate) fn revoke_members(&self, users: &[ActorId], artifact: &ArtifactId) {
         self.shared.previews.revoke_members(users, artifact);
         self.shared.runtime_sessions.revoke_members(users, artifact);
         self.shared.rooms.leave_members(users, artifact);
         self.shared.handoffs.revoke_members(users, artifact);
+    }
+
+    /// The access generation `actor` holds on `artifact`, read before the
+    /// request's access check (decision 0060 rule 16).
+    pub(crate) async fn access_seen(
+        &self,
+        actor: &ActorId,
+        artifact: &ArtifactId,
+    ) -> Result<AccessGeneration, ApiError> {
+        let (actor, artifact) = (actor.clone(), artifact.clone());
+        Ok(self
+            .run(move |artifacts| artifacts.access_generation(&actor, &artifact))
+            .await?)
+    }
+
+    /// Confirms, after a request registered something of `artifact`, that
+    /// the access generation of `actor` there is still `seen`, the one it
+    /// read before its access check (decision 0060 rule 16). Any change in
+    /// between, a revocation, a role change or a move to or out of the trash,
+    /// is answered as a revocation: what `actor` holds of the artifact is
+    /// closed, the late registration with it, and the request gets the `404`
+    /// of an unknown artifact. A client that still has access asks again.
+    pub(crate) async fn confirm_access(
+        &self,
+        actor: &ActorId,
+        artifact: &ArtifactId,
+        seen: AccessGeneration,
+    ) -> Result<(), ApiError> {
+        #[cfg(test)]
+        if let Some(gate) = &self.shared.access_confirm_gate {
+            gate.snapshot.notify_one();
+            gate.resume.notified().await;
+        }
+        if self.access_seen(actor, artifact).await? == seen {
+            return Ok(());
+        }
+        self.revoke_members(std::slice::from_ref(actor), artifact);
+        Err(ArtifactError::NotFound(Missing::Artifact).into())
+    }
+
+    /// Holds every access confirmation back until the test resumes it.
+    #[cfg(test)]
+    pub(crate) fn gate_access_confirmation(&mut self) -> Option<Arc<ConfirmGate>> {
+        let gate = Arc::new(ConfirmGate::default());
+        Arc::get_mut(&mut self.shared)?.access_confirm_gate = Some(Arc::clone(&gate));
+        Some(gate)
     }
 
     /// Confirms that `actor` is still in the state generation the request
@@ -2243,7 +2295,7 @@ mod outbox_binding_tests {
         directory: PathBuf,
         state: AppState,
         actor: ActorId,
-        gate: Arc<OutboxBindingGate>,
+        gate: Arc<ConfirmGate>,
     }
 
     impl Fixture {
@@ -2262,7 +2314,7 @@ mod outbox_binding_tests {
                 AccessToken::parse(&"0".repeat(64)).ok_or("fixture token")?,
                 Settings::default(),
             )?;
-            let gate = Arc::new(OutboxBindingGate::default());
+            let gate = Arc::new(ConfirmGate::default());
             Arc::get_mut(&mut state.shared)
                 .ok_or("unique fixture state")?
                 .outbox_binding_gate = Some(Arc::clone(&gate));

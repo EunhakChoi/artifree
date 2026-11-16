@@ -37,6 +37,7 @@ use artifree_core::members::{MAX_TOKEN_BYTES, MemberLimit, MemberQuery, MemberTo
 use artifree_core::parts::{Boundary, ByteRange, FilePart, RangeError};
 use artifree_core::room::TabKey;
 use artifree_domain::AppDataVersion;
+use artifree_domain::access::AccessGeneration;
 use artifree_domain::artifact_type::{ArtifactType, TypeId, TypeRelease};
 use artifree_domain::assets::{
     AssetId, AssetMediaType, AssetMetadata, AssetRejection, AssetVersion, MAX_ASSET_BYTES,
@@ -897,27 +898,32 @@ pub(crate) async fn preview(
         PreviewTarget::Source => Vec::new(),
         PreviewTarget::Build(_) => state.settings().build_profiles.clone(),
     };
-    state
-        .run(move |artifacts| match &lookup_target {
-            PreviewTarget::Source => {
-                let record = artifacts.artifact(&lookup_actor, &lookup_id)?;
-                if revision > record.current_revision {
-                    return Err(ArtifactError::NotFound(Missing::Revision));
+    let seen = state
+        .run(move |artifacts| {
+            // Read before the access check (decision 0060 rule 16).
+            let seen = artifacts.access_generation(&lookup_actor, &lookup_id)?;
+            match &lookup_target {
+                PreviewTarget::Source => {
+                    let record = artifacts.artifact(&lookup_actor, &lookup_id)?;
+                    if revision > record.current_revision {
+                        return Err(ArtifactError::NotFound(Missing::Revision));
+                    }
                 }
-                Ok(())
+                PreviewTarget::Build(profile) => {
+                    artifacts.preview_build(
+                        &lookup_actor,
+                        &lookup_id,
+                        revision,
+                        profile,
+                        &build_profiles,
+                    )?;
+                }
             }
-            PreviewTarget::Build(profile) => artifacts
-                .preview_build(
-                    &lookup_actor,
-                    &lookup_id,
-                    revision,
-                    profile,
-                    &build_profiles,
-                )
-                .map(drop),
+            Ok(seen)
         })
         .await?;
     let owner = actor.clone();
+    let named = id.clone();
     let route = target.route();
     let ticket = state
         .previews()
@@ -931,8 +937,10 @@ pub(crate) async fn preview(
     })?;
     // The link is a bearer capability that outlives the request: if the user
     // was disabled, or disabled and enabled again, while this request ran, it
-    // is removed again.
+    // is removed again, and so it is if the user's access to the artifact
+    // changed.
     state.ensure_current(&owner, generation).await?;
+    state.confirm_access(&owner, &named, seen).await?;
     Ok(Preview {
         url: format!(
             "{}/{route}/{}/",
@@ -1064,6 +1072,9 @@ pub(crate) async fn stage_handoff(
         .get(&actor, &request.workspace_session_id)
         .map_err(session_error)?;
     let intent = handoffs::intent(&request.intent).map_err(handoff_error)?;
+    let named = artifact_id(&request.artifact_id)?;
+    // Read before `read_file`'s access check (decision 0060 rule 16).
+    let seen = state.access_seen(&actor, &named).await?;
     let file = read_file(
         state,
         actor.clone(),
@@ -1084,7 +1095,7 @@ pub(crate) async fn stage_handoff(
         file.part,
     )
     .map_err(handoff_error)?;
-    state
+    let staged = state
         .handoffs()
         .stage(
             &actor,
@@ -1094,7 +1105,9 @@ pub(crate) async fn stage_handoff(
             selection,
             intent,
         )
-        .map_err(handoff_error)
+        .map_err(handoff_error)?;
+    state.confirm_access(&actor, &named, seen).await?;
+    Ok(staged)
 }
 
 pub(crate) fn get_handoff(
@@ -1295,7 +1308,7 @@ async fn runtime_source(
     actor: &ActorId,
     id: &ArtifactId,
     revision: SourceRevision,
-) -> Result<(ArtifactRecord, bool, RuntimePolicy), ApiError> {
+) -> Result<(ArtifactRecord, bool, RuntimePolicy, AccessGeneration), ApiError> {
     let actor = actor.clone();
     let id = id.clone();
     let manifest_path: PackagePath = MANIFEST_PATH.parse().map_err(|_| {
@@ -1305,8 +1318,10 @@ async fn runtime_source(
             "invalid runtime manifest path",
         )
     })?;
-    let (record, enabled, manifest) = state
+    let (record, enabled, manifest, seen) = state
         .run(move |artifacts| {
+            // Read before the access check (decision 0060 rule 16).
+            let seen = artifacts.access_generation(&actor, &id)?;
             let record = artifacts.artifact(&actor, &id)?;
             if revision > record.current_revision {
                 return Err(ArtifactError::NotFound(Missing::Revision));
@@ -1322,12 +1337,12 @@ async fn runtime_source(
             } else {
                 None
             };
-            Ok((record, enabled, manifest))
+            Ok((record, enabled, manifest, seen))
         })
         .await?;
     let policy = RuntimePolicy::from_source(enabled, manifest.as_deref())
         .map_err(ApiError::unprocessable)?;
-    Ok((record, enabled, policy))
+    Ok((record, enabled, policy, seen))
 }
 
 pub(crate) async fn set_runtime_grant(
@@ -1345,7 +1360,7 @@ pub(crate) async fn set_runtime_grant(
         .map_err(session_error)?;
     let id = artifact_id(id)?;
     let revision = revision_number(revision)?;
-    let (record, _, policy) = runtime_source(state, &actor, &id, revision).await?;
+    let (record, _, policy, seen) = runtime_source(state, &actor, &id, revision).await?;
     if record.current_revision.0 != request.head_revision {
         return Err(session_error(SessionError::Conflict));
     }
@@ -1354,10 +1369,13 @@ pub(crate) async fn set_runtime_grant(
             "grant must be a supported, declared subset",
         ));
     };
-    let scope = GrantScope::new(id, revision, record.current_revision);
+    let scope = GrantScope::new(id.clone(), revision, record.current_revision);
     let version = session
         .set_grant(scope, capabilities, request.expected_version)
         .map_err(session_error)?;
+    // The grant outlives the request, so it is confirmed against the access
+    // the request saw (decision 0060 rule 16).
+    state.confirm_access(&actor, &id, seen).await?;
     Ok(RuntimeGrant { version })
 }
 
@@ -1415,7 +1433,7 @@ pub(crate) async fn create_runtime_view(
                 "runtime views are temporarily unavailable",
             )
         })?;
-    let (record, enabled, policy) = match runtime_source(state, &actor, &id, revision).await {
+    let (record, enabled, policy, seen) = match runtime_source(state, &actor, &id, revision).await {
         // Reading a revision answers 422 when its manifest is unusable (another
         // SDK pin, a malformed field). An adoption of such a revision is refused,
         // not malformed (decision 0054, rule 16).
@@ -1469,6 +1487,7 @@ pub(crate) async fn create_runtime_view(
         .map_err(runtime_issue_error)?;
     // As for a preview link: confirmed after the registration (see `preview`).
     state.ensure_current(&owner, generation).await?;
+    state.confirm_access(&owner, &id, seen).await?;
     Ok(RuntimeView {
         url: format!(
             "{}/{}/{}/",

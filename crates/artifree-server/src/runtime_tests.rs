@@ -3006,3 +3006,247 @@ fn a_replayed_move_to_the_trash_closes_nothing_after_a_recovery() -> Result<(), 
         Ok::<(), Box<dyn Error>>(())
     })
 }
+
+/// Changes `user`'s access to `artifact` straight in the store, as a route
+/// of the owner would, without what the route closes in memory: what a
+/// request registers afterwards is left to its own confirmation.
+fn revoke_directly(
+    directory: &TestDirectory,
+    owner: &ActorId,
+    artifact: &ArtifactId,
+    user: &ActorId,
+) -> Result<(), Box<dyn Error>> {
+    use artifree_domain::access::AccessVersion;
+    use artifree_domain::identity::UnixMillis;
+    use artifree_ports::access_store::{AccessChange, AccessRequest, AccessStore};
+    use artifree_ports::artifact_store::{RequestFingerprint, RequestIdentity};
+
+    SqliteStore::open(&directory.0.join("runtime.sqlite3"))?
+        .change_access(AccessRequest {
+            request: RequestIdentity {
+                actor: owner,
+                key: &format!("revoke-{artifact}").parse()?,
+                fingerprint: RequestFingerprint([8; 32]),
+            },
+            artifact,
+            user,
+            change: AccessChange::Revoke,
+            base: AccessVersion(1),
+            now: UnixMillis(2),
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// A request of Ana, a viewer of the owner's runtime artifact, raced against
+/// her revocation: the state holds every access confirmation back until the
+/// race resumes it (decision 0060 rule 16).
+struct Race {
+    directory: TestDirectory,
+    state: AppState,
+    gate: std::sync::Arc<http::ConfirmGate>,
+    owner: ActorId,
+    ana: ActorId,
+    shared: ArtifactId,
+}
+
+impl Race {
+    async fn new() -> Result<Self, Box<dyn Error>> {
+        let directory = TestDirectory::new()?;
+        let mut state = test_state(&directory)?;
+        let gate = state
+            .gate_access_confirmation()
+            .ok_or("the state is shared")?;
+        let (owner, ana) = (registered_user(&state, 1)?, registered_user(&state, 2)?);
+        let shared = create_keyed_artifact(&state, &owner, "create-shared").await?;
+        grant_viewer(&directory, &owner, &shared, &ana)?;
+        Ok(Self {
+            directory,
+            state,
+            gate,
+            owner,
+            ana,
+            shared,
+        })
+    }
+
+    /// Runs `request`, revokes Ana once it registered and waits for its
+    /// confirmation, and returns its status.
+    async fn revoked_meanwhile<T>(
+        &self,
+        request: impl Future<Output = Result<T, ApiError>>,
+    ) -> Result<StatusCode, Box<dyn Error>> {
+        let revoke = async {
+            tokio::time::timeout(Duration::from_secs(5), self.gate.snapshot.notified())
+                .await
+                .map_err(|_| "the request confirmed nothing")?;
+            let revoked = revoke_directly(&self.directory, &self.owner, &self.shared, &self.ana);
+            self.gate.resume.notify_one();
+            revoked
+        };
+        let (answer, revoked) = tokio::join!(request, revoke);
+        revoked?;
+        Ok(answer.err().map_or(StatusCode::OK, |error| error.status))
+    }
+
+    fn block_on<F: Future<Output = Result<(), Box<dyn Error>>>>(
+        case: impl FnOnce(Self) -> F,
+    ) -> Result<(), Box<dyn Error>> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(async { case(Self::new().await?).await })
+    }
+}
+
+#[test]
+fn a_preview_link_issued_across_a_revocation_is_closed() -> Result<(), Box<dyn Error>> {
+    Race::block_on(|race| async move {
+        let status = race
+            .revoked_meanwhile(operations::preview(
+                &race.state,
+                race.ana.clone(),
+                None,
+                StateGeneration::FIRST,
+                race.shared.as_str(),
+                1,
+                PreviewTarget::Source,
+            ))
+            .await?;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            race.state
+                .previews()
+                .live_tickets_of(&race.ana, &race.shared),
+            0
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn a_runtime_view_opened_across_a_revocation_is_closed() -> Result<(), Box<dyn Error>> {
+    Race::block_on(|race| async move {
+        let session = operations::open_runtime_session(&race.state, &race.ana, None)
+            .map_err(|error| error.body.message)?
+            .session_id;
+        let status = race
+            .revoked_meanwhile(operations::create_runtime_view(
+                &race.state,
+                race.ana.clone(),
+                None,
+                StateGeneration::FIRST,
+                race.shared.as_str(),
+                1,
+                CreateRuntimeViewRequest {
+                    session_id: session,
+                    view_id: "a".repeat(32),
+                    generation: 1,
+                    adopt: None,
+                },
+            ))
+            .await?;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            race.state
+                .previews()
+                .live_tickets_of(&race.ana, &race.shared),
+            0
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn a_grant_set_across_a_revocation_is_dropped() -> Result<(), Box<dyn Error>> {
+    Race::block_on(|race| async move {
+        let session = operations::open_runtime_session(&race.state, &race.ana, None)
+            .map_err(|error| error.body.message)?
+            .session_id;
+        let status = race
+            .revoked_meanwhile(operations::set_runtime_grant(
+                &race.state,
+                race.ana.clone(),
+                &session,
+                race.shared.as_str(),
+                1,
+                SetRuntimeGrantRequest {
+                    head_revision: 1,
+                    expected_version: 0,
+                    capabilities: vec!["metadata.read".into()],
+                },
+            ))
+            .await?;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let grant = race
+            .state
+            .runtime_sessions()
+            .get(&race.ana, &session)
+            .map_err(|error| format!("{error:?}"))?
+            .with_grant(&Holder::scope(&race.shared), |version, _| version)
+            .map_err(|error| format!("{error:?}"))?;
+        assert_eq!(grant, 0);
+        Ok(())
+    })
+}
+
+#[test]
+fn a_room_joined_across_a_revocation_is_left() -> Result<(), Box<dyn Error>> {
+    Race::block_on(|race| async move {
+        let session = operations::open_runtime_session(&race.state, &race.ana, None)
+            .map_err(|error| error.body.message)?
+            .session_id;
+        let status = race
+            .revoked_meanwhile(rooms::join(
+                &race.state,
+                &race.ana,
+                &session,
+                race.shared.as_str(),
+                Ok(join_request("page")),
+            ))
+            .await?;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let counts = race.state.rooms().counts();
+        assert_eq!(counts.map(|counts| counts.participants), Some(0));
+        Ok(())
+    })
+}
+
+#[test]
+fn a_handoff_staged_across_a_revocation_is_forgotten() -> Result<(), Box<dyn Error>> {
+    Race::block_on(|race| async move {
+        let revision = operations::revision(&race.state, race.ana.clone(), race.shared.as_str(), 1)
+            .await
+            .map_err(|error| error.body.message)?;
+        let workspace = operations::open_runtime_session(&race.state, &race.ana, None)
+            .map_err(|error| error.body.message)?
+            .session_id;
+        let agent = operations::register_handoff_session(&race.state, &race.ana, "Editor")
+            .map_err(|error| error.body.message)?;
+        let status = race
+            .revoked_meanwhile(operations::stage_handoff(
+                &race.state,
+                race.ana.clone(),
+                StageHandoffRequest {
+                    workspace_session_id: workspace,
+                    agent_session_id: agent.session_id,
+                    artifact_id: race.shared.to_string(),
+                    revision: 1,
+                    path: "index.html".into(),
+                    file_sha256: revision
+                        .files
+                        .first()
+                        .ok_or("missing source")?
+                        .sha256
+                        .clone(),
+                    start: 0,
+                    end: 4,
+                    intent: "Edit".into(),
+                },
+            ))
+            .await?;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(race.state.handoffs().items_of(&race.ana), 0);
+        Ok(())
+    })
+}

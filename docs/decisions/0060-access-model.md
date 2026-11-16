@@ -317,14 +317,15 @@ S02 is split into slices, each its own pull request, in this order:
 | S02c  | 13, 14                | Feed delivery to every reader and the access change rows                                                                 | implemented                             |
 | S02d1 | 11, 15 (jobs), 17     | The queued jobs a revocation and a downgrade take, the owner's cancel, and member replays in the store                   | implemented                             |
 | S02d2 | 15 (memory, trash)    | What the trash removes from runtime memory, and the closure a revocation will call                                       | implemented                             |
-| S02d3 | 16 (memory), 3, 18    | The confirmations against the access generation, runtime capabilities offered by role, and the disabled mark             | not implemented                         |
+| S02d3 | 16 (memory)           | The confirmations against the access generation of what a request registers                                              | implemented                             |
+| S02d4 | 3, 18                 | Runtime capabilities offered by role, and the disabled mark                                                              | not implemented                         |
 | S02e  | 6 to 8                | `/v1/me`, the access routes, listings with roles, the CLI and the contract; what a downgrade removes from runtime memory | not implemented                         |
 | S02f  | 10                    | The declared shared space                                                                                                | not implemented                         |
 | S02g  | 12                    | Rooms per artifact                                                                                                       | not implemented                         |
 | S02h  | Acceptance (web)      | The web workspace's sharing                                                                                              | not implemented                         |
 
 Nothing reaches a member's access before S02e exposes the routes, and S02e
-waits for S02b to S02d3, so no slice opens an artifact to another user without
+waits for S02b to S02d4, so no slice opens an artifact to another user without
 the checks, the delivery and the revocation that go with it.
 
 **S02a (implemented).** Schema 18 adds `artifact_members` (one row per
@@ -370,8 +371,8 @@ real database (`crates/artifree-providers/tests/access_writes.rs`,
 
 Not in S02b, and moved to the slice named: listing an artifact one is a
 member of, with its role (S02e); runtime capabilities offered by role, so a
-viewer's frame is shown `source.write` as not available (S02d3, with the
-downgrade's grant removal) — until then a viewer's runtime source write is
+viewer's frame is shown `source.write` as not available (S02d4; the
+downgrade's grant removal is S02e) — until then a viewer's runtime source write is
 refused by the role check like any other write; and the owner's cancel of a
 member's job (rule 11) (S02d1); cancelling a
 revoked or downgraded member's queued jobs, which until then a worker can
@@ -433,8 +434,8 @@ role no longer allows a commit gets `forbidden`, a revoked one `not_found`
 so its replay is unchanged. Behavioural tests over a real database
 (`crates/artifree-providers/tests/revocation_jobs.rs`) fail when each guard
 is broken. What a revocation and the trash remove from runtime memory is
-S02d2; the confirmations against the access generation (rule 16), runtime
-capabilities offered by role, and rule 18's marking are S02d3.
+S02d2; the confirmations against the access generation (rule 16) are S02d3;
+runtime capabilities offered by role and rule 18's marking are S02d4.
 
 **S02d2 (implemented).** A move to the trash ends, for each current member
 and that artifact only, what the server holds in memory (rule 15): its
@@ -456,6 +457,24 @@ access routes (S02e). Behavioural tests over the real registries and service
 and `a_replayed_move_to_the_trash_closes_nothing_after_a_recovery`) fail when
 each guard is broken. Not in S02d2: a request that passed its access check
 before the move may still register afterwards, until the confirmations of
-rule 16 (S02d3); the revocation's call (S02e); and what a downgrade to viewer
+rule 16 (S02d3, now implemented); the revocation's call (S02e); and what a downgrade to viewer
 removes (the `source.write` grants), which comes with the route that changes
 a role (S02e).
+
+**S02d3 (implemented).** Each registration that a request makes for an
+artifact and that outlives it is confirmed against the access generation
+(rule 16): a preview or build preview link, a runtime view, a runtime grant,
+a room join and a staged handoff. The request reads the caller's generation
+on the artifact before its access check, registers, and then reads it again;
+any change in between, a revocation, a role change or a move to or out of
+the trash, is answered as a revocation. What the caller holds of the artifact
+is closed (the closure of S02d2, for that user) and the request gets the
+`404` of an unknown artifact; a caller that still has access asks again. The
+generation is read through `ArtifactService::access_generation`, which
+returns only the caller's own. A change that commits after the second read
+is cleaned up by its own closure, which runs after its commit. Behavioural
+tests (`runtime_tests.rs`, one per registration, `*_across_a_revocation_*`)
+revoke the viewer in the store between the registration and the
+confirmation and fail when each guard is broken. Not in S02d3: runtime
+capabilities offered by role and rule 18's mark (S02d4), and the routes that
+change access (S02e).

@@ -15,6 +15,7 @@ use artifree_contracts::api::{
     RoomJoinRequest, RoomMember, RoomSnapshot,
 };
 use artifree_core::room::{Caller, Limits, RoomError, Rooms, Snapshot, TabKey};
+use artifree_domain::access::AccessGeneration;
 use artifree_domain::identity::{ActorId, ArtifactId, InvalidValue};
 use artifree_domain::room::{
     Epoch, EventData, EventKind, EventSeq, ParticipantId, PresenceState, Slot,
@@ -180,6 +181,9 @@ struct Located {
     session: Arc<RuntimeSession>,
     tab: TabKey,
     artifact: ArtifactId,
+    /// The access generation read before the access check, when it ran
+    /// (decision 0060 rule 16).
+    seen: Option<AccessGeneration>,
 }
 
 impl Located {
@@ -220,16 +224,24 @@ async fn locate(
         .runtime_sessions()
         .get(actor, session_id)
         .map_err(session_error)?;
-    if live {
+    let seen = if live {
         let (owner, id) = (actor.clone(), artifact.clone());
-        state
-            .run(move |artifacts| artifacts.artifact(&owner, &id))
+        let seen = state
+            .run(move |artifacts| {
+                let seen = artifacts.access_generation(&owner, &id)?;
+                artifacts.artifact(&owner, &id)?;
+                Ok(seen)
+            })
             .await?;
-    }
+        Some(seen)
+    } else {
+        None
+    };
     Ok(Located {
         session,
         tab: TabKey::new(session_id),
         artifact,
+        seen,
     })
 }
 
@@ -282,11 +294,16 @@ pub(crate) async fn join(
     let request = body?;
     let slot: Slot = text("slot", &request.slot)?;
     let presence = state_of(request.state.as_deref())?;
-    located
+    let joined = located
         .act(state, actor, |rooms, now, caller| {
             rooms.join(now, caller, slot, presence)
         })
-        .map(snapshot)
+        .map(snapshot)?;
+    // The participant outlives the request (decision 0060 rule 16).
+    if let Some(seen) = located.seen {
+        state.confirm_access(actor, &located.artifact, seen).await?;
+    }
+    Ok(joined)
 }
 
 /// Renews a participant's lease and reads the room.
