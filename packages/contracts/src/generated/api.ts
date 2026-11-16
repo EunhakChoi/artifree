@@ -1028,7 +1028,8 @@ export interface RuntimeView {
    */
   session_id: string;
   /**
-   * Capabilities supported by this server for the entry's SDK pin.
+   * Capabilities supported by this server for the entry's SDK pin and
+   * offered to the caller's role; a viewer is not offered `source.write`.
    */
   supported: string[];
   /**
@@ -1046,7 +1047,10 @@ export interface RuntimeView {
  */
 export interface SetRuntimeGrantRequest {
   /**
-   * Complete supported subset; an empty list revokes every capability.
+   * Complete supported subset; an empty list revokes every capability. A
+   * capability the caller's role does not offer (`source.write` for a
+   * viewer) is accepted and left out of the grant; the next runtime view
+   * reports what was granted.
    */
   capabilities: string[];
   /**

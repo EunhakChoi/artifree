@@ -3298,3 +3298,214 @@ fn a_preview_link_whose_confirmation_cannot_read_is_closed() -> Result<(), Box<d
         Ok(())
     })
 }
+
+/// A runtime artifact of `owner` whose manifest declares `metadata.read` and
+/// `source.write`.
+async fn create_writing_artifact(
+    state: &AppState,
+    owner: &ActorId,
+) -> Result<ArtifactId, Box<dyn Error>> {
+    let created = operations::create(
+        state,
+        owner.clone(),
+        "create-writing".parse()?,
+        CreateArtifactRequest {
+            title: "Writing".into(),
+            artifact_type: None,
+            files: Some(vec![
+                FileUpload {
+                    path: "index.html".into(),
+                    encoding: ContentEncoding::Utf8,
+                    content: "<!doctype html><html><head><!-- artifree-runtime --></head><body>test</body></html>".into(),
+                },
+                FileUpload {
+                    path: "artifree-runtime.json".into(),
+                    encoding: ContentEncoding::Utf8,
+                    content: r#"{"sdk":"artifree.app.v1","capabilities":["metadata.read","source.write"]}"#.into(),
+                },
+            ]),
+        },
+    )
+    .await
+    .map_err(|error| error.body.message)?;
+    Ok(created.artifact.id.parse()?)
+}
+
+/// Gives `user` `role` on `artifact`, as the owner's grant would, from
+/// access version `base`.
+fn grant_role(
+    directory: &TestDirectory,
+    owner: &ActorId,
+    artifact: &ArtifactId,
+    user: &ActorId,
+    role: artifree_domain::access::Role,
+    base: u64,
+) -> Result<(), Box<dyn Error>> {
+    use artifree_domain::access::AccessVersion;
+    use artifree_domain::identity::UnixMillis;
+    use artifree_ports::access_store::{AccessChange, AccessRequest, AccessStore};
+    use artifree_ports::artifact_store::{RequestFingerprint, RequestIdentity};
+
+    SqliteStore::open(&directory.0.join("runtime.sqlite3"))?
+        .change_access(AccessRequest {
+            request: RequestIdentity {
+                actor: owner,
+                key: &format!("change-role-{base}").parse()?,
+                fingerprint: RequestFingerprint([9; 32]),
+            },
+            artifact,
+            user,
+            change: AccessChange::Grant(role),
+            base: AccessVersion(base),
+            now: UnixMillis(1),
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// One connection of a user to a runtime artifact, as its frames see it.
+struct Frame<'a> {
+    state: &'a AppState,
+    actor: ActorId,
+    artifact: ArtifactId,
+    session: String,
+    views: u32,
+}
+
+impl<'a> Frame<'a> {
+    fn open(
+        state: &'a AppState,
+        actor: &ActorId,
+        artifact: &ArtifactId,
+    ) -> Result<Self, Box<dyn Error>> {
+        let session = operations::open_runtime_session(state, actor, None)
+            .map_err(|error| error.body.message)?
+            .session_id;
+        Ok(Self {
+            state,
+            actor: actor.clone(),
+            artifact: artifact.clone(),
+            session,
+            views: 0,
+        })
+    }
+
+    /// A new runtime view: what it reports as supported and as granted.
+    async fn view(&mut self) -> Result<(Vec<String>, Vec<String>, u64), Box<dyn Error>> {
+        self.views += 1;
+        let view = operations::create_runtime_view(
+            self.state,
+            self.actor.clone(),
+            None,
+            StateGeneration::FIRST,
+            self.artifact.as_str(),
+            1,
+            CreateRuntimeViewRequest {
+                session_id: self.session.clone(),
+                view_id: format!("{:032}", self.views),
+                generation: 1,
+                adopt: None,
+            },
+        )
+        .await
+        .map_err(|error| error.body.message)?;
+        Ok((view.supported, view.granted, view.grant_version))
+    }
+
+    /// Asks for every capability the fixture declares.
+    async fn grant_all(&self, expected_version: u64) -> Result<(), Box<dyn Error>> {
+        operations::set_runtime_grant(
+            self.state,
+            self.actor.clone(),
+            &self.session,
+            self.artifact.as_str(),
+            1,
+            SetRuntimeGrantRequest {
+                head_revision: 1,
+                expected_version,
+                capabilities: vec!["metadata.read".into(), "source.write".into()],
+            },
+        )
+        .await
+        .map_err(|error| error.body.message)?;
+        Ok(())
+    }
+
+    /// What the connection holds for the artifact, as granted, before any
+    /// view reports it.
+    fn held(&self) -> Result<Vec<String>, Box<dyn Error>> {
+        Ok(self
+            .state
+            .runtime_sessions()
+            .get(&self.actor, &self.session)
+            .map_err(|error| format!("{error:?}"))?
+            .with_grant(&Holder::scope(&self.artifact), |_, granted| granted.names())
+            .map_err(|error| format!("{error:?}"))?)
+    }
+
+    /// What a grant of every declared capability leaves granted, and what the
+    /// view reports as supported.
+    async fn offered(&mut self) -> Result<(Vec<String>, Vec<String>), Box<dyn Error>> {
+        let (_, _, version) = self.view().await?;
+        self.grant_all(version).await?;
+        let (supported, granted, _) = self.view().await?;
+        Ok((supported, granted))
+    }
+}
+
+/// Decision 0060 rule 3: `source.write` is offered to the owner and editors
+/// only. A viewer's view shows it as not available, and a viewer who asks
+/// for it is not refused but is never granted it.
+#[test]
+fn a_viewer_is_offered_every_capability_but_source_write() -> Result<(), Box<dyn Error>> {
+    use artifree_domain::access::Role;
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            let owner = registered_user(&state, 1)?;
+            let (ana, ed) = (registered_user(&state, 2)?, registered_user(&state, 3)?);
+            let writing = create_writing_artifact(&state, &owner).await?;
+            grant_role(&directory, &owner, &writing, &ana, Role::Viewer, 0)?;
+            grant_role(&directory, &owner, &writing, &ed, Role::Editor, 1)?;
+            for writer in [&owner, &ed] {
+                let (supported, granted) = Frame::open(&state, writer, &writing)?.offered().await?;
+                assert!(supported.contains(&"source.write".to_owned()));
+                assert_eq!(granted, ["metadata.read", "source.write"]);
+            }
+            let mut anas = Frame::open(&state, &ana, &writing)?;
+            let (supported, granted) = anas.offered().await?;
+            assert!(!supported.contains(&"source.write".to_owned()));
+            assert!(supported.contains(&"metadata.read".to_owned()));
+            assert_eq!(granted, ["metadata.read"]);
+            assert_eq!(anas.held()?, ["metadata.read"]);
+            Ok(())
+        })
+}
+
+/// A grant an editor holds when downgraded is reported as a viewer's role
+/// offers it, so `granted` stays within `supported` (decision 0060 rule 3).
+#[test]
+fn a_downgraded_editors_view_reports_only_what_a_viewer_is_offered() -> Result<(), Box<dyn Error>> {
+    use artifree_domain::access::Role;
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            let (owner, ed) = (registered_user(&state, 1)?, registered_user(&state, 3)?);
+            let writing = create_writing_artifact(&state, &owner).await?;
+            grant_role(&directory, &owner, &writing, &ed, Role::Editor, 0)?;
+            let mut frame = Frame::open(&state, &ed, &writing)?;
+            let (_, granted) = frame.offered().await?;
+            assert_eq!(granted, ["metadata.read", "source.write"]);
+            grant_role(&directory, &owner, &writing, &ed, Role::Viewer, 1)?;
+            let (supported, granted, _) = frame.view().await?;
+            assert!(!supported.contains(&"source.write".to_owned()));
+            assert_eq!(granted, ["metadata.read"]);
+            Ok(())
+        })
+}
