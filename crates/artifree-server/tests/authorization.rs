@@ -5,6 +5,7 @@ use std::str::FromStr;
 
 use artifree_core::artifacts::{ArtifactError, ArtifactService, MetadataChange, Missing};
 use artifree_core::listing::ListQuery;
+use artifree_domain::access::Space;
 use artifree_domain::data::{DataChange, DataPath, DataValue};
 use artifree_domain::identity::{ActorId, RequestKey, Title, UnixMillis};
 use artifree_domain::package::{FileChange, FilePackage, PackagePath};
@@ -287,7 +288,10 @@ fn another_actor_can_neither_read_nor_write_application_data() -> TestResult {
         now,
     )?;
 
-    assert_eq!(service.data(&intruder, &id, &path).map(|_| ()), hidden);
+    assert_eq!(
+        service.data(&intruder, &id, Space::Own, &path).map(|_| ()),
+        hidden
+    );
     let overwrite = DataChange::Set {
         path: path.clone(),
         value: DataValue::parse("\"defaced\"")?,
@@ -323,7 +327,7 @@ fn another_actor_can_neither_read_nor_write_application_data() -> TestResult {
         hidden,
         "keys are per actor"
     );
-    let read = service.data(&owner, &id, &path)?;
+    let read = service.data(&owner, &id, Space::Own, &path)?;
     assert_eq!(
         (read.version, read.value.map(|value| value.to_canonical())),
         (AppDataVersion(1), Some("\"kept\"".to_owned())),

@@ -142,6 +142,7 @@ const CHANGE_KINDS: Record<ChangeKind, true> = {
   access_granted: true,
   access_changed: true,
   access_revoked: true,
+  shared_data_changed: true,
 };
 
 // A record for the same reason as the error codes: a part added later must
@@ -759,7 +760,8 @@ export function parseFeedPosition(value: unknown): FeedPosition | undefined {
 }
 
 /**
- * Parses the data of a `change` feed event. A `data_changed` change carries a
+ * Parses the data of a `change` feed event. A `data_changed` or
+ * `shared_data_changed` change carries a
  * `data_version` that is a safe integer of at least 1, and a `job_changed`
  * change carries a `job_id` that is `job_` and 32 lowercase hex digits. Each
  * of those two kinds refuses the other's field, and a change of any other
@@ -806,7 +808,7 @@ export function parseFeedChange(value: unknown): FeedChange | undefined {
       : { ...feedChange, change, job_id };
   }
   if (Object.hasOwn(value, 'job_id')) return undefined;
-  if (change !== 'data_changed')
+  if (change !== 'data_changed' && change !== 'shared_data_changed')
     return Object.hasOwn(value, 'data_version')
       ? undefined
       : { ...feedChange, change };

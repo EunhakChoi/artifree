@@ -23,7 +23,8 @@ fn change_with(kind: &str, members: &[(&str, Value)]) -> Value {
 }
 
 /// A valid change event of each kind that carries no job, as the server writes
-/// it. Only `data_changed` has a data version (decision 0040).
+/// it. Only `data_changed` and `shared_data_changed` have a data version
+/// (decisions 0040 and 0060).
 fn bodies_without_a_job() -> Vec<(&'static str, Value)> {
     let mut bodies: Vec<(&'static str, Value)> = [
         "created",
@@ -38,6 +39,11 @@ fn bodies_without_a_job() -> Vec<(&'static str, Value)> {
     .collect();
     let data = change_with("data_changed", &[("data_version", Value::from(3_u64))]);
     bodies.push(("data_changed", data));
+    let shared = change_with(
+        "shared_data_changed",
+        &[("data_version", Value::from(3_u64))],
+    );
+    bodies.push(("shared_data_changed", shared));
     bodies
 }
 
@@ -120,7 +126,7 @@ fn a_job_change_refuses_a_data_version() {
         assert_refused(
             case,
             body,
-            "only a data_changed change carries a data_version",
+            "only a data_changed or shared_data_changed change carries a data_version",
         );
     }
 }
@@ -180,15 +186,15 @@ fn published_schema_states_the_job_id_rule() -> Result<(), serde_json::Error> {
     Ok(())
 }
 
-/// The rule for `data_version` is unchanged in the published schema: required
-/// for `data_changed` and forbidden for every other kind.
+/// The rule for `data_version` in the published schema: required for
+/// `data_changed` and `shared_data_changed` and forbidden for every other kind.
 #[test]
 fn published_schema_keeps_the_data_version_rule() -> Result<(), serde_json::Error> {
     let schema = published_schema()?;
     assert_eq!(
         schema["if"],
         serde_json::json!({
-            "properties": { "change": { "const": "data_changed" } },
+            "properties": { "change": { "enum": ["data_changed", "shared_data_changed"] } },
             "required": ["change"]
         })
     );

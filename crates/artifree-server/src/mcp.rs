@@ -301,8 +301,13 @@ async fn dispatch_data(
     let outcome = match name {
         "get_data" => {
             json(async {
-                let GetDataArguments { artifact_id, path } = parse(arguments)?;
-                operations::read_data(state, actor, &artifact_id, path.as_deref()).await
+                let GetDataArguments {
+                    artifact_id,
+                    path,
+                    space,
+                } = parse(arguments)?;
+                let space = operations::data_space(space);
+                operations::read_data(state, actor, &artifact_id, space, path.as_deref()).await
             })
             .await
         }
@@ -314,6 +319,7 @@ async fn dispatch_data(
                     base_data_version,
                     value,
                     idempotency_key,
+                    space,
                 } = parse(arguments)?;
                 let key = operations::request_key("idempotency_key", &idempotency_key)?;
                 let value = json_text("value", value)?;
@@ -322,7 +328,9 @@ async fn dispatch_data(
                     base_data_version,
                     value,
                 };
-                operations::set_data(state, actor, key, &artifact_id, request, || Ok(None)).await
+                let space = operations::data_space(space);
+                operations::set_data(state, actor, key, &artifact_id, space, request, || Ok(None))
+                    .await
             })
             .await
         }
@@ -334,6 +342,7 @@ async fn dispatch_data(
                     base_data_version,
                     patch,
                     idempotency_key,
+                    space,
                 } = parse(arguments)?;
                 let key = operations::request_key("idempotency_key", &idempotency_key)?;
                 let patch = json_text("patch", patch)?;
@@ -342,7 +351,11 @@ async fn dispatch_data(
                     base_data_version,
                     patch,
                 };
-                operations::update_data(state, actor, key, &artifact_id, request, || Ok(None)).await
+                let space = operations::data_space(space);
+                operations::update_data(state, actor, key, &artifact_id, space, request, || {
+                    Ok(None)
+                })
+                .await
             })
             .await
         }
@@ -353,13 +366,18 @@ async fn dispatch_data(
                     path,
                     base_data_version,
                     idempotency_key,
+                    space,
                 } = parse(arguments)?;
                 let key = operations::request_key("idempotency_key", &idempotency_key)?;
                 let request = DeleteDataRequest {
                     path,
                     base_data_version,
                 };
-                operations::delete_data(state, actor, key, &artifact_id, request, || Ok(None)).await
+                let space = operations::data_space(space);
+                operations::delete_data(state, actor, key, &artifact_id, space, request, || {
+                    Ok(None)
+                })
+                .await
             })
             .await
         }

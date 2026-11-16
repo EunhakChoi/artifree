@@ -4,6 +4,7 @@
 //! [`ArtifactService::data_members`](crate::artifacts::ArtifactService).
 
 use artifree_domain::AppDataVersion;
+use artifree_domain::access::Space;
 use artifree_domain::data::{DataPath, MemberName};
 use artifree_domain::identity::{ArtifactId, InvalidValue};
 use sha2::{Digest, Sha256};
@@ -63,11 +64,11 @@ pub struct MemberToken {
 
 impl MemberToken {
     /// The position after `last`, a member of the object at `path` of
-    /// `artifact`.
+    /// `space` of `artifact`.
     #[must_use]
-    pub fn new(artifact: &ArtifactId, path: &DataPath, last: MemberName) -> Self {
+    pub fn new(artifact: &ArtifactId, space: Space, path: &DataPath, last: MemberName) -> Self {
         Self {
-            tag: tag(artifact, path),
+            tag: tag(artifact, space, path),
             name: last,
         }
     }
@@ -96,10 +97,10 @@ impl MemberToken {
         bytes
     }
 
-    /// Whether the token was issued for this artifact and path.
+    /// Whether the token was issued for this artifact, space and path.
     #[must_use]
-    pub fn matches(&self, artifact: &ArtifactId, path: &DataPath) -> bool {
-        self.tag == tag(artifact, path)
+    pub fn matches(&self, artifact: &ArtifactId, space: Space, path: &DataPath) -> bool {
+        self.tag == tag(artifact, space, path)
     }
 
     /// The last name of the page the token continues from.
@@ -110,12 +111,18 @@ impl MemberToken {
 }
 
 /// The first 16 bytes of SHA-256 over the artifact identifier, a zero byte,
-/// and the canonical path.
-fn tag(artifact: &ArtifactId, path: &DataPath) -> [u8; TAG_BYTES] {
+/// and the canonical path, followed for the shared space by a zero byte and
+/// its name. A token of an own space is spelled as before the shared space
+/// existed.
+fn tag(artifact: &ArtifactId, space: Space, path: &DataPath) -> [u8; TAG_BYTES] {
     let mut hasher = Sha256::new();
     hasher.update(artifact.as_str().as_bytes());
     hasher.update([0]);
     hasher.update(path.to_string().as_bytes());
+    if space == Space::Shared {
+        hasher.update([0]);
+        hasher.update(space.as_str().as_bytes());
+    }
     let digest = hasher.finalize();
     let mut tag = [0; TAG_BYTES];
     tag.copy_from_slice(&digest[..TAG_BYTES]);
@@ -125,6 +132,8 @@ fn tag(artifact: &ArtifactId, path: &DataPath) -> [u8; TAG_BYTES] {
 /// What to list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberQuery {
+    /// The space listed: the caller's own, or the artifact's shared space.
+    pub space: Space,
     /// The object whose members are listed; the root lists the top level.
     pub path: DataPath,
     /// Continues after this position.
@@ -169,7 +178,7 @@ mod tests {
 
     #[test]
     fn a_token_is_its_tag_then_the_name_in_clear() {
-        let token = MemberToken::new(&artifact(1), &path("a/b"), name("last-one"));
+        let token = MemberToken::new(&artifact(1), Space::Own, &path("a/b"), name("last-one"));
         let bytes = token.to_bytes();
         assert_eq!(bytes.len(), TAG_BYTES + "last-one".len());
         assert_eq!(&bytes[TAG_BYTES..], b"last-one");
@@ -185,18 +194,18 @@ mod tests {
             0xc9, 0xd7, 0x6c, 0x61, 0x73, 0x74, 0x2d, 0x6f, 0x6e, 0x65,
         ];
         let token = MemberToken::from_bytes(&old).unwrap_or_else(|| panic!("old ASCII token"));
-        assert!(token.matches(&artifact(1), &path("a/b")));
+        assert!(token.matches(&artifact(1), Space::Own, &path("a/b")));
         assert_eq!(token.name().as_str(), "last-one");
         assert_eq!(
-            MemberToken::new(&artifact(1), &path("a/b"), name("last-one")).to_bytes(),
+            MemberToken::new(&artifact(1), Space::Own, &path("a/b"), name("last-one")).to_bytes(),
             old
         );
         for text in ["é", "e\u{301}", "한글", "𝄞"] {
-            let token = MemberToken::new(&artifact(1), &path(text), name(text));
+            let token = MemberToken::new(&artifact(1), Space::Own, &path(text), name(text));
             assert_eq!(MemberToken::from_bytes(&token.to_bytes()), Some(token));
         }
-        let composed = MemberToken::new(&artifact(1), &path("é"), name("x"));
-        assert!(!composed.matches(&artifact(1), &path("e\u{301}")));
+        let composed = MemberToken::new(&artifact(1), Space::Own, &path("é"), name("x"));
+        assert!(!composed.matches(&artifact(1), Space::Own, &path("e\u{301}")));
     }
 
     #[test]
@@ -207,21 +216,35 @@ mod tests {
         hasher.update([0]);
         hasher.update("a/b");
         let digest = hasher.finalize();
-        let bytes = MemberToken::new(&id, &path("a/b"), name("x")).to_bytes();
+        let bytes = MemberToken::new(&id, Space::Own, &path("a/b"), name("x")).to_bytes();
         assert_eq!(&bytes[..TAG_BYTES], &digest[..TAG_BYTES]);
     }
 
     #[test]
-    fn a_token_matches_only_its_artifact_and_path() {
-        let token = MemberToken::new(&artifact(1), &path("a/b"), name("x"));
-        assert!(token.matches(&artifact(1), &path("a/b")));
-        assert!(!token.matches(&artifact(2), &path("a/b")), "other artifact");
-        assert!(!token.matches(&artifact(1), &path("a")), "other path");
-        assert!(!token.matches(&artifact(1), &path("")), "root");
+    fn a_token_matches_only_its_artifact_space_and_path() {
+        let own = Space::Own;
+        let token = MemberToken::new(&artifact(1), own, &path("a/b"), name("x"));
+        assert!(token.matches(&artifact(1), own, &path("a/b")));
+        assert!(
+            !token.matches(&artifact(2), own, &path("a/b")),
+            "other artifact"
+        );
+        assert!(!token.matches(&artifact(1), own, &path("a")), "other path");
+        assert!(!token.matches(&artifact(1), own, &path("")), "root");
+        assert!(
+            !token.matches(&artifact(1), Space::Shared, &path("a/b")),
+            "shared space"
+        );
+        let shared = MemberToken::new(&artifact(1), Space::Shared, &path("a/b"), name("x"));
+        assert!(shared.matches(&artifact(1), Space::Shared, &path("a/b")));
+        assert!(
+            !shared.matches(&artifact(1), own, &path("a/b")),
+            "own space"
+        );
         // The zero byte keeps the end of the identifier apart from the path.
         assert_ne!(
-            MemberToken::new(&artifact(1), &path(""), name("x")),
-            MemberToken::new(&artifact(1), &path("a"), name("x"))
+            MemberToken::new(&artifact(1), own, &path(""), name("x")),
+            MemberToken::new(&artifact(1), own, &path("a"), name("x"))
         );
     }
 

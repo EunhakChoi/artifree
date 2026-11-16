@@ -3158,16 +3158,18 @@ const changeWith = (kind, fields) =>
   })}\n\n`;
 
 test('A data change carries the version the write left, and passes it on', async () => {
-  for (const version of [3, 2 ** 53 - 1]) {
-    const [event] = await eventsOf(
-      stream([changeWith('data_changed', { data_version: version })]),
-    );
-    assert.deepEqual(event, {
-      ...changeEvent(3, 'data_changed'),
-      change: { ...event.change, data_version: version },
-    });
-    assert.equal(event.change.data_version, version);
-  }
+  for (const kind of ['data_changed', 'shared_data_changed'])
+    for (const version of [3, 2 ** 53 - 1]) {
+      const [event] = await eventsOf(
+        stream([changeWith(kind, { data_version: version })]),
+      );
+      assert.deepEqual(event, {
+        ...changeEvent(3, kind),
+        change: { ...event.change, data_version: version },
+      });
+      assert.equal(event.change.change, kind);
+      assert.equal(event.change.data_version, version);
+    }
 });
 
 for (const [name, fields] of [
@@ -3180,10 +3182,16 @@ for (const [name, fields] of [
   ['a null data version', { data_version: null }],
 ]) {
   test(`A data change with ${name} is invalid`, async () => {
-    const broken = await failure(
-      eventsOf(stream([changeWith('data_changed', fields)])),
-    );
-    assert.deepEqual([broken.status, broken.code], [200, 'invalid_response']);
+    for (const kind of ['data_changed', 'shared_data_changed']) {
+      const broken = await failure(
+        eventsOf(stream([changeWith(kind, fields)])),
+      );
+      assert.deepEqual(
+        [broken.status, broken.code],
+        [200, 'invalid_response'],
+        kind,
+      );
+    }
   });
 }
 

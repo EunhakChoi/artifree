@@ -19,7 +19,7 @@ use crate::storage::{random_bytes, unavailable};
 
 /// The schema version this build creates and reads. It is the database's
 /// `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i64 = 19;
+pub const SCHEMA_VERSION: i64 = 20;
 
 // Asset associations and receipts deliberately retain no bytes outside `blobs`.
 const ASSET_SCHEMA: &str = "
@@ -771,6 +771,51 @@ DROP TABLE changes;
 ALTER TABLE changes_v19 RENAME TO changes;
 ";
 
+/// Added in schema version 20 (decision 0060 rule 10, slice S02f1): the
+/// declared shared data space of an artifact, one JSON object with its own
+/// version as in `app_data` but with no actor, and the change kind
+/// `shared_data_changed`, which carries the version as `data_changed` does.
+/// The change table is rebuilt for its checked kinds as in version 19. The
+/// keys of shared writes stay in `data_requests`, in the key space of the
+/// user who sent them.
+const SHARED_DATA_SCHEMA: &str = "
+CREATE TABLE shared_data (
+    artifact_id TEXT PRIMARY KEY REFERENCES artifacts (id),
+    data_version INTEGER NOT NULL CHECK (data_version >= 1),
+    document TEXT NOT NULL CHECK (json_valid(document) AND json_type(document) = 'object')
+) STRICT;
+CREATE TABLE changes_v20 (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor TEXT NOT NULL,
+    actor_seq INTEGER NOT NULL CHECK (actor_seq >= 1),
+    artifact_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN
+        ('created', 'revised', 'metadata_updated', 'deleted', 'recovered', 'purged',
+         'data_changed', 'job_changed', 'access_granted', 'access_changed',
+         'access_revoked', 'shared_data_changed')),
+    revision INTEGER NOT NULL,
+    metadata_revision INTEGER NOT NULL,
+    data_version INTEGER,
+    job_id TEXT,
+    committed_at INTEGER NOT NULL,
+    UNIQUE (actor, actor_seq),
+    FOREIGN KEY (artifact_id, revision) REFERENCES revisions (artifact_id, revision),
+    FOREIGN KEY (artifact_id, metadata_revision)
+        REFERENCES metadata_revisions (artifact_id, metadata_revision),
+    FOREIGN KEY (job_id) REFERENCES jobs (id),
+    CHECK ((kind IN ('data_changed', 'shared_data_changed')) = (data_version IS NOT NULL)),
+    CHECK (data_version IS NULL OR data_version >= 1),
+    CHECK ((kind = 'job_changed') = (job_id IS NOT NULL))
+) STRICT;
+INSERT INTO changes_v20 (sequence, actor, actor_seq, artifact_id, kind, revision,
+        metadata_revision, data_version, job_id, committed_at)
+    SELECT sequence, actor, actor_seq, artifact_id, kind, revision, metadata_revision,
+        data_version, job_id, committed_at
+    FROM changes;
+DROP TABLE changes;
+ALTER TABLE changes_v20 RENAME TO changes;
+";
+
 /// The steps that only add tables or columns, by the version they bring.
 const ADDED_TABLES: [(i64, &str); 3] = [
     (16, PRESENCE_SCHEMA),
@@ -828,6 +873,38 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<(), StoreError> {
 }
 
 /// The steps of [`upgrade`], run in the one immediate transaction it opens.
+/// The steps from version 11 on, each run when the database is older, in the
+/// transaction of [`upgrade_steps`].
+fn steps_from_11(transaction: &Transaction<'_>, version: i64) -> Result<(), StoreError> {
+    if version < 11 {
+        rebuild_changes(transaction, DATA_CHANGE_SCHEMA, 11)?;
+    }
+    if version < 12 {
+        transaction
+            .execute_batch(ASSET_SCHEMA)
+            .map_err(unavailable)?;
+    }
+    if version < 13 {
+        rebuild_changes(transaction, JOB_CHANGE_SCHEMA, 13)?;
+    }
+    for (step, schema) in [(14, JOB_PROFILE_SCHEMA), (15, BUILD_SCHEMA)] {
+        if version < step {
+            rebuild_jobs(transaction, schema, step)?;
+        }
+    }
+    for (step, schema) in ADDED_TABLES {
+        if version < step {
+            transaction.execute_batch(schema).map_err(unavailable)?;
+        }
+    }
+    for (step, schema) in [(19, ACCESS_CHANGE_SCHEMA), (20, SHARED_DATA_SCHEMA)] {
+        if version < step {
+            rebuild_changes(transaction, schema, step)?;
+        }
+    }
+    Ok(())
+}
+
 fn upgrade_steps(connection: &mut Connection) -> Result<(), StoreError> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -898,30 +975,7 @@ fn upgrade_steps(connection: &mut Connection) -> Result<(), StoreError> {
     if version < 10 {
         add_users(&transaction)?;
     }
-    if version < 11 {
-        rebuild_changes(&transaction, DATA_CHANGE_SCHEMA, 11)?;
-    }
-    if version < 12 {
-        transaction
-            .execute_batch(ASSET_SCHEMA)
-            .map_err(unavailable)?;
-    }
-    if version < 13 {
-        rebuild_changes(&transaction, JOB_CHANGE_SCHEMA, 13)?;
-    }
-    for (step, schema) in [(14, JOB_PROFILE_SCHEMA), (15, BUILD_SCHEMA)] {
-        if version < step {
-            rebuild_jobs(&transaction, schema, step)?;
-        }
-    }
-    for (step, schema) in ADDED_TABLES {
-        if version < step {
-            transaction.execute_batch(schema).map_err(unavailable)?;
-        }
-    }
-    if version < 19 {
-        rebuild_changes(&transaction, ACCESS_CHANGE_SCHEMA, 19)?;
-    }
+    steps_from_11(&transaction, version)?;
     // Foreign keys are off for these steps (decision 0057 rule 14), so they are
     // checked here: no table may have more foreign keys that do not resolve
     // than it had before.

@@ -341,7 +341,7 @@
           }
         }
       },
-      "description": "Data of a `change` event of `GET /v1/changes`: one commit that wrote a\nrevision or changed metadata, one data write that changed the actor's data\nspace, or one job that was created or changed. Retries that replay a\ncommit, failed commits, and updates that changed nothing have none. It\nnames what to read again and carries no content, path, or value.\n\n`data_version` is present exactly when `change` is `data_changed`: the\npublished schema requires it for that kind and forbids it for every other\nkind, and deserializing refuses both violations (decision 0040).\n\n`job_id` is present exactly when `change` is `job_changed`, with the same\nrule (decision 0055, rule 8).",
+      "description": "Data of a `change` event of `GET /v1/changes`: one commit that wrote a\nrevision or changed metadata, one data write that changed the actor's data\nspace, or one job that was created or changed. Retries that replay a\ncommit, failed commits, and updates that changed nothing have none. It\nnames what to read again and carries no content, path, or value.\n\n`data_version` is present exactly when `change` is `data_changed` or\n`shared_data_changed`: the published schema requires it for those kinds\nand forbids it for every other kind, and deserializing refuses both\nviolations (decisions 0040 and 0060 rule 10).\n\n`job_id` is present exactly when `change` is `job_changed`, with the same\nrule (decision 0055, rule 8).",
       "else": {
         "not": {
           "required": [
@@ -352,7 +352,10 @@
       "if": {
         "properties": {
           "change": {
-            "const": "data_changed"
+            "enum": [
+              "data_changed",
+              "shared_data_changed"
+            ]
           }
         },
         "required": [
@@ -805,6 +808,11 @@
           "const": "access_revoked",
           "description": "The owner revoked a member. The owner, every remaining member and the\nrevoked user receive it; for the revoked user it is the last change of\nthe artifact, which it no longer reaches (`not_found`).",
           "type": "string"
+        },
+        {
+          "const": "shared_data_changed",
+          "description": "A write changed the artifact's declared shared space (decision 0060\nrule 10). The owner and every member receive it, with the space's new\n`data_version`; read it again with `space=shared`. The artifact's\nsource and metadata did not change.",
+          "type": "string"
         }
       ]
     },
@@ -1076,6 +1084,39 @@
         "actor_generation",
         "storage_epoch"
       ],
+      "type": "object"
+    },
+    "DataSpaceName": {
+      "description": "Which data space of an artifact a request names (decision 0060 rule 10).",
+      "oneOf": [
+        {
+          "const": "own",
+          "description": "The caller's own space, which only the caller reads and writes.",
+          "type": "string"
+        },
+        {
+          "const": "shared",
+          "description": "The space the artifact's head revision declares in its runtime\nmanifest (`\"shared\": \"editors\"` or `\"members\"`): its owner and every\nmember read it, and the declaration names who writes it. An artifact\nwhose head declares none answers `not_found`.",
+          "type": "string"
+        }
+      ]
+    },
+    "DataWriteQuery": {
+      "additionalProperties": false,
+      "description": "Query of a write of `/v1/artifacts/{id}/data` (`PUT`, `PATCH` or\n`DELETE`). A parameter that is unknown or repeated is refused.",
+      "properties": {
+        "space": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DataSpaceName"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The space written; the caller's own when absent."
+        }
+      },
       "type": "object"
     },
     "DataWriteResponse": {
@@ -2652,6 +2693,17 @@
             "string",
             "null"
           ]
+        },
+        "space": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DataSpaceName"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The space listed; the caller's own when absent. A page token continues\nonly the space it was issued for."
         }
       },
       "type": "object"
@@ -2666,6 +2718,17 @@
             "string",
             "null"
           ]
+        },
+        "space": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DataSpaceName"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The space read; the caller's own when absent."
         }
       },
       "type": "object"

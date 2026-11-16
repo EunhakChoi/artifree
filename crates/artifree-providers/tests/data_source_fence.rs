@@ -7,6 +7,7 @@
 
 mod common;
 
+use artifree_domain::access::Space;
 use artifree_domain::change::ChangeSequence;
 use artifree_domain::data::{DataChange, DataValue};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, UnixMillis};
@@ -144,6 +145,7 @@ impl Fixture {
         change: &'a DataChange,
     ) -> DataWrite<'a> {
         DataWrite {
+            space: Space::Own,
             fence: None,
             request: RequestIdentity {
                 actor: &self.owner,
@@ -162,7 +164,7 @@ impl Fixture {
 
     /// The owner's space as canonical text, with its version.
     fn space(&self) -> Result<(u64, String), DataStoreError> {
-        let snapshot = self.store.read_data(self.id(), &self.owner)?;
+        let snapshot = self.store.read_data(self.id(), &self.owner, Space::Own)?;
         Ok((snapshot.version.0, snapshot.space.to_canonical()))
     }
 

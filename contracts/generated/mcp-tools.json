@@ -10417,7 +10417,7 @@
       "title": "Cancel job"
     },
     {
-      "description": "Read the value at a path of your application data for an artifact, with data_version: the version of the data, which is unrelated to the artifact's revisions and is the base_data_version of the next write. The data is one JSON object per artifact (version 0 and {} until written). A path is up to 16 segments of 1-64 UTF-8 bytes: ASCII letters, digits, '_' or '-', or allowed Unicode 16.0.0 letters, marks, numbers and symbols (0046), separated by '/', such as todos/first or 한글/값. No normalization or URL decoding; the empty path is the root. A path with nothing at it succeeds with exists false. A path never enters an array. The artifact's files, previews, and exports do not contain this data, and a page running in a preview cannot read it.",
+      "description": "Read the value at a path of your application data for an artifact, with data_version: the version of the data, which is unrelated to the artifact's revisions and is the base_data_version of the next write. The data is one JSON object per artifact (version 0 and {} until written). A path is up to 16 segments of 1-64 UTF-8 bytes: ASCII letters, digits, '_' or '-', or allowed Unicode 16.0.0 letters, marks, numbers and symbols (0046), separated by '/', such as todos/first or 한글/값. No normalization or URL decoding; the empty path is the root. A path with nothing at it succeeds with exists false. A path never enters an array. The artifact's files, previews, and exports do not contain this data, and a page running in a preview cannot read it. With space shared, every write tool and this one use the artifact's shared space instead: one JSON object for the owner and every member, which exists only while the artifact's current revision declares it in artifree-runtime.json (\"shared\": \"editors\" or \"members\", naming who may write it; otherwise not_found, and a role that may not write it is forbidden). Its writes reach every reader's change stream as shared_data_changed.",
       "effect": "read",
       "inputSchema": {
         "additionalProperties": false,
@@ -10433,6 +10433,29 @@
               "string",
               "null"
             ]
+          },
+          "space": {
+            "anyOf": [
+              {
+                "description": "Which data space of an artifact a request names (decision 0060 rule 10).",
+                "oneOf": [
+                  {
+                    "const": "own",
+                    "description": "The caller's own space, which only the caller reads and writes.",
+                    "type": "string"
+                  },
+                  {
+                    "const": "shared",
+                    "description": "The space the artifact's head revision declares in its runtime\nmanifest (`\"shared\": \"editors\"` or `\"members\"`): its owner and every\nmember read it, and the declaration names who writes it. An artifact\nwhose head declares none answers `not_found`.",
+                    "type": "string"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`shared` reads the artifact's declared shared space; by default or\nwith `own`, your own data."
           }
         },
         "required": [
@@ -10810,6 +10833,29 @@
             "description": "Where to write, as in `get_data`; the empty string is the root, which\nmust then be given an object and is replaced whole.",
             "type": "string"
           },
+          "space": {
+            "anyOf": [
+              {
+                "description": "Which data space of an artifact a request names (decision 0060 rule 10).",
+                "oneOf": [
+                  {
+                    "const": "own",
+                    "description": "The caller's own space, which only the caller reads and writes.",
+                    "type": "string"
+                  },
+                  {
+                    "const": "shared",
+                    "description": "The space the artifact's head revision declares in its runtime\nmanifest (`\"shared\": \"editors\"` or `\"members\"`): its owner and every\nmember read it, and the declaration names who writes it. An artifact\nwhose head declares none answers `not_found`.",
+                    "type": "string"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`shared` writes the artifact's declared shared space; by default or\nwith `own`, your own data."
+          },
           "value": {
             "description": "The new value as JSON text, such as `{\"done\":false}`. Give text, not a\nnested JSON value, so that the server sees exactly what you sent.",
             "type": "string"
@@ -11171,6 +11217,29 @@
           "path": {
             "description": "Where to apply the patch, as in `get_data`; the empty string is the\nroot, whose patch must be an object.",
             "type": "string"
+          },
+          "space": {
+            "anyOf": [
+              {
+                "description": "Which data space of an artifact a request names (decision 0060 rule 10).",
+                "oneOf": [
+                  {
+                    "const": "own",
+                    "description": "The caller's own space, which only the caller reads and writes.",
+                    "type": "string"
+                  },
+                  {
+                    "const": "shared",
+                    "description": "The space the artifact's head revision declares in its runtime\nmanifest (`\"shared\": \"editors\"` or `\"members\"`): its owner and every\nmember read it, and the declaration names who writes it. An artifact\nwhose head declares none answers `not_found`.",
+                    "type": "string"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`shared` patches the artifact's declared shared space; by default or\nwith `own`, your own data."
           }
         },
         "required": [
@@ -11525,6 +11594,29 @@
           "path": {
             "description": "What to remove, as in `get_data`; the empty string is the root and\nempties the whole data space.",
             "type": "string"
+          },
+          "space": {
+            "anyOf": [
+              {
+                "description": "Which data space of an artifact a request names (decision 0060 rule 10).",
+                "oneOf": [
+                  {
+                    "const": "own",
+                    "description": "The caller's own space, which only the caller reads and writes.",
+                    "type": "string"
+                  },
+                  {
+                    "const": "shared",
+                    "description": "The space the artifact's head revision declares in its runtime\nmanifest (`\"shared\": \"editors\"` or `\"members\"`): its owner and every\nmember read it, and the declaration names who writes it. An artifact\nwhose head declares none answers `not_found`.",
+                    "type": "string"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`shared` removes from the artifact's declared shared space; by default\nor with `own`, from your own data."
           }
         },
         "required": [

@@ -7,9 +7,15 @@
 //! actor's makes every data request `not found`, a retry included. Data is app
 //! data, not source: it is in no revision, export, or package, and a source
 //! restore does not touch it.
+//!
+//! An artifact whose head revision declares a shared space (decision 0060
+//! rule 10) also has that one space, which every reader of the artifact reads
+//! and the role the declaration names writes. A request names it explicitly
+//! with [`Space::Shared`]; nothing reaches it by default.
 
 use artifree_domain::AppDataVersion;
 use artifree_domain::SourceRevision;
+use artifree_domain::access::Space;
 use artifree_domain::data::{DataChange, DataError, DataPath, DataValue, MemberPage, Members};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, StateGeneration, UnixMillis};
 use artifree_ports::access_store::AccessStore;
@@ -45,6 +51,8 @@ pub struct DataWriteOutcome {
 /// A conditional change with optional browser authority.
 #[derive(Debug, Clone, Copy)]
 pub struct DataMutation<'a> {
+    /// The space changed: the caller's own, or the artifact's shared space.
+    pub space: Space,
     /// Data version observed by the caller.
     pub base: AppDataVersion,
     /// Validated application-data change.
@@ -71,22 +79,25 @@ impl<S: ArtifactStore + AccessStore + DataStore> ArtifactService<S> {
             .map_err(data_error)
     }
 
-    /// The value at `path` in the actor's data space of an artifact, and the
-    /// space's version. A path with nothing at it reads as `None`, as does a
-    /// path through a value that is not an object; the root always exists.
+    /// The value at `path` in the actor's data space of an artifact, or in its
+    /// shared space, and the space's version. A path with nothing at it reads
+    /// as `None`, as does a path through a value that is not an object; the
+    /// root always exists.
     ///
     /// # Errors
     ///
     /// [`ArtifactError::NotFound`] for an artifact that is missing, in the
-    /// trash, purged, or another actor's, or [`ArtifactError::Unavailable`].
+    /// trash, purged, or another actor's, and for a shared space its head
+    /// revision does not declare, or [`ArtifactError::Unavailable`].
     pub fn data(
         &self,
         actor: &ActorId,
         id: &ArtifactId,
+        space: Space,
         path: &DataPath,
     ) -> Result<DataRead, ArtifactError> {
         self.authorized(actor, id)?;
-        let snapshot = self.store.read_data(id, actor).map_err(data_error)?;
+        let snapshot = self.store.read_data(id, actor, space).map_err(data_error)?;
         Ok(DataRead {
             version: snapshot.version,
             value: snapshot.space.get(path).cloned(),
@@ -120,12 +131,15 @@ impl<S: ArtifactStore + AccessStore + DataStore> ArtifactService<S> {
         let foreign = query
             .after
             .as_ref()
-            .is_some_and(|token| !token.matches(id, &query.path));
+            .is_some_and(|token| !token.matches(id, query.space, &query.path));
         if foreign {
             return Err(ArtifactError::InvalidPageToken);
         }
         self.authorized(actor, id)?;
-        let snapshot = self.store.read_data(id, actor).map_err(data_error)?;
+        let snapshot = self
+            .store
+            .read_data(id, actor, query.space)
+            .map_err(data_error)?;
         if query
             .at_data_version
             .is_some_and(|expected| expected != snapshot.version)
@@ -154,7 +168,7 @@ impl<S: ArtifactStore + AccessStore + DataStore> ArtifactService<S> {
         let next = names
             .last()
             .filter(|_| more)
-            .map(|last| MemberToken::new(id, &query.path, last.clone()));
+            .map(|last| MemberToken::new(id, query.space, &query.path, last.clone()));
         Ok(DataMembersPage {
             version: snapshot.version,
             exists: true,
@@ -197,6 +211,7 @@ impl<S: ArtifactStore + AccessStore + DataStore> ArtifactService<S> {
             key,
             id,
             DataMutation {
+                space: Space::Own,
                 base,
                 change,
                 now,
@@ -251,6 +266,7 @@ impl<S: ArtifactStore + AccessStore + DataStore> ArtifactService<S> {
         expected_source: Option<SourceRevision>,
     ) -> Result<DataWriteOutcome, ArtifactError> {
         let DataMutation {
+            space,
             base,
             change,
             now,
@@ -263,6 +279,11 @@ impl<S: ArtifactStore + AccessStore + DataStore> ArtifactService<S> {
             DataChange::Remove { .. } => Fingerprint::new("delete_data"),
         };
         hasher.field(id.as_str().as_bytes());
+        // The shared space is named, so its key cannot replay a write of the
+        // caller's own space; an own write hashes as before it existed.
+        if space == Space::Shared {
+            hasher.field(space.as_str().as_bytes());
+        }
         hasher.field(&base.0.to_be_bytes());
         match change {
             DataChange::Set { path, value } => {
@@ -283,6 +304,7 @@ impl<S: ArtifactStore + AccessStore + DataStore> ArtifactService<S> {
                 fingerprint: hasher.finish(),
             },
             artifact: id,
+            space,
             base,
             change,
             now,
@@ -308,6 +330,7 @@ fn data_error(error: DataStoreError) -> ArtifactError {
     match error {
         DataStoreError::OutboxBindingChanged => ArtifactError::OutboxBindingChanged,
         DataStoreError::NotFound => ArtifactError::NotFound(Missing::Artifact),
+        DataStoreError::Forbidden => ArtifactError::Forbidden,
         DataStoreError::RequestKeyReused => ArtifactError::RequestKeyReused,
         DataStoreError::VersionConflict { current } => ArtifactError::DataConflict { current },
         DataStoreError::SourceConflict { current } => ArtifactError::RevisionConflict { current },
@@ -385,7 +408,12 @@ mod tests {
             Err(DataStoreError::Unavailable("unused".into()))
         }
 
-        fn read_data(&self, _: &ArtifactId, _: &ActorId) -> Result<DataSnapshot, DataStoreError> {
+        fn read_data(
+            &self,
+            _: &ArtifactId,
+            _: &ActorId,
+            _: Space,
+        ) -> Result<DataSnapshot, DataStoreError> {
             let read = self.reads.get() + 1;
             self.reads.set(read);
             let text = format!(r#"{{"m{read}":1,"s":"text"}}"#);
@@ -520,6 +548,7 @@ mod tests {
 
     fn query(path: &str) -> MemberQuery {
         MemberQuery {
+            space: Space::Own,
             path: path
                 .parse()
                 .unwrap_or_else(|error| panic!("{path}: {error}")),
@@ -529,13 +558,18 @@ mod tests {
         }
     }
 
-    fn token_for(id: &ArtifactId, path: &str) -> MemberToken {
+    fn token_in(id: &ArtifactId, space: Space, path: &str) -> MemberToken {
         let last: MemberName = "a".parse().unwrap_or_else(|error| panic!("{error}"));
         MemberToken::new(
             id,
+            space,
             &path.parse().unwrap_or_else(|error| panic!("{error}")),
             last,
         )
+    }
+
+    fn token_for(id: &ArtifactId, path: &str) -> MemberToken {
+        token_in(id, Space::Own, path)
     }
 
     #[test]
@@ -562,6 +596,11 @@ mod tests {
             ("other path", token_for(&id, "b"), "a"),
             ("root token on a path", token_for(&id, ""), "a"),
             ("path token on the root", token_for(&id, "a"), ""),
+            (
+                "shared token on the own space",
+                token_in(&id, Space::Shared, "a"),
+                "a",
+            ),
         ] {
             let request = MemberQuery {
                 after: Some(token),
@@ -647,7 +686,7 @@ mod tests {
         let first = service.data_members(&owner, &id, &one)?;
         let next = first.next.ok_or("a token: `s` follows `m1`")?;
         assert_eq!(next.name().as_str(), "m1");
-        assert!(next.matches(&id, &"".parse()?));
+        assert!(next.matches(&id, Space::Own, &"".parse()?));
         Ok(())
     }
 }

@@ -6,7 +6,7 @@
 
 mod common;
 
-use artifree_domain::access::{AccessVersion, Role};
+use artifree_domain::access::{AccessVersion, Role, Space};
 use artifree_domain::change::ChangeSequence;
 use artifree_domain::data::{DataChange, DataPath, DataValue};
 use artifree_domain::identity::{ActorId, UnixMillis, UserLabel};
@@ -256,6 +256,7 @@ fn a_members_own_data_and_jobs_reach_only_that_member() -> TestResult {
     f.grant("grant-ben", &f.ben, Role::Viewer)?;
     let data_key = key("ana-data");
     f.store.write_data(DataWrite {
+        space: Space::Own,
         fence: None,
         request: RequestIdentity {
             actor: &f.ana,
@@ -365,6 +366,7 @@ fn the_upgrade_to_schema_19_keeps_every_change_and_takes_access_rows() -> TestRe
             FROM changes ORDER BY sequence DESC LIMIT 1;
         UPDATE actor_feeds SET head = head + 1
             WHERE actor = (SELECT actor FROM changes ORDER BY sequence DESC LIMIT 1);
+        DROP TABLE shared_data;
         PRAGMA user_version = 18;",
     )?;
     let orphan = before.last().map_or(0, |(sequence, _)| sequence + 1);
@@ -372,7 +374,10 @@ fn the_upgrade_to_schema_19_keeps_every_change_and_takes_access_rows() -> TestRe
         store: SqliteStore::open(&path)?,
         ..f
     };
-    assert_eq!(common::user_version(&path)?, 19);
+    assert_eq!(
+        common::user_version(&path)?,
+        artifree_providers::storage::SCHEMA_VERSION
+    );
     let mut kept = before;
     kept.push((orphan, JobChanged));
     assert_eq!(upgraded.feed(&upgraded.owner)?, kept);

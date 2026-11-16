@@ -8,7 +8,7 @@ use artifree_contracts::api::{
     AccessUser, AgentSessionList, AppData, Artifact, ArtifactKind as WireKind, ArtifactList,
     ArtifactTypeRef, Asset, AssetList, BackgroundStatus, BuildStatus as WireBuildStatus,
     CallerRole, CancelJobResponse, CommitResponse, ConflictingFile, ContentEncoding, CopiedPart,
-    CreateArtifactRequest, CreateRuntimeViewRequest, DataMembers, DataWriteResponse,
+    CreateArtifactRequest, CreateRuntimeViewRequest, DataMembers, DataSpaceName, DataWriteResponse,
     DeleteAssetRequest, DeleteAssetResponse, DeleteDataRequest, DiagnosticLocation,
     DuplicateArtifactRequest, DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest,
     EnqueueJobResponse, ErrorBody, ErrorCode, ExecutionStatus, ExportRuntime,
@@ -38,7 +38,7 @@ use artifree_core::members::{MAX_TOKEN_BYTES, MemberLimit, MemberQuery, MemberTo
 use artifree_core::parts::{Boundary, ByteRange, FilePart, RangeError};
 use artifree_core::room::TabKey;
 use artifree_domain::AppDataVersion;
-use artifree_domain::access::{Access, AccessGeneration, Need, Role};
+use artifree_domain::access::{Access, AccessGeneration, Need, Role, Space};
 use artifree_domain::artifact_type::{ArtifactType, TypeId, TypeRelease};
 use artifree_domain::assets::{
     AssetId, AssetMediaType, AssetMetadata, AssetRejection, AssetVersion, MAX_ASSET_BYTES,
@@ -2057,11 +2057,22 @@ fn data_value(field: &str, value: &JsonValue) -> Result<DataValue, ApiError> {
     data_text(field, value.get())
 }
 
-/// The value at a path of the actor's data space of an artifact.
+/// The space a request names on the wire; the caller's own when absent
+/// (decision 0060 rule 10).
+pub(crate) fn data_space(name: Option<DataSpaceName>) -> Space {
+    match name.unwrap_or_default() {
+        DataSpaceName::Own => Space::Own,
+        DataSpaceName::Shared => Space::Shared,
+    }
+}
+
+/// The value at a path of the actor's data space of an artifact, or of its
+/// shared space.
 pub(crate) async fn read_data(
     state: &AppState,
     actor: ActorId,
     id: &str,
+    space: Space,
     path: Option<&str>,
 ) -> Result<AppData, ApiError> {
     let id = artifact_id(id)?;
@@ -2069,7 +2080,7 @@ pub(crate) async fn read_data(
     let wire_path = path.to_string();
     let artifact = id.to_string();
     let read = state
-        .run(move |artifacts| artifacts.data(&actor, &id, &path))
+        .run(move |artifacts| artifacts.data(&actor, &id, space, &path))
         .await?;
     Ok(AppData {
         artifact_id: artifact,
@@ -2110,6 +2121,7 @@ pub(crate) async fn read_data_members(
 ) -> Result<DataMembers, ApiError> {
     let id = artifact_id(id)?;
     let ReadDataMembersQuery {
+        space,
         path,
         limit,
         page_token,
@@ -2123,6 +2135,7 @@ pub(crate) async fn read_data_members(
     let path = data_path("path", path.as_deref().unwrap_or_default())?;
     let after = page_token.as_deref().map(member_token).transpose()?;
     let query = MemberQuery {
+        space: data_space(space),
         path,
         after,
         limit,
@@ -2134,9 +2147,9 @@ pub(crate) async fn read_data_members(
         .run(move |artifacts| artifacts.data_members(&actor, &id, &query))
         .await
         .map_err(|error| match error {
-            ArtifactError::InvalidPageToken => {
-                ApiError::invalid("page_token: not a token issued for this artifact and path")
-            }
+            ArtifactError::InvalidPageToken => ApiError::invalid(
+                "page_token: not a token issued for this artifact, space and path",
+            ),
             other => other.into(),
         })?;
     Ok(DataMembers {
@@ -2160,6 +2173,7 @@ pub(crate) async fn set_data(
     actor: ActorId,
     key: RequestKey,
     id: &str,
+    space: Space,
     request: SetDataRequest,
     parse_fence: impl FnOnce() -> Result<Option<OutboxFence>, ApiError>,
 ) -> Result<DataWriteResponse, ApiError> {
@@ -2172,7 +2186,7 @@ pub(crate) async fn set_data(
         state,
         actor,
         key,
-        id,
+        (id, space),
         request.base_data_version,
         DataChange::Set { path, value },
         fence,
@@ -2185,6 +2199,7 @@ pub(crate) async fn update_data(
     actor: ActorId,
     key: RequestKey,
     id: &str,
+    space: Space,
     request: UpdateDataRequest,
     parse_fence: impl FnOnce() -> Result<Option<OutboxFence>, ApiError>,
 ) -> Result<DataWriteResponse, ApiError> {
@@ -2197,7 +2212,7 @@ pub(crate) async fn update_data(
         state,
         actor,
         key,
-        id,
+        (id, space),
         request.base_data_version,
         DataChange::Merge { path, patch: merge },
         fence,
@@ -2210,6 +2225,7 @@ pub(crate) async fn delete_data(
     actor: ActorId,
     key: RequestKey,
     id: &str,
+    space: Space,
     request: DeleteDataRequest,
     parse_fence: impl FnOnce() -> Result<Option<OutboxFence>, ApiError>,
 ) -> Result<DataWriteResponse, ApiError> {
@@ -2221,7 +2237,7 @@ pub(crate) async fn delete_data(
         state,
         actor,
         key,
-        id,
+        (id, space),
         request.base_data_version,
         DataChange::Remove { path },
         fence,
@@ -2233,7 +2249,7 @@ async fn write_data(
     state: &AppState,
     actor: ActorId,
     key: RequestKey,
-    id: ArtifactId,
+    (id, space): (ArtifactId, Space),
     base: u64,
     change: DataChange,
     fence: Option<OutboxFence>,
@@ -2252,6 +2268,7 @@ async fn write_data(
                 &key,
                 &id,
                 DataMutation {
+                    space,
                     base: AppDataVersion(base),
                     change: &change,
                     now,
@@ -2261,7 +2278,8 @@ async fn write_data(
         })
         .await?;
     // A write that changed the space appended a `data_changed` row to the
-    // actor's feed (decision 0040); wake the streams as a commit does. HTTP and
+    // actor's feed (decision 0040), or a `shared_data_changed` row to every
+    // reader's (decision 0060 rule 13); wake the streams as a commit does. HTTP and
     // MCP both write through here. A replay, and a write that changed nothing,
     // recorded no row.
     if outcome.delivery == Delivery::Committed && outcome.changed {

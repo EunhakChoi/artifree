@@ -5,6 +5,7 @@
 mod common;
 
 use artifree_domain::access::Role;
+use artifree_domain::access::Space;
 
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -113,6 +114,7 @@ impl Fixture {
     ) -> Result<DataReceipt, DataStoreError> {
         let request_key = key(name);
         store.write_data(DataWrite {
+            space: Space::Own,
             fence: None,
             request: RequestIdentity {
                 actor: who,
@@ -136,7 +138,7 @@ impl Fixture {
     }
 
     fn read_text(&self) -> Result<(u64, String), DataStoreError> {
-        let snapshot = self.store.read_data(self.id(), &self.owner)?;
+        let snapshot = self.store.read_data(self.id(), &self.owner, Space::Own)?;
         Ok((snapshot.version.0, snapshot.space.to_canonical()))
     }
 
@@ -564,7 +566,7 @@ fn spaces_are_separate_per_actor() -> TestResult {
         AppDataVersion(1),
         "their own version history"
     );
-    let snapshot = fixture.store.read_data(fixture.id(), &other)?;
+    let snapshot = fixture.store.read_data(fixture.id(), &other, Space::Own)?;
     assert_eq!(snapshot.space.to_canonical(), "{\"n\":7}");
     assert_eq!(fixture.read_text()?, (1, "{\"n\":1}".to_owned()));
     Ok(())
@@ -575,7 +577,10 @@ fn an_unknown_artifact_is_not_found_for_reads_and_writes() -> TestResult {
     let fixture = Fixture::new()?;
     let unknown: ArtifactId = parsed(&format!("art_{}", "0".repeat(32)));
     assert_eq!(
-        fixture.store.read_data(&unknown, &fixture.owner).err(),
+        fixture
+            .store
+            .read_data(&unknown, &fixture.owner, Space::Own)
+            .err(),
         Some(DataStoreError::NotFound)
     );
     assert_eq!(
@@ -600,7 +605,10 @@ fn the_trash_hides_data_and_a_recovery_brings_it_back_unchanged() -> TestResult 
     fixture.delete_artifact("delete", 1)?;
 
     assert_eq!(
-        fixture.store.read_data(fixture.id(), &fixture.owner).err(),
+        fixture
+            .store
+            .read_data(fixture.id(), &fixture.owner, Space::Own)
+            .err(),
         Some(DataStoreError::NotFound)
     );
     assert_eq!(
@@ -688,7 +696,10 @@ fn a_purge_deletes_the_space_and_blanks_the_fingerprints_of_its_keys() -> TestRe
     assert_eq!(kept, 1);
 
     assert_eq!(
-        fixture.store.read_data(fixture.id(), &fixture.owner).err(),
+        fixture
+            .store
+            .read_data(fixture.id(), &fixture.owner, Space::Own)
+            .err(),
         Some(DataStoreError::NotFound)
     );
     for name in ["one", "two", "fresh"] {
@@ -866,7 +877,9 @@ fn a_copy_with_data_gets_its_own_space_and_neither_side_reaches_the_other() -> T
 
     let copy = copy_of(&fixture, "copy-with-data", true)?;
     let copy_id = copy.artifact.id.clone();
-    let copy_space = fixture.store.read_data(&copy_id, &fixture.owner)?;
+    let copy_space = fixture
+        .store
+        .read_data(&copy_id, &fixture.owner, Space::Own)?;
     assert_eq!(copy_space.space.to_canonical(), "{\"list\":[1,2],\"n\":6}");
     assert_eq!(
         copy_space.version,
@@ -879,7 +892,7 @@ fn a_copy_with_data_gets_its_own_space_and_neither_side_reaches_the_other() -> T
     assert_eq!(
         fixture
             .store
-            .read_data(&copy_id, &fixture.owner)?
+            .read_data(&copy_id, &fixture.owner, Space::Own)?
             .space
             .to_canonical(),
         "{\"list\":[1,2],\"n\":6}"
@@ -904,7 +917,7 @@ fn a_copy_with_data_gets_its_own_space_and_neither_side_reaches_the_other() -> T
     assert_eq!(
         fixture
             .store
-            .read_data(&copy_id, &fixture.owner)?
+            .read_data(&copy_id, &fixture.owner, Space::Own)?
             .space
             .to_canonical(),
         "{\"list\":[1,2],\"n\":6,\"only\":\"copy\"}"
@@ -919,14 +932,14 @@ fn a_copy_without_data_or_from_an_empty_space_has_an_unwritten_space() -> TestRe
     let plain = copy_of(&fixture, "plain-copy", false)?;
     let snapshot = fixture
         .store
-        .read_data(&plain.artifact.id, &fixture.owner)?;
+        .read_data(&plain.artifact.id, &fixture.owner, Space::Own)?;
     assert_eq!((snapshot.version.0, snapshot.space.is_empty()), (0, true));
 
     fixture.write("clear", 1, &remove(""))?;
     let from_empty = copy_of(&fixture, "empty-copy", true)?;
     let snapshot = fixture
         .store
-        .read_data(&from_empty.artifact.id, &fixture.owner)?;
+        .read_data(&from_empty.artifact.id, &fixture.owner, Space::Own)?;
     assert_eq!((snapshot.version.0, snapshot.space.is_empty()), (0, true));
     let rows: i64 = fixture.sql()?.query_row(
         "SELECT count(*) FROM app_data WHERE artifact_id = ?1",
@@ -950,7 +963,9 @@ fn a_copy_takes_only_the_data_of_the_actor_who_copies() -> TestResult {
     )?;
     fixture.write_as(&other, "theirs", 0, &set("n", "\"theirs\""))?;
     let copy = copy_of(&fixture, "mine-only", true)?;
-    let snapshot = fixture.store.read_data(&copy.artifact.id, &other)?;
+    let snapshot = fixture
+        .store
+        .read_data(&copy.artifact.id, &other, Space::Own)?;
     assert!(snapshot.space.is_empty(), "no one else's data comes along");
     Ok(())
 }
@@ -967,7 +982,7 @@ fn a_replayed_copy_does_not_copy_again() -> TestResult {
     assert_eq!(
         fixture
             .store
-            .read_data(&first.artifact.id, &fixture.owner)?
+            .read_data(&first.artifact.id, &fixture.owner, Space::Own)?
             .space
             .to_canonical(),
         "{\"n\":1}",
@@ -1024,6 +1039,7 @@ fn outbox_write(
     fence: &artifree_ports::data_store::OutboxFence,
 ) -> Result<DataReceipt, DataStoreError> {
     store.write_data(DataWrite {
+        space: Space::Own,
         request: RequestIdentity {
             actor,
             key: &key("outbox-fenced"),

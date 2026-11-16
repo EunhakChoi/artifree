@@ -14,7 +14,9 @@ import {
  * A committed change. `change` is `'unknown'` for a kind added to the
  * contract after this client; the artifact changed either way.
  * `data_version` is the version a data write left the space at, a safe
- * integer of at least 1: present exactly when `change` is `'data_changed'`.
+ * integer of at least 1: present exactly when `change` is `'data_changed'`
+ * (the caller's own space) or `'shared_data_changed'` (the artifact's shared
+ * space).
  * `job_id` names the job that changed, `job_` and 32 lowercase hex digits:
  * present exactly when `change` is `'job_changed'`. Read the job with
  * `getJob`; the change carries no state.

@@ -6,7 +6,7 @@
 mod common;
 
 use artifree_domain::AppDataVersion;
-use artifree_domain::access::{AccessVersion, Role};
+use artifree_domain::access::{AccessVersion, Role, Space};
 use artifree_domain::data::{DataChange, DataPath, DataValue};
 use artifree_domain::identity::{ActorId, RequestKey, UnixMillis, UserLabel};
 use artifree_domain::job::{JobId, JobKind};
@@ -229,6 +229,7 @@ impl Fixture {
             value: DataValue::parse("\"mine\"").map_err(|_| DataStoreError::NotFound)?,
         };
         self.store.write_data(DataWrite {
+            space: Space::Own,
             fence: None,
             request: Self::identity(by, &request_key, name),
             artifact: &self.created.artifact.id,

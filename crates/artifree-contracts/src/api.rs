@@ -1047,10 +1047,37 @@ impl JsonSchema for JsonValue {
     }
 }
 
+/// Which data space of an artifact a request names (decision 0060 rule 10).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DataSpaceName {
+    /// The caller's own space, which only the caller reads and writes.
+    #[default]
+    Own,
+    /// The space the artifact's head revision declares in its runtime
+    /// manifest (`"shared": "editors"` or `"members"`): its owner and every
+    /// member read it, and the declaration names who writes it. An artifact
+    /// whose head declares none answers `not_found`.
+    Shared,
+}
+
+/// Query of a write of `/v1/artifacts/{id}/data` (`PUT`, `PATCH` or
+/// `DELETE`). A parameter that is unknown or repeated is refused.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DataWriteQuery {
+    /// The space written; the caller's own when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<DataSpaceName>,
+}
+
 /// Query of `GET /v1/artifacts/{id}/data`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadDataQuery {
+    /// The space read; the caller's own when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<DataSpaceName>,
     /// The path to read: at most 16 `/`-separated segments of 1-64 UTF-8
     /// bytes. ASCII letters, digits, `_`, `-` and non-ASCII Unicode 16.0.0
     /// letters, marks, numbers and symbols are allowed, excluding whitespace,
@@ -1093,6 +1120,10 @@ pub struct AppData {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadDataMembersQuery {
+    /// The space listed; the caller's own when absent. A page token continues
+    /// only the space it was issued for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<DataSpaceName>,
     /// The object whose member names are listed, written as for
     /// `GET /v1/artifacts/{id}/data`. Absent or empty is the root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2214,6 +2245,11 @@ pub enum ChangeKind {
     /// revoked user receive it; for the revoked user it is the last change of
     /// the artifact, which it no longer reaches (`not_found`).
     AccessRevoked,
+    /// A write changed the artifact's declared shared space (decision 0060
+    /// rule 10). The owner and every member receive it, with the space's new
+    /// `data_version`; read it again with `space=shared`. The artifact's
+    /// source and metadata did not change.
+    SharedDataChanged,
 }
 
 /// Summary information for an access token.
@@ -2438,9 +2474,10 @@ pub struct AccessChangeResponse {
 /// commit, failed commits, and updates that changed nothing have none. It
 /// names what to read again and carries no content, path, or value.
 ///
-/// `data_version` is present exactly when `change` is `data_changed`: the
-/// published schema requires it for that kind and forbids it for every other
-/// kind, and deserializing refuses both violations (decision 0040).
+/// `data_version` is present exactly when `change` is `data_changed` or
+/// `shared_data_changed`: the published schema requires it for those kinds
+/// and forbids it for every other kind, and deserializing refuses both
+/// violations (decisions 0040 and 0060 rule 10).
 ///
 /// `job_id` is present exactly when `change` is `job_changed`, with the same
 /// rule (decision 0055, rule 8).
@@ -2485,14 +2522,15 @@ pub struct ArtifactChange {
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 /// Adds the kind-dependent rules to the schema of [`ArtifactChange`]: a data
-/// version for `data_changed` and a `job_id` for `job_changed`, and neither
+/// version for `data_changed` and `shared_data_changed` and a `job_id` for
+/// `job_changed`, and neither
 /// member for any other kind. `null` is neither a data version nor a job
 /// identifier, in either branch of either rule.
 fn kind_dependent_members(schema: &mut schemars::Schema) {
     schema.insert(
         "if".to_owned(),
         serde_json::json!({
-            "properties": { "change": { "const": "data_changed" } },
+            "properties": { "change": { "enum": ["data_changed", "shared_data_changed"] } },
             "required": ["change"]
         }),
     );
@@ -2619,17 +2657,18 @@ impl TryFrom<ArtifactChangeFields> for ArtifactChange {
 
     fn try_from(fields: ArtifactChangeFields) -> Result<Self, Self::Error> {
         let data_version = match (fields.change, fields.data_version) {
-            (ChangeKind::DataChanged, DataVersionMember::Number(version))
-                if (1..=MAX_SAFE_INTEGER).contains(&version) =>
-            {
-                Some(version)
-            }
-            (ChangeKind::DataChanged, _) => {
-                return Err("a data_changed change needs a data_version from 1 to 2^53 - 1");
+            (
+                ChangeKind::DataChanged | ChangeKind::SharedDataChanged,
+                DataVersionMember::Number(version),
+            ) if (1..=MAX_SAFE_INTEGER).contains(&version) => Some(version),
+            (ChangeKind::DataChanged | ChangeKind::SharedDataChanged, _) => {
+                return Err("a data change needs a data_version from 1 to 2^53 - 1");
             }
             (_, DataVersionMember::Absent) => None,
             (_, _) => {
-                return Err("only a data_changed change carries a data_version");
+                return Err(
+                    "only a data_changed or shared_data_changed change carries a data_version",
+                );
             }
         };
         let job_id = match (fields.change, fields.job_id) {

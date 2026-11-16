@@ -3,6 +3,7 @@
 mod common;
 
 use artifree_domain::AppDataVersion;
+use artifree_domain::access::Space;
 use artifree_domain::change::ChangeSequence;
 use artifree_domain::data::{DataChange, DataValue};
 use artifree_domain::identity::UnixMillis;
@@ -450,6 +451,7 @@ fn a_version_10_file_with_every_kind_keeps_its_feed_through_the_data_change_step
         value: DataValue::parse("1")?,
     };
     store.write_data(DataWrite {
+        space: Space::Own,
         fence: None,
         request: RequestIdentity {
             actor: &owner,
@@ -531,6 +533,7 @@ fn assert_data_works_beside_old_keys(store: &SqliteStore, version: i64) -> TestR
     let write = |name: &str, base: u64| {
         let request_key = parsed(&format!("test-key-{name}"));
         store.write_data(DataWrite {
+            space: Space::Own,
             fence: None,
             request: RequestIdentity {
                 actor: &owner,
@@ -543,7 +546,7 @@ fn assert_data_works_beside_old_keys(store: &SqliteStore, version: i64) -> TestR
             now: UnixMillis(2_000),
         })
     };
-    let before = store.read_data(&old_artifact(), &owner)?;
+    let before = store.read_data(&old_artifact(), &owner, Space::Own)?;
     assert_eq!(
         (before.version, before.space.is_empty()),
         (AppDataVersion(0), true)
@@ -564,7 +567,7 @@ fn assert_data_works_beside_old_keys(store: &SqliteStore, version: i64) -> TestR
     }
     let first = write("first-data", 0)?;
     assert_eq!(first.version, AppDataVersion(1), "version {version}");
-    let after = store.read_data(&old_artifact(), &owner)?;
+    let after = store.read_data(&old_artifact(), &owner, Space::Own)?;
     assert_eq!(after.space.to_canonical(), "{\"greeting\":\"hello\"}");
     // The write moved no revision of the old artifact.
     let old = store.artifact(&old_artifact())?.ok_or("artifact kept")?;

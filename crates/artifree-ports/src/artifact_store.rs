@@ -487,11 +487,15 @@ pub enum ChangeKind {
     /// every remaining member, and of the revoked user, whose last row of the
     /// artifact it is.
     AccessRevoked,
+    /// A data write changed the artifact's declared shared space (decision
+    /// 0060 rules 10 and 13). The row is in the feed of the owner and of every
+    /// member. The artifact's own source and metadata did not change.
+    SharedDataChanged,
 }
 
 impl ChangeKind {
     /// Every kind, in declaration order.
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::Created,
         Self::Revised,
         Self::MetadataUpdated,
@@ -503,6 +507,7 @@ impl ChangeKind {
         Self::AccessGranted,
         Self::AccessChanged,
         Self::AccessRevoked,
+        Self::SharedDataChanged,
     ];
 
     /// The kind's stable snake-case name, the one a store records.
@@ -520,6 +525,7 @@ impl ChangeKind {
             Self::AccessGranted => "access_granted",
             Self::AccessChanged => "access_changed",
             Self::AccessRevoked => "access_revoked",
+            Self::SharedDataChanged => "shared_data_changed",
         }
     }
 
@@ -546,7 +552,8 @@ pub struct ChangeRecord {
     /// when the data or a job changed.
     pub metadata_revision: MetadataRevision,
     /// The version the write left the data space at: present exactly for
-    /// [`ChangeKind::DataChanged`], never in `revision`.
+    /// [`ChangeKind::DataChanged`] and [`ChangeKind::SharedDataChanged`],
+    /// never in `revision`.
     pub data_version: Option<AppDataVersion>,
     /// The job that a [`ChangeKind::JobChanged`] row names: present exactly for
     /// that kind (decision 0055, rule 8).

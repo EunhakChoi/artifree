@@ -237,7 +237,8 @@ export type ChangeKind =
   | 'job_changed'
   | 'access_granted'
   | 'access_changed'
-  | 'access_revoked';
+  | 'access_revoked'
+  | 'shared_data_changed';
 /**
  * Version of a source export manifest.
  */
@@ -1917,9 +1918,10 @@ export interface ConflictingFile {
  * commit, failed commits, and updates that changed nothing have none. It
  * names what to read again and carries no content, path, or value.
  *
- * `data_version` is present exactly when `change` is `data_changed`: the
- * published schema requires it for that kind and forbids it for every other
- * kind, and deserializing refuses both violations (decision 0040).
+ * `data_version` is present exactly when `change` is `data_changed` or
+ * `shared_data_changed`: the published schema requires it for those kinds
+ * and forbids it for every other kind, and deserializing refuses both
+ * violations (decisions 0040 and 0060 rule 10).
  *
  * `job_id` is present exactly when `change` is `job_changed`, with the same
  * rule (decision 0055, rule 8).

@@ -24,15 +24,16 @@ use std::time::Duration;
 use artifree_contracts::api::{
     AgentSessionList, AppData, Artifact, ArtifactList, BackgroundStatus, BuildStatus,
     CancelJobRequest, CancelJobResponse, CreateArtifactRequest, CreateRuntimeViewRequest,
-    DataMembers, DataOutboxBinding, DataWriteResponse, DeleteDataRequest, DuplicateArtifactRequest,
-    EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorCode, ErrorResponse, Handoff,
-    HandoffActionRequest, Job, JobList, ListArtifactsQuery, ListJobsQuery, PurgeArtifactRequest,
-    PurgeArtifactResponse, ReadDataMembersQuery, ReadDataQuery, RemoveUnreferencedContentRequest,
-    RemoveUnreferencedContentResponse, RestoreRevisionRequest, Revision, RevisionList,
-    RoomEventReceipt, RoomEventRequest, RoomHeartbeatRequest, RoomJoinRequest, RoomSnapshot,
-    RuntimeConnection, RuntimeGrant, SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest,
-    StageHandoffRequest, TypeDescriptor, TypeList, TypeReference, UnreferencedContent,
-    UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest,
+    DataMembers, DataOutboxBinding, DataWriteQuery, DataWriteResponse, DeleteDataRequest,
+    DuplicateArtifactRequest, EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorCode,
+    ErrorResponse, Handoff, HandoffActionRequest, Job, JobList, ListArtifactsQuery, ListJobsQuery,
+    PurgeArtifactRequest, PurgeArtifactResponse, ReadDataMembersQuery, ReadDataQuery,
+    RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse, RestoreRevisionRequest,
+    Revision, RevisionList, RoomEventReceipt, RoomEventRequest, RoomHeartbeatRequest,
+    RoomJoinRequest, RoomSnapshot, RuntimeConnection, RuntimeGrant, SaveRevisionRequest,
+    SetDataRequest, SetRuntimeGrantRequest, StageHandoffRequest, TypeDescriptor, TypeList,
+    TypeReference, UnreferencedContent, UpdateArtifactRequest, UpdateArtifactResponse,
+    UpdateDataRequest,
 };
 use artifree_core::artifacts::{ArtifactError, ArtifactService, Missing};
 use artifree_core::catalog::Catalog;
@@ -1609,9 +1610,10 @@ async fn read_data(
 ) -> Result<Json<AppData>, ApiError> {
     let Path(id) = path?;
     operations::artifact_id(&id)?;
-    let ReadDataQuery { path: at } = data_query::parse(&uri)?;
+    let ReadDataQuery { space, path: at } = data_query::parse(&uri)?;
+    let space = operations::data_space(space);
     Ok(Json(
-        operations::read_data(&state, actor, &id, at.as_deref()).await?,
+        operations::read_data(&state, actor, &id, space, at.as_deref()).await?,
     ))
 }
 
@@ -1738,13 +1740,15 @@ async fn set_data(
     headers: HeaderMap,
     IdempotencyKey(key): IdempotencyKey,
     path: Result<Path<String>, PathRejection>,
+    uri: Uri,
     body: Result<Json<SetDataRequest>, JsonRejection>,
 ) -> Result<Json<DataWriteResponse>, ApiError> {
     let Path(id) = path?;
     operations::artifact_id(&id)?;
+    let space = write_space(&uri)?;
     let Json(request) = body.map_err(|rejection| data_body_error(&rejection))?;
     Ok(Json(
-        operations::set_data(&state, auth.actor, key, &id, request, || {
+        operations::set_data(&state, auth.actor, key, &id, space, request, || {
             outbox_fence(&headers, auth.generation)
         })
         .await?,
@@ -1758,13 +1762,15 @@ async fn update_data(
     headers: HeaderMap,
     IdempotencyKey(key): IdempotencyKey,
     path: Result<Path<String>, PathRejection>,
+    uri: Uri,
     body: Result<Json<UpdateDataRequest>, JsonRejection>,
 ) -> Result<Json<DataWriteResponse>, ApiError> {
     let Path(id) = path?;
     operations::artifact_id(&id)?;
+    let space = write_space(&uri)?;
     let Json(request) = body.map_err(|rejection| data_body_error(&rejection))?;
     Ok(Json(
-        operations::update_data(&state, auth.actor, key, &id, request, || {
+        operations::update_data(&state, auth.actor, key, &id, space, request, || {
             outbox_fence(&headers, auth.generation)
         })
         .await?,
@@ -1778,17 +1784,26 @@ async fn delete_data(
     headers: HeaderMap,
     IdempotencyKey(key): IdempotencyKey,
     path: Result<Path<String>, PathRejection>,
+    uri: Uri,
     body: Result<Json<DeleteDataRequest>, JsonRejection>,
 ) -> Result<Json<DataWriteResponse>, ApiError> {
     let Path(id) = path?;
     operations::artifact_id(&id)?;
+    let space = write_space(&uri)?;
     let Json(request) = body.map_err(|rejection| data_body_error(&rejection))?;
     Ok(Json(
-        operations::delete_data(&state, auth.actor, key, &id, request, || {
+        operations::delete_data(&state, auth.actor, key, &id, space, request, || {
             outbox_fence(&headers, auth.generation)
         })
         .await?,
     ))
+}
+
+/// The space a data write names in its query (decision 0060 rule 10): the
+/// caller's own unless `space=shared`. Another parameter is refused.
+fn write_space(uri: &Uri) -> Result<artifree_domain::access::Space, ApiError> {
+    let DataWriteQuery { space } = data_query::parse(uri)?;
+    Ok(operations::data_space(space))
 }
 
 async fn list_jobs(
