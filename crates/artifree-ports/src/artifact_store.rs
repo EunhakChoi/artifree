@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-use artifree_domain::access::Access;
+use artifree_domain::access::Role;
 use artifree_domain::artifact_type::ArtifactType;
 use artifree_domain::change::{ChangeSequence, FeedId};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, UnixMillis, UserLabel};
@@ -418,8 +418,9 @@ pub enum ListAccess {
 /// trash, those they are a member of (decision 0060 rule 7).
 #[derive(Debug, Clone, Copy)]
 pub struct ArtifactListing<'a> {
-    /// The caller whose artifacts are listed.
-    pub owner: &'a ActorId,
+    /// The caller whose artifacts are listed: their own, and those they are
+    /// a member of.
+    pub caller: &'a ActorId,
     /// Only owned or only shared artifacts; both when `None`. The trash
     /// holds only the caller's own, whatever this says.
     pub access: Option<ListAccess>,
@@ -437,13 +438,14 @@ pub struct ArtifactListing<'a> {
     pub limit: usize,
 }
 
-/// An artifact as a list shows it to its caller (decision 0060 rule 7).
+/// An artifact as the store lists it for a caller (decision 0060 rule 7).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListedArtifact {
     /// The artifact.
     pub record: ArtifactRecord,
-    /// How the caller stands towards it: owner, or member with a role.
-    pub access: Access,
+    /// The caller's member role, or `None` for the caller's own artifact.
+    /// What the caller may do is the core's to decide from it.
+    pub role: Option<Role>,
     /// The owner's label, or the owner's id for an actor the registry never
     /// saw (decision 0036 lets a database name one).
     pub owner_label: UserLabel,

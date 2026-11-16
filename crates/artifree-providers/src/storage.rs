@@ -61,7 +61,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::schema;
-use artifree_domain::access::{Access, Need};
+use artifree_domain::access::Need;
 use artifree_domain::artifact_type::{ArtifactType, TypeRelease};
 use artifree_domain::change::{ChangeSequence, FeedId};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, UnixMillis};
@@ -720,7 +720,7 @@ impl ArtifactStore for SqliteStore {
         let rows = statement
             .query_map(
                 params![
-                    listing.owner.as_str(),
+                    listing.caller.as_str(),
                     listing.search,
                     listing.pinned,
                     listing.after.map(|position| position.at.0),
@@ -745,16 +745,6 @@ impl ArtifactStore for SqliteStore {
         for row in rows {
             let (raw, role, label) = row.map_err(unavailable)?;
             let record = raw.into_record()?;
-            // The query lists a member's artifact only with a role.
-            let access = if record.owner == *listing.owner {
-                Access::Owner
-            } else {
-                Access::Member(
-                    role.ok_or_else(|| corrupt("a listed artifact has no role"))?
-                        .parse()
-                        .map_err(corrupt)?,
-                )
-            };
             // Artifacts name actors as text (0036), so an owner the registry
             // never saw is listed under its id.
             let owner_label = label
@@ -763,7 +753,7 @@ impl ArtifactStore for SqliteStore {
                 .map_err(corrupt)?;
             listed.push(ListedArtifact {
                 record,
-                access,
+                role: role.map(|role| role.parse()).transpose().map_err(corrupt)?,
                 owner_label,
             });
         }
@@ -1589,52 +1579,76 @@ fn artifact_record(
         .transpose()
 }
 
-/// The artifacts `?1` reaches, by update time (decision 0060 rule 7): their
-/// own and, outside the trash, those they are a member of, with the role and
-/// the owner's label. `?2` is the search text, `?3` the pin, `?4` and `?5`
-/// the position to continue after, `?6` the limit, `?7` whether to list the
-/// trash, and `?8` `owned`, `shared` or `NULL` for both. A revoked member's
-/// row has no role and lists nothing. `lower` folds ASCII letters only.
-const LIST_BY_UPDATE: &str = "
-SELECT a.id, a.owner, a.kind, a.title, a.pinned, a.current_revision, a.metadata_revision,
-    a.created_at, a.updated_at, a.deleted_at, a.type_id, a.type_release, m.role, u.label
-FROM artifacts a
-LEFT JOIN artifact_members m
-    ON m.artifact_id = a.id AND m.user_id = ?1 AND m.role IS NOT NULL
-LEFT JOIN users u ON u.id = a.owner
-WHERE a.purged_at IS NULL
-  AND (a.deleted_at IS NOT NULL) = ?7
-  AND a.id IN (
-      SELECT id FROM artifacts WHERE owner = ?1 AND (?8 IS NULL OR ?8 = 'owned')
-      UNION ALL
-      SELECT artifact_id FROM artifact_members
-      WHERE user_id = ?1 AND role IS NOT NULL AND ?7 = 0 AND (?8 IS NULL OR ?8 = 'shared'))
-  AND (?2 IS NULL OR instr(lower(a.title), lower(?2)) > 0)
-  AND (?3 IS NULL OR a.pinned = ?3)
-  AND (?4 IS NULL OR a.updated_at < ?4 OR (a.updated_at = ?4 AND a.id > ?5))
-ORDER BY a.updated_at DESC, a.id
-LIMIT ?6";
+/// The artifacts `?1` reaches (decision 0060 rule 7), ordered by the column
+/// `$at` (`updated_at` or `created_at`): their own and, outside the trash,
+/// those they are a member of, with the member's role (`NULL` for their own)
+/// and the owner's label. `?2` is the search text, `?3` the pin, `?4` and
+/// `?5` the position to continue after, `?6` the limit, `?7` whether to list
+/// the trash, and `?8` `owned`, `shared` or `NULL` for both. Each branch is
+/// ordered and limited on its own index (`artifacts_by_owner` and its
+/// creation twin; `artifact_members_by_user`), so a page reads at most twice
+/// the limit and sorts only that. A revoked member's row has no role and
+/// lists nothing. `lower` folds ASCII letters only.
+macro_rules! list_by {
+    ($at:literal) => {
+        concat!(
+            "
+SELECT l.id, l.owner, l.kind, l.title, l.pinned, l.current_revision, l.metadata_revision,
+    l.created_at, l.updated_at, l.deleted_at, l.type_id, l.type_release, l.role, u.label
+FROM (
+    SELECT * FROM (
+        SELECT a.id, a.owner, a.kind, a.title, a.pinned, a.current_revision,
+            a.metadata_revision, a.created_at, a.updated_at, a.deleted_at, a.type_id,
+            a.type_release, NULL AS role
+        FROM artifacts a
+        WHERE a.owner = ?1 AND (?8 IS NULL OR ?8 = 'owned')
+          AND a.purged_at IS NULL AND (a.deleted_at IS NOT NULL) = ?7
+          AND (?2 IS NULL OR instr(lower(a.title), lower(?2)) > 0)
+          AND (?3 IS NULL OR a.pinned = ?3)
+          AND (?4 IS NULL OR a.",
+            $at,
+            " < ?4 OR (a.",
+            $at,
+            " = ?4 AND a.id > ?5))
+        ORDER BY a.",
+            $at,
+            " DESC, a.id
+        LIMIT ?6)
+    UNION ALL
+    SELECT * FROM (
+        SELECT a.id, a.owner, a.kind, a.title, a.pinned, a.current_revision,
+            a.metadata_revision, a.created_at, a.updated_at, a.deleted_at, a.type_id,
+            a.type_release, m.role AS role
+        FROM artifact_members m JOIN artifacts a ON a.id = m.artifact_id
+        WHERE m.user_id = ?1 AND m.role IS NOT NULL AND ?7 = 0
+          AND (?8 IS NULL OR ?8 = 'shared')
+          AND a.purged_at IS NULL AND a.deleted_at IS NULL
+          AND (?2 IS NULL OR instr(lower(a.title), lower(?2)) > 0)
+          AND (?3 IS NULL OR a.pinned = ?3)
+          AND (?4 IS NULL OR a.",
+            $at,
+            " < ?4 OR (a.",
+            $at,
+            " = ?4 AND a.id > ?5))
+        ORDER BY a.",
+            $at,
+            " DESC, a.id
+        LIMIT ?6)
+) l
+LEFT JOIN users u ON u.id = l.owner
+ORDER BY l.",
+            $at,
+            " DESC, l.id
+LIMIT ?6"
+        )
+    };
+}
+
+/// The artifacts a caller reaches, by update time; see [`list_by`].
+const LIST_BY_UPDATE: &str = list_by!("updated_at");
 
 /// As [`LIST_BY_UPDATE`], by creation time.
-const LIST_BY_CREATION: &str = "
-SELECT a.id, a.owner, a.kind, a.title, a.pinned, a.current_revision, a.metadata_revision,
-    a.created_at, a.updated_at, a.deleted_at, a.type_id, a.type_release, m.role, u.label
-FROM artifacts a
-LEFT JOIN artifact_members m
-    ON m.artifact_id = a.id AND m.user_id = ?1 AND m.role IS NOT NULL
-LEFT JOIN users u ON u.id = a.owner
-WHERE a.purged_at IS NULL
-  AND (a.deleted_at IS NOT NULL) = ?7
-  AND a.id IN (
-      SELECT id FROM artifacts WHERE owner = ?1 AND (?8 IS NULL OR ?8 = 'owned')
-      UNION ALL
-      SELECT artifact_id FROM artifact_members
-      WHERE user_id = ?1 AND role IS NOT NULL AND ?7 = 0 AND (?8 IS NULL OR ?8 = 'shared'))
-  AND (?2 IS NULL OR instr(lower(a.title), lower(?2)) > 0)
-  AND (?3 IS NULL OR a.pinned = ?3)
-  AND (?4 IS NULL OR a.created_at < ?4 OR (a.created_at = ?4 AND a.id > ?5))
-ORDER BY a.created_at DESC, a.id
-LIMIT ?6";
+const LIST_BY_CREATION: &str = list_by!("created_at");
 
 /// Whether `package` has exactly the paths and bytes of a stored revision,
 /// compared by digest.

@@ -623,20 +623,6 @@ async fn a_member_finds_the_shared_artifact_in_their_list() -> TestResult {
         .await?;
     assert_eq!(read["role"], "viewer");
     assert_eq!(read.get("owner"), None);
-    let (status, text) = harness
-        .send(
-            "GET",
-            "/v1/artifacts?access=everyone",
-            Some(&bob.secret),
-            None,
-            None,
-        )
-        .await?;
-    assert_eq!(
-        (status, code(&text)?.as_str()),
-        (400, "invalid_request"),
-        "{text}"
-    );
 
     let (status, text) = harness
         .send(
@@ -663,5 +649,27 @@ async fn a_member_finds_the_shared_artifact_in_their_list() -> TestResult {
         )
         .await?;
     assert_eq!(trash["artifacts"][0]["role"], "owner");
+    Ok(())
+}
+
+/// A filter the contract does not name is refused, as every bad query is.
+#[tokio::test]
+async fn an_unknown_list_filter_is_an_invalid_request() -> TestResult {
+    let harness = Harness::new()?;
+    let bob = harness.person("Bob").await?;
+    let (status, text) = harness
+        .send(
+            "GET",
+            "/v1/artifacts?access=everyone",
+            Some(&bob.secret),
+            None,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        (status, code(&text)?.as_str()),
+        (400, "invalid_request"),
+        "{text}"
+    );
     Ok(())
 }

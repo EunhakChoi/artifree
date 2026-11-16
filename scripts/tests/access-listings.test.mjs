@@ -50,12 +50,15 @@ test('the client keeps the role and the owner, and sends the filter', async () =
   assert.deepEqual(await written.listArtifacts(), { artifacts: [plain] });
   const { client: read } = clientFor({ ...plain, role: 'owner' });
   assert.equal((await read.getArtifact(listed.id)).role, 'owner');
+  // The contract lets either be null, which means absent.
+  const { client: nulls } = clientFor({ ...plain, role: null, owner: null });
+  assert.deepEqual(await nulls.getArtifact(listed.id), plain);
 });
 
 test('the client refuses a malformed role or owner', async () => {
   for (const wrong of [
     { role: 'admin' },
-    { role: null },
+    { role: 1 },
     { owner: { id: 'x' } },
     { owner: { id: 1, label: 'Ana' } },
     { owner: 'Ana' },

@@ -3,10 +3,9 @@
 
 use std::str::FromStr;
 
-use artifree_domain::identity::{InvalidValue, UnixMillis};
-use artifree_ports::artifact_store::{
-    ArtifactRecord, ListAccess, ListOrder, ListPosition, ListedArtifact,
-};
+use artifree_domain::access::Access;
+use artifree_domain::identity::{InvalidValue, UnixMillis, UserLabel};
+use artifree_ports::artifact_store::{ArtifactRecord, ListAccess, ListOrder, ListPosition};
 use sha2::{Digest, Sha256};
 
 /// Maximum search text length in Unicode scalar values, as for a title.
@@ -116,12 +115,23 @@ impl Default for ListQuery {
     }
 }
 
+/// An artifact as a list shows it to its caller (decision 0060 rule 7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageArtifact {
+    /// The artifact.
+    pub record: ArtifactRecord,
+    /// How the caller stands towards it: owner, or member with a role.
+    pub access: Access,
+    /// The owner's label, or the owner's id for an owner no registry holds.
+    pub owner_label: UserLabel,
+}
+
 /// One page of a list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactPage {
     /// The artifacts, in the query's order, each with how the caller stands
     /// towards it and its owner's label.
-    pub artifacts: Vec<ListedArtifact>,
+    pub artifacts: Vec<PageArtifact>,
     /// Continues the list, present only when more artifacts follow.
     pub next_page_token: Option<String>,
 }

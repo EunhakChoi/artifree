@@ -2260,13 +2260,13 @@ async fn read_tools_report_the_callers_role_and_the_owner() -> TestResult {
     let (status, body) = harness.post(grant).await?;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
 
-    let owned = harness.call("list_artifacts", json!({})).await?;
-    let mine = &owned["structuredContent"]["artifacts"][0];
-    assert_eq!(mine["role"], "owner", "{owned}");
+    let own_list = harness.call("list_artifacts", json!({})).await?;
+    let mine = &own_list["structuredContent"]["artifacts"][0];
+    assert_eq!(mine["role"], "owner", "{own_list}");
     let owner = mine["owner"].clone();
     assert!(
         owner["id"].is_string() && owner["label"].is_string(),
-        "{owned}"
+        "{own_list}"
     );
 
     let listed = harness

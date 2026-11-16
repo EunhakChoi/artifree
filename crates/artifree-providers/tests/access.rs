@@ -509,7 +509,7 @@ fn listed(
 ) -> Result<Vec<Listed>, Box<dyn std::error::Error>> {
     Ok(store
         .list_artifacts(ArtifactListing {
-            owner: who,
+            caller: who,
             access,
             search: None,
             pinned: None,
@@ -522,7 +522,8 @@ fn listed(
         .map(|listed| {
             (
                 listed.record.title.as_str().to_owned(),
-                listed.access,
+                // As the core decides it from the role the store holds.
+                listed.role.map_or(Access::Owner, Access::Member),
                 listed.owner_label.as_str().to_owned(),
             )
         })
@@ -593,7 +594,10 @@ fn a_member_lists_what_they_own_and_what_is_shared_with_them() -> TestResult {
         .is_empty()
     );
 
-    // In the trash the artifact is the owner's only.
+    // The trash lists only the caller's own: never a shared artifact,
+    // whether that artifact is in the trash or not.
+    assert!(listed(&fixture.store, &ana, None, true)?.is_empty());
+    assert!(listed(&fixture.store, &ben, Some(ListAccess::Shared), true)?.is_empty());
     fixture.trash("trash", 1, true)?;
     assert_eq!(
         titles(&listed(&fixture.store, &ana, None, false)?),
@@ -709,7 +713,7 @@ fn pages_continue_across_owned_and_shared_artifacts() -> TestResult {
     let mut after: Option<ListPosition> = None;
     loop {
         let page = fixture.store.list_artifacts(ArtifactListing {
-            owner: &ana,
+            caller: &ana,
             access: None,
             search: None,
             pinned: None,

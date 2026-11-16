@@ -24,7 +24,13 @@ export const ALL_ARTIFACTS: ListQuery = {
   deleted: false,
 };
 
-/** Whether `query` shows less than every artifact outside the trash. */
+/**
+ * Whether `query` shows less than every artifact the workspace lists outside
+ * the trash. The workspace lists only the caller's own artifacts
+ * (`access=owned`, see `readArtifacts`), so "every artifact" is every one
+ * the caller owns; S02h, which lists shared ones too, must count that filter
+ * here before an unfiltered list may close what it lacks.
+ */
 export function isFiltered(query: ListQuery): boolean {
   return query.search !== '' || query.pinned !== undefined || query.deleted;
 }

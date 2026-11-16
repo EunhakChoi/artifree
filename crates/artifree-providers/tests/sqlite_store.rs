@@ -948,7 +948,7 @@ fn listed(
 ) -> Result<Vec<String>, StoreError> {
     Ok(store
         .list_artifacts(ArtifactListing {
-            owner,
+            caller: owner,
             access: None,
             search,
             pinned,
@@ -1093,7 +1093,7 @@ fn list_pages_continue_after_the_last_position_through_a_tie() -> TestResult {
     let mut after: Option<ListPosition> = None;
     loop {
         let page = store.list_artifacts(ArtifactListing {
-            owner: &owner,
+            caller: &owner,
             access: None,
             search: None,
             pinned: None,
@@ -1231,7 +1231,7 @@ fn copy_of(
 fn trash_titles(store: &SqliteStore, owner: &ActorId) -> Result<Vec<String>, StoreError> {
     Ok(store
         .list_artifacts(ArtifactListing {
-            owner,
+            caller: owner,
             access: None,
             search: None,
             pinned: None,

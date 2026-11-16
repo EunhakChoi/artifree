@@ -212,18 +212,18 @@ const CALLER_ROLES: readonly CallerRole[] = ['owner', 'editor', 'viewer'];
 
 /**
  * The caller's role and the owner as an artifact carries them (decision 0060
- * rules 6 and 7): each absent, or well formed. `false` when either is
- * malformed.
+ * rules 6 and 7): each absent (or `null`, which the contract allows), or well
+ * formed. `false` when either is malformed.
  */
 function standing(
   value: Record<string, unknown>,
 ): Pick<Artifact, 'role' | 'owner'> | false {
   const { role, owner } = value;
-  const parsedRole =
-    role === undefined ? undefined : CALLER_ROLES.find((each) => each === role);
-  if (role !== undefined && parsedRole === undefined) return false;
+  const parsedRole = CALLER_ROLES.find((each) => each === role);
+  if (role !== undefined && role !== null && parsedRole === undefined)
+    return false;
   let parsedOwner: AccessUser | undefined;
-  if (owner !== undefined) {
+  if (owner !== undefined && owner !== null) {
     if (
       !isRecord(owner) ||
       typeof owner.id !== 'string' ||

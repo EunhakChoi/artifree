@@ -33,7 +33,7 @@ use artifree_core::build_reads::HeadBuild;
 use artifree_core::catalog::Release;
 use artifree_core::data::DataMutation;
 use artifree_core::jobs::{JobPageSize, NewBuild};
-use artifree_core::listing::{ListQuery, PageSize, SearchText};
+use artifree_core::listing::{ListQuery, PageArtifact, PageSize, SearchText};
 use artifree_core::members::{MAX_TOKEN_BYTES, MemberLimit, MemberQuery, MemberToken};
 use artifree_core::parts::{Boundary, ByteRange, FilePart, RangeError};
 use artifree_core::room::TabKey;
@@ -55,8 +55,7 @@ use artifree_domain::package::{
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
     ArtifactRecord, CommitReceipt, ContentSetDigest, Delivery, FileEdit, FileExpectation,
-    FileMismatch, ListAccess, ListOrder, ListedArtifact, RevisionRecord, UnreferencedContent,
-    parse_sha256,
+    FileMismatch, ListAccess, ListOrder, RevisionRecord, UnreferencedContent, parse_sha256,
 };
 use artifree_ports::asset_store::{AssetContent, AssetStoreError};
 use artifree_ports::data_store::OutboxFence;
@@ -2586,7 +2585,7 @@ fn caller_role(access: Access) -> CallerRole {
 
 /// An artifact as a list shows it: with the caller's role and the owner
 /// (decision 0060 rule 7).
-fn listed_dto(listed: &ListedArtifact) -> Artifact {
+fn listed_dto(listed: &PageArtifact) -> Artifact {
     Artifact {
         role: Some(caller_role(listed.access)),
         owner: Some(AccessUser {

@@ -87,7 +87,7 @@ fn every_released_version_upgrades_to_the_fresh_schema_and_keeps_its_data() -> T
         assert_feed_head_and_data_change(&store, version)?;
 
         let trash = store.list_artifacts(ArtifactListing {
-            owner: &owner,
+            caller: &owner,
             access: None,
             search: None,
             pinned: None,
