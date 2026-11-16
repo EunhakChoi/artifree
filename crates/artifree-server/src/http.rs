@@ -1738,14 +1738,17 @@ async fn set_data(
     State(state): State<AppState>,
     auth: AuthContext,
     headers: HeaderMap,
-    IdempotencyKey(key): IdempotencyKey,
+    key: Result<IdempotencyKey, ApiError>,
     path: Result<Path<String>, PathRejection>,
     uri: Uri,
     body: Result<Json<SetDataRequest>, JsonRejection>,
 ) -> Result<Json<DataWriteResponse>, ApiError> {
+    let key = shared_key_later(&uri, key)?;
     let Path(id) = path?;
-    operations::artifact_id(&id)?;
+    let artifact = operations::artifact_id(&id)?;
     let space = write_space(&uri)?;
+    operations::admit_space(&state, &auth.actor, &artifact, space).await?;
+    let IdempotencyKey(key) = key?;
     let Json(request) = body.map_err(|rejection| data_body_error(&rejection))?;
     Ok(Json(
         operations::set_data(&state, auth.actor, key, &id, space, request, || {
@@ -1760,14 +1763,17 @@ async fn update_data(
     State(state): State<AppState>,
     auth: AuthContext,
     headers: HeaderMap,
-    IdempotencyKey(key): IdempotencyKey,
+    key: Result<IdempotencyKey, ApiError>,
     path: Result<Path<String>, PathRejection>,
     uri: Uri,
     body: Result<Json<UpdateDataRequest>, JsonRejection>,
 ) -> Result<Json<DataWriteResponse>, ApiError> {
+    let key = shared_key_later(&uri, key)?;
     let Path(id) = path?;
-    operations::artifact_id(&id)?;
+    let artifact = operations::artifact_id(&id)?;
     let space = write_space(&uri)?;
+    operations::admit_space(&state, &auth.actor, &artifact, space).await?;
+    let IdempotencyKey(key) = key?;
     let Json(request) = body.map_err(|rejection| data_body_error(&rejection))?;
     Ok(Json(
         operations::update_data(&state, auth.actor, key, &id, space, request, || {
@@ -1782,14 +1788,17 @@ async fn delete_data(
     State(state): State<AppState>,
     auth: AuthContext,
     headers: HeaderMap,
-    IdempotencyKey(key): IdempotencyKey,
+    key: Result<IdempotencyKey, ApiError>,
     path: Result<Path<String>, PathRejection>,
     uri: Uri,
     body: Result<Json<DeleteDataRequest>, JsonRejection>,
 ) -> Result<Json<DataWriteResponse>, ApiError> {
+    let key = shared_key_later(&uri, key)?;
     let Path(id) = path?;
-    operations::artifact_id(&id)?;
+    let artifact = operations::artifact_id(&id)?;
     let space = write_space(&uri)?;
+    operations::admit_space(&state, &auth.actor, &artifact, space).await?;
+    let IdempotencyKey(key) = key?;
     let Json(request) = body.map_err(|rejection| data_body_error(&rejection))?;
     Ok(Json(
         operations::delete_data(&state, auth.actor, key, &id, space, request, || {
@@ -1797,6 +1806,21 @@ async fn delete_data(
         })
         .await?,
     ))
+}
+
+/// The idempotency key of a data write, refused here for the caller's own
+/// space, as before the shared space, and kept for a shared write, whose
+/// access, declaration and writer role are checked before its key and body
+/// are read (decision 0060 rule 4).
+fn shared_key_later(
+    uri: &Uri,
+    key: Result<IdempotencyKey, ApiError>,
+) -> Result<Result<IdempotencyKey, ApiError>, ApiError> {
+    if matches!(write_space(uri), Ok(artifree_domain::access::Space::Shared)) {
+        Ok(key)
+    } else {
+        key.map(Ok)
+    }
 }
 
 /// The space a data write names in its query (decision 0060 rule 10): the

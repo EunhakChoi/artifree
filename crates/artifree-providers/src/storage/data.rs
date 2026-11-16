@@ -25,7 +25,9 @@
 
 use artifree_domain::AppDataVersion;
 use artifree_domain::SourceRevision;
-use artifree_domain::access::{Need, SharedWriters, Space};
+use artifree_domain::access::{
+    MAX_RUNTIME_MANIFEST_BYTES, Need, RUNTIME_MANIFEST_PATH, SharedWriters, Space,
+};
 use artifree_domain::data::DataSpace;
 use artifree_domain::identity::{ActorId, ArtifactId, StateGeneration};
 use artifree_ports::artifact_store::{Delivery, RequestIdentity, StoreError};
@@ -40,13 +42,10 @@ use super::{
     unavailable,
 };
 
-/// Path of the runtime manifest that declares the shared space (decision 0020
-/// rule 1, decision 0060 rule 10).
-const MANIFEST_PATH: &str = "artifree-runtime.json";
-
 /// The shared space the artifact's head revision declares, read in the
 /// caller's transaction (decision 0060 rule 10). A head with no manifest, or
-/// with one whose declaration cannot be read, declares none.
+/// with one whose declaration cannot be read, declares none; a manifest over
+/// [`MAX_RUNTIME_MANIFEST_BYTES`] is not copied out to be refused.
 fn head_declaration(
     connection: &Connection,
     artifact: &ArtifactId,
@@ -56,8 +55,12 @@ fn head_declaration(
             "SELECT b.content FROM artifacts a
              JOIN revision_files f ON f.artifact_id = a.id AND f.revision = a.current_revision
              JOIN blobs b ON b.digest = f.digest
-             WHERE a.id = ?1 AND f.path = ?2",
-            params![artifact.as_str(), MANIFEST_PATH],
+             WHERE a.id = ?1 AND f.path = ?2 AND length(b.content) <= ?3",
+            params![
+                artifact.as_str(),
+                RUNTIME_MANIFEST_PATH,
+                i64::try_from(MAX_RUNTIME_MANIFEST_BYTES).unwrap_or(i64::MAX)
+            ],
             |row| row.get(0),
         )
         .optional()
@@ -65,9 +68,11 @@ fn head_declaration(
     Ok(manifest.and_then(|bytes| SharedWriters::declared_in(&bytes).ok().flatten()))
 }
 
-/// Checks, in the caller's transaction, that `space` is reachable: the actor's
-/// own always is, and the shared one while the head declares it. A write also
-/// needs the role the declaration names ([`StoreError::Forbidden`]).
+/// Checks, in the caller's transaction, that the actor may reach `space` of
+/// the artifact (decision 0060 rules 5, 9, 10 and 17). A write to its own
+/// space needs read access. The shared space needs a head that declares it ([`StoreError::NotFound`]
+/// without one) and read access; a write needs the role the declaration
+/// names as well ([`StoreError::Forbidden`]).
 fn reach(
     connection: &Connection,
     artifact: &ArtifactId,
@@ -75,16 +80,19 @@ fn reach(
     space: Space,
     writing: bool,
 ) -> Result<(), StoreError> {
-    if space == Space::Own {
-        return Ok(());
-    }
-    let Some(writers) = head_declaration(connection, artifact)? else {
-        return Err(StoreError::NotFound);
+    let need = match space {
+        // An own read is the caller's own data, whose access the core checks
+        // as before the shared space; the store reads it unchanged.
+        Space::Own if !writing => return Ok(()),
+        Space::Own => Need::Read,
+        Space::Shared => {
+            let Some(writers) = head_declaration(connection, artifact)? else {
+                return Err(StoreError::NotFound);
+            };
+            if writing { writers.need() } else { Need::Read }
+        }
     };
-    if writing {
-        super::access::admit(connection, artifact, actor, writers.need())?;
-    }
-    Ok(())
+    super::access::admit(connection, artifact, actor, need)
 }
 
 /// The space of `actor`, or the artifact's shared space, as stored, or the
@@ -241,16 +249,10 @@ fn write(
         return Err(DataStoreError::NotFound);
     }
     // A member writes its own space while it is a member, read again here
-    // (decision 0060 rules 5 and 9); a read is all a role needs for that.
-    super::access::admit(
-        transaction,
-        request.artifact,
-        request.request.actor,
-        Need::Read,
-    )?;
-    // The shared space is written only while the head declares it, and only
-    // by a role the declaration names, read here before the key (decision
-    // 0060 rules 10 and 17).
+    // (decision 0060 rules 5 and 9); a read is all a role needs for that. The
+    // shared space is written only while the head declares it, and only by a
+    // role the declaration names, read here before the key (decision 0060
+    // rules 10 and 17).
     reach(
         transaction,
         request.artifact,
@@ -412,6 +414,20 @@ impl DataStore for SqliteStore {
         Ok(current)
     }
 
+    fn admit_write(
+        &self,
+        artifact: &ArtifactId,
+        actor: &ActorId,
+        space: Space,
+    ) -> Result<(), DataStoreError> {
+        let mut connection = self.connect()?;
+        let snapshot = connection.transaction().map_err(unavailable)?;
+        if !artifact_in_place(&snapshot, artifact)? {
+            return Err(DataStoreError::NotFound);
+        }
+        Ok(reach(&snapshot, artifact, actor, space, true)?)
+    }
+
     fn read_data(
         &self,
         artifact: &ArtifactId,
@@ -419,8 +435,10 @@ impl DataStore for SqliteStore {
         space: Space,
     ) -> Result<DataSnapshot, DataStoreError> {
         let mut connection = self.connect()?;
-        // One snapshot: the artifact check, the head's declaration and the
-        // space agree.
+        // One snapshot: the artifact check, for the shared space the caller's
+        // access and the head's declaration, and the space agree, so a shared
+        // read that a revocation or a new head overtakes answers as of one
+        // moment.
         let snapshot = connection.transaction().map_err(unavailable)?;
         if !artifact_in_place(&snapshot, artifact)? {
             return Err(DataStoreError::NotFound);

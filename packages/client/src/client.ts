@@ -934,11 +934,11 @@ export class ArtifreeClient {
     path: string | undefined = undefined,
     options: DataReadOptions = {},
   ): Promise<AppData> {
-    const parts =
-      options.space === 'shared' ? ['space=shared'] : ([] as string[]);
-    if (path !== undefined && path !== '')
-      parts.push(`path=${encodeURIComponent(queryDataPath(path))}`);
-    const suffix = parts.length === 0 ? '' : `?${parts.join('&')}`;
+    const space = spaceQuery(options.space);
+    const suffix =
+      path === undefined || path === ''
+        ? space
+        : `${space === '' ? '?' : `${space}&`}path=${encodeURIComponent(queryDataPath(path))}`;
     return this.json(
       'GET',
       `/v1/artifacts/${encodeURIComponent(artifactId)}/data${suffix}`,

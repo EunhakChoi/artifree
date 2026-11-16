@@ -173,6 +173,24 @@ pub trait DataStore {
         generation: StateGeneration,
     ) -> Result<OutboxBinding, DataStoreError>;
 
+    /// Whether `actor` may write `space` of an artifact as of now: the
+    /// artifact is in place, the actor can read it, and for the shared space
+    /// the head revision declares it and the actor has the role the
+    /// declaration names (decision 0060 rules 4 and 10). A caller checks this
+    /// before it judges a request's content; the write checks it again where
+    /// it commits.
+    ///
+    /// # Errors
+    ///
+    /// [`DataStoreError::NotFound`], [`DataStoreError::Forbidden`] or
+    /// [`DataStoreError::Unavailable`].
+    fn admit_write(
+        &self,
+        artifact: &ArtifactId,
+        actor: &ActorId,
+        space: Space,
+    ) -> Result<(), DataStoreError>;
+
     /// The space of `actor` for an artifact, or its shared space, and its
     /// version, read in one snapshot. The shared space is read only while the
     /// artifact's head revision declares it (decision 0060 rule 10); the

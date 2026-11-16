@@ -188,6 +188,46 @@ fn the_shared_space_is_reached_only_while_the_head_declares_it() -> TestResult {
     Ok(())
 }
 
+/// The store checks the caller's access in the snapshot of a shared read,
+/// and the declared writer before a write's content (decision 0060 rules 4,
+/// 5 and 10), not only where the core checked earlier.
+#[test]
+fn the_store_checks_access_in_the_read_and_before_the_write() -> TestResult {
+    let f = Fixture::new()?;
+    f.head(1, Some(EDITORS))?;
+    assert!(f.read(&f.viewer, Space::Shared).is_ok());
+    assert!(
+        f.store
+            .admit_write(f.id(), &f.editor, Space::Shared)
+            .is_ok()
+    );
+    assert!(matches!(
+        f.store.admit_write(f.id(), &f.viewer, Space::Shared),
+        Err(DataStoreError::Forbidden)
+    ));
+    assert!(matches!(
+        f.store.admit_write(f.id(), &f.stranger, Space::Shared),
+        Err(DataStoreError::NotFound)
+    ));
+    f.store.change_access(AccessRequest {
+        request: RequestIdentity {
+            actor: &f.owner,
+            key: &key("revoke-viewer"),
+            fingerprint: RequestFingerprint(digest("revoke-viewer")),
+        },
+        artifact: f.id(),
+        user: &f.viewer,
+        change: AccessChange::Revoke,
+        base: AccessVersion(2),
+        now: UnixMillis(2),
+    })?;
+    assert!(matches!(
+        f.read(&f.viewer, Space::Shared),
+        Err(DataStoreError::NotFound)
+    ));
+    Ok(())
+}
+
 #[test]
 fn the_declaration_names_who_writes_and_every_reader_reads() -> TestResult {
     let f = Fixture::new()?;
@@ -252,7 +292,8 @@ fn the_upgrade_to_schema_20_keeps_every_change_and_takes_shared_rows() -> TestRe
     f.write(&f.owner, "own", Space::Own, 0, "1")?;
     let before = f.feed(&f.owner)?;
     let path = database_in(f.dir.path());
-    // Schema 19: the change kinds before `shared_data_changed`, no shared table.
+    // Schema 19: the change kinds before `shared_data_changed`, no shared table,
+    // and a change row whose job is gone.
     rusqlite::Connection::open(&path)?.execute_batch(
         "PRAGMA foreign_keys = OFF;
         CREATE TABLE changes_v19 (
@@ -282,9 +323,20 @@ fn the_upgrade_to_schema_20_keeps_every_change_and_takes_shared_rows() -> TestRe
             metadata_revision, data_version, job_id, committed_at FROM changes;
         DROP TABLE changes;
         ALTER TABLE changes_v19 RENAME TO changes;
+        INSERT INTO changes (actor, actor_seq, artifact_id, kind, revision, metadata_revision,
+                job_id, committed_at)
+            SELECT actor, actor_seq + 1, artifact_id, 'job_changed', revision, metadata_revision,
+                'job_00000000000000000000000000000000', committed_at
+            FROM changes ORDER BY sequence DESC LIMIT 1;
+        UPDATE actor_feeds SET head = head + 1
+            WHERE actor = (SELECT actor FROM changes ORDER BY sequence DESC LIMIT 1);
         DROP TABLE shared_data;
         PRAGMA user_version = 19;",
     )?;
+    // The row above names a job that is gone, as an older file's rows may:
+    // the upgrade copies it with the foreign keys relaxed.
+    let mut before = before;
+    before.push((ChangeKind::JobChanged, None));
     let upgraded = Fixture {
         store: SqliteStore::open(&path)?,
         ..f

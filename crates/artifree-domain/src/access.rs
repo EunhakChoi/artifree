@@ -130,6 +130,10 @@ impl Space {
 /// The largest runtime manifest an artifact may hold, in bytes (decision 0020).
 pub const MAX_RUNTIME_MANIFEST_BYTES: usize = 16 * 1024;
 
+/// The path of the runtime manifest in a revision (decision 0020 rule 1),
+/// which also declares the shared space (decision 0060 rule 10).
+pub const RUNTIME_MANIFEST_PATH: &str = "artifree-runtime.json";
+
 /// Who may write an artifact's declared shared space (decision 0060 rule 10).
 /// The owner and every member may read it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -14,11 +14,12 @@ use std::sync::Arc;
 
 use artifree_contracts::api::ErrorCode;
 use artifree_contracts::api::{
-    CancelJobResponse, CommitResponse, ContentEncoding, CreateArtifactRequest, DeleteAssetRequest,
-    DeleteDataRequest, DuplicateArtifactRequest, DuplicateArtifactResponse, EditFilesRequest,
-    EnqueueJobRequest, EnqueueJobResponse, ErrorResponse, JsonValue, ListArtifactsQuery,
-    ListJobsQuery, RestoreRevisionRequest, SaveRevisionRequest, SetDataRequest,
-    UpdateArtifactRequest, UpdateArtifactResponse, UpdateDataRequest, UploadAssetRequest,
+    CancelJobResponse, CommitResponse, ContentEncoding, CreateArtifactRequest, DataSpaceName,
+    DataWriteResponse, DeleteAssetRequest, DeleteDataRequest, DuplicateArtifactRequest,
+    DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse,
+    ErrorResponse, JsonValue, ListArtifactsQuery, ListJobsQuery, RestoreRevisionRequest,
+    SaveRevisionRequest, SetDataRequest, UpdateArtifactRequest, UpdateArtifactResponse,
+    UpdateDataRequest, UploadAssetRequest,
 };
 use artifree_contracts::mcp::{
     self, AcknowledgeHandoffArguments, ArtifactArguments, BuildStatusArguments, CancelJobArguments,
@@ -32,6 +33,7 @@ use artifree_contracts::mcp::{
 };
 use artifree_core::artifacts::ArtifactError;
 use artifree_core::parts::{Boundary, ByteRange};
+use artifree_domain::access::Space;
 use artifree_domain::artifact_type::TypeRelease;
 use artifree_domain::identity::{ActorId, StateGeneration};
 use axum::Router;
@@ -311,79 +313,98 @@ async fn dispatch_data(
             })
             .await
         }
-        "set_data" => {
-            json(async {
-                let SetDataArguments {
-                    artifact_id,
-                    path,
-                    base_data_version,
-                    value,
-                    idempotency_key,
-                    space,
-                } = parse(arguments)?;
-                let key = operations::request_key("idempotency_key", &idempotency_key)?;
-                let value = json_text("value", value)?;
-                let request = SetDataRequest {
-                    path,
-                    base_data_version,
-                    value,
-                };
-                let space = operations::data_space(space);
-                operations::set_data(state, actor, key, &artifact_id, space, request, || Ok(None))
-                    .await
-            })
-            .await
-        }
-        "update_data" => {
-            json(async {
-                let UpdateDataArguments {
-                    artifact_id,
-                    path,
-                    base_data_version,
-                    patch,
-                    idempotency_key,
-                    space,
-                } = parse(arguments)?;
-                let key = operations::request_key("idempotency_key", &idempotency_key)?;
-                let patch = json_text("patch", patch)?;
-                let request = UpdateDataRequest {
-                    path,
-                    base_data_version,
-                    patch,
-                };
-                let space = operations::data_space(space);
-                operations::update_data(state, actor, key, &artifact_id, space, request, || {
-                    Ok(None)
-                })
-                .await
-            })
-            .await
-        }
-        "delete_data" => {
-            json(async {
-                let DeleteDataArguments {
-                    artifact_id,
-                    path,
-                    base_data_version,
-                    idempotency_key,
-                    space,
-                } = parse(arguments)?;
-                let key = operations::request_key("idempotency_key", &idempotency_key)?;
-                let request = DeleteDataRequest {
-                    path,
-                    base_data_version,
-                };
-                let space = operations::data_space(space);
-                operations::delete_data(state, actor, key, &artifact_id, space, request, || {
-                    Ok(None)
-                })
-                .await
-            })
-            .await
-        }
+        "set_data" => json(set_data(state, actor, arguments)).await,
+        "update_data" => json(update_data(state, actor, arguments)).await,
+        "delete_data" => json(delete_data(state, actor, arguments)).await,
         _ => return dispatch_assets(state, actor, generation, name, arguments).await,
     };
     Some(outcome)
+}
+
+/// The space a data write names, once the caller may write it: for the
+/// shared space, access, the declaration and the writer role are checked
+/// before the key and the value are read (decision 0060 rule 4).
+async fn writable_space(
+    state: &AppState,
+    actor: &ActorId,
+    artifact_id: &str,
+    space: Option<DataSpaceName>,
+) -> Result<Space, ApiError> {
+    let space = operations::data_space(space);
+    operations::admit_space(state, actor, &operations::artifact_id(artifact_id)?, space).await?;
+    Ok(space)
+}
+
+/// The `set_data` tool.
+async fn set_data(
+    state: &AppState,
+    actor: ActorId,
+    arguments: Value,
+) -> Result<DataWriteResponse, ApiError> {
+    let SetDataArguments {
+        artifact_id,
+        path,
+        base_data_version,
+        value,
+        idempotency_key,
+        space,
+    } = parse(arguments)?;
+    let space = writable_space(state, &actor, &artifact_id, space).await?;
+    let key = operations::request_key("idempotency_key", &idempotency_key)?;
+    let value = json_text("value", value)?;
+    let request = SetDataRequest {
+        path,
+        base_data_version,
+        value,
+    };
+    operations::set_data(state, actor, key, &artifact_id, space, request, || Ok(None)).await
+}
+
+/// The `update_data` tool.
+async fn update_data(
+    state: &AppState,
+    actor: ActorId,
+    arguments: Value,
+) -> Result<DataWriteResponse, ApiError> {
+    let UpdateDataArguments {
+        artifact_id,
+        path,
+        base_data_version,
+        patch,
+        idempotency_key,
+        space,
+    } = parse(arguments)?;
+    let space = writable_space(state, &actor, &artifact_id, space).await?;
+    let key = operations::request_key("idempotency_key", &idempotency_key)?;
+    let patch = json_text("patch", patch)?;
+    let request = UpdateDataRequest {
+        path,
+        base_data_version,
+        patch,
+    };
+    operations::update_data(state, actor, key, &artifact_id, space, request, || Ok(None)).await
+}
+
+/// The `delete_data` tool.
+async fn delete_data(
+    state: &AppState,
+    actor: ActorId,
+    arguments: Value,
+) -> Result<DataWriteResponse, ApiError> {
+    let DeleteDataArguments {
+        artifact_id,
+        path,
+        base_data_version,
+        idempotency_key,
+        space,
+    } = parse(arguments)?;
+    let space = writable_space(state, &actor, &artifact_id, space).await?;
+    let key = operations::request_key("idempotency_key", &idempotency_key)?;
+    let request = DeleteDataRequest {
+        path,
+        base_data_version,
+    };
+    operations::delete_data(state, actor, key, &artifact_id, space, request, || Ok(None)).await
 }
 
 /// A JSON value given as text, as the tools of application data take it. Text

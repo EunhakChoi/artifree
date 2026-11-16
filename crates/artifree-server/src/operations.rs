@@ -2245,6 +2245,28 @@ pub(crate) async fn delete_data(
     .await
 }
 
+/// Checks the shared space's access, declaration and writer role before a
+/// write's key and content are read, so a member the declaration does not
+/// let write learns nothing about them (decision 0060 rule 4). HTTP and MCP
+/// call it before they read either; the write checks again where it commits
+/// (rule 5). The caller's own space keeps its order: its role check is a
+/// read, which the write makes where it commits.
+pub(crate) async fn admit_space(
+    state: &AppState,
+    actor: &ActorId,
+    id: &ArtifactId,
+    space: Space,
+) -> Result<(), ApiError> {
+    if space == Space::Own {
+        return Ok(());
+    }
+    let (actor, id) = (actor.clone(), id.clone());
+    state
+        .run(move |artifacts| artifacts.admit_data_write(&actor, &id, space))
+        .await?;
+    Ok(())
+}
+
 async fn write_data(
     state: &AppState,
     actor: ActorId,

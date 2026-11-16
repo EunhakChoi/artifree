@@ -856,7 +856,9 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<(), StoreError> {
     // `changes` (decision 0060, slice S02c): with the checks on, a row an older
     // file holds whose foreign key does not resolve would stop the copy, though
     // the rebuild adds no broken key; `newly_broken` checks that after the steps.
-    let relax = enforced && (8..19).contains(&version);
+    // Schema 20 rebuilds `changes` again (decision 0060, slice S02f1), so a
+    // version 19 file is relaxed for the same reason.
+    let relax = enforced && (8..20).contains(&version);
     if relax {
         connection
             .pragma_update(None, "foreign_keys", false)
@@ -872,7 +874,6 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<(), StoreError> {
     result
 }
 
-/// The steps of [`upgrade`], run in the one immediate transaction it opens.
 /// The steps from version 11 on, each run when the database is older, in the
 /// transaction of [`upgrade_steps`].
 fn steps_from_11(transaction: &Transaction<'_>, version: i64) -> Result<(), StoreError> {
@@ -905,6 +906,7 @@ fn steps_from_11(transaction: &Transaction<'_>, version: i64) -> Result<(), Stor
     Ok(())
 }
 
+/// The steps of [`upgrade`], run in the one immediate transaction it opens.
 fn upgrade_steps(connection: &mut Connection) -> Result<(), StoreError> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)

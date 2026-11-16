@@ -79,6 +79,25 @@ impl<S: ArtifactStore + AccessStore + DataStore> ArtifactService<S> {
             .map_err(data_error)
     }
 
+    /// Checks, before a write's content is judged, that `actor` may write
+    /// `space` of the artifact (decision 0060 rule 4): access first, then for
+    /// the shared space its declaration and the role it names. The write
+    /// checks again where it commits (rule 5).
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::NotFound`], [`ArtifactError::Forbidden`] or
+    /// [`ArtifactError::Unavailable`].
+    pub fn admit_data_write(
+        &self,
+        actor: &ActorId,
+        id: &ArtifactId,
+        space: Space,
+    ) -> Result<(), ArtifactError> {
+        self.authorized(actor, id)?;
+        self.store.admit_write(id, actor, space).map_err(data_error)
+    }
+
     /// The value at `path` in the actor's data space of an artifact, or in its
     /// shared space, and the space's version. A path with nothing at it reads
     /// as `None`, as does a path through a value that is not an object; the
@@ -405,6 +424,10 @@ mod tests {
             _: &ActorId,
             _: StateGeneration,
         ) -> Result<OutboxBinding, DataStoreError> {
+            Err(DataStoreError::Unavailable("unused".into()))
+        }
+
+        fn admit_write(&self, _: &ArtifactId, _: &ActorId, _: Space) -> Result<(), DataStoreError> {
             Err(DataStoreError::Unavailable("unused".into()))
         }
 

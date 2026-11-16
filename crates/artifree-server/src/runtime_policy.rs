@@ -6,7 +6,7 @@ use artifree_contracts::api::RuntimeLifecycle;
 use artifree_domain::access::{MAX_RUNTIME_MANIFEST_BYTES, SharedWriters};
 use serde::Deserialize;
 
-pub(crate) const MANIFEST_PATH: &str = "artifree-runtime.json";
+pub(crate) use artifree_domain::access::RUNTIME_MANIFEST_PATH as MANIFEST_PATH;
 pub(crate) const SDK_PIN: &str = "artifree.app.v1";
 pub(crate) const ASSETS_DOWNLOAD: &str = "assets.download";
 pub(crate) const ASSETS_READ: &str = "assets.read";
@@ -229,7 +229,9 @@ impl RuntimePolicy {
         let manifest: Manifest =
             serde_json::from_slice(bytes).map_err(|_| "invalid runtime declaration")?;
         // Any `shared` value but the two names makes the manifest malformed
-        // (decision 0060 rule 10); the store reads the same declaration.
+        // (decision 0060 rule 10). The store reads `shared` with the same
+        // function and finds no space where it is malformed; the manifest's
+        // other members govern runtime frames, not the data routes.
         if manifest.shared.is_some() && SharedWriters::declared_in(bytes).is_err() {
             return Err("invalid shared space declaration");
         }

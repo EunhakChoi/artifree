@@ -321,6 +321,60 @@ async fn readers_read_the_shared_space_and_the_declaration_names_its_writers() -
     Ok(())
 }
 
+/// Access, the declaration and the writer role are judged before a shared
+/// write's key and body, over HTTP and MCP (decision 0060 rule 4).
+#[tokio::test]
+async fn a_refused_shared_write_learns_nothing_of_its_key_or_body() -> TestResult {
+    let harness = Harness::new()?;
+    let ana = harness.person("Ana").await?;
+    let cy = harness.person("Cy").await?;
+    let dan = harness.person("Dan").await?;
+    let id = harness
+        .artifact(&ana, Some(EDITORS), &[(&cy, "viewer")])
+        .await?;
+    // The access and the role are judged before the body, so a write the
+    // declaration refuses learns nothing of its path or value (rule 4).
+    let valid = json!({ "path": "note", "base_data_version": 1, "value": 1 });
+    let bodies = [
+        (
+            Some("bad-shared-path"),
+            json!({ "path": "a//b", "base_data_version": 1, "value": 1 }),
+        ),
+        (Some("bad-shared-shape"), json!(["not", "an", "object"])),
+        (None, valid),
+    ];
+    for (who, expected) in [(&cy, 403), (&dan, 404)] {
+        for (key, body) in &bodies {
+            let (status, answer) = harness
+                .send(
+                    "PUT",
+                    &format!("/v1/artifacts/{id}/data?space=shared"),
+                    &who.secret,
+                    *key,
+                    Some(body.clone()),
+                )
+                .await?;
+            assert_eq!(status, expected, "{key:?} {body}: {answer}");
+        }
+    }
+    // The tool checks the role before it reads the key or the value.
+    let early = harness
+        .tool(
+            &cy.secret,
+            "set_data",
+            json!({
+                "artifact_id": id, "path": "a//b", "base_data_version": 1, "value": "{",
+                "idempotency_key": "x", "space": "shared"
+            }),
+        )
+        .await?;
+    assert_eq!(
+        early["structuredContent"]["error"]["code"], "forbidden",
+        "{early}"
+    );
+    Ok(())
+}
+
 /// A key replays only the write of the space it was sent to, and a write
 /// names its space with nothing else in its query.
 #[tokio::test]

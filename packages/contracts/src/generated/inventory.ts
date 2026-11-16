@@ -72,7 +72,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust",
       "path": "crates/artifree-core/src/policy.rs",
       "status": "implemented",
-      "summary": "Per-user artifact access checked on every read; sharing remains planned. The server separately checks runtime capability grants."
+      "summary": "Per-user artifact access checked on every read and write, with owner, editor and viewer roles; an artifact may declare a shared data space that its members read and the declared roles write. The server separately checks runtime capability grants."
     },
     {
       "id": "documents",
@@ -81,7 +81,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "Rust",
       "path": "crates/artifree-core/src/data.rs",
       "status": "implemented",
-      "summary": "Application data: one JSON object per actor and artifact, with its own version, path reads, set, merge-patch, and delete, over HTTP, MCP, and the CLI. A content runtime with the read grant can read it, and one with the write grant can set, merge-patch, and delete it; structured edits and queries are planned."
+      "summary": "Application data: one JSON object per actor and artifact, and one shared object for an artifact that declares it, each with its own version, path reads, set, merge-patch, and delete, over HTTP, MCP, and the CLI. A content runtime with the read grant can read it, and one with the write grant can set, merge-patch, and delete it; structured edits and queries are planned."
     },
     {
       "id": "jobs",
