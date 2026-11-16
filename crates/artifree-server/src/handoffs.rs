@@ -175,6 +175,18 @@ impl Handoffs {
         }
     }
 
+    /// How many deliveries `actor` has, offered or not, for tests.
+    #[cfg(test)]
+    pub(crate) fn items_of(&self, actor: &ActorId) -> usize {
+        self.state.lock().map_or(usize::MAX, |registry| {
+            registry
+                .items
+                .values()
+                .filter(|item| item.owner == *actor)
+                .count()
+        })
+    }
+
     /// Forgets the deliveries of each of `users` that name `artifact`,
     /// offered or not (decision 0060 rule 15). Their inboxes and their
     /// deliveries of other artifacts stay.

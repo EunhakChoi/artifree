@@ -38,7 +38,7 @@ use crate::catalog::{Catalog, Release};
 use crate::listing::{self, ArtifactPage, ListQuery};
 use crate::parts::{self, Boundary, ByteRange, FilePart, RangeError};
 use crate::policy;
-use artifree_domain::access::Need;
+use artifree_domain::access::{AccessGeneration, Need};
 
 /// What could not be found. Inaccessible artifacts are reported as missing so
 /// that callers cannot probe for identifiers they may not read.
@@ -984,6 +984,23 @@ impl<S: ArtifactStore + AccessStore> ArtifactService<S> {
         id: &ArtifactId,
     ) -> Result<ArtifactRecord, ArtifactError> {
         self.authorized(actor, id)
+    }
+
+    /// The access generation `actor` holds on an artifact (decision 0060
+    /// rule 16): [`AccessGeneration::NEVER`] for an actor who was never a
+    /// member, as the owner. A request reads it before its access check, so
+    /// that what it registers afterwards can be confirmed against it. It is
+    /// the actor's own and says nothing about other users.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::Unavailable`].
+    pub fn access_generation(
+        &self,
+        actor: &ActorId,
+        id: &ArtifactId,
+    ) -> Result<AccessGeneration, ArtifactError> {
+        Ok(self.store.access_generation(id, actor)?)
     }
 
     /// One page of the artifacts the actor owns that match `query`, after

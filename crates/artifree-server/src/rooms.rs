@@ -15,6 +15,7 @@ use artifree_contracts::api::{
     RoomJoinRequest, RoomMember, RoomSnapshot,
 };
 use artifree_core::room::{Caller, Limits, RoomError, Rooms, Snapshot, TabKey};
+use artifree_domain::access::AccessGeneration;
 use artifree_domain::identity::{ActorId, ArtifactId, InvalidValue};
 use artifree_domain::room::{
     Epoch, EventData, EventKind, EventSeq, ParticipantId, PresenceState, Slot,
@@ -278,15 +279,28 @@ pub(crate) async fn join(
     artifact: &str,
     body: Result<RoomJoinRequest, ApiError>,
 ) -> Result<RoomSnapshot, ApiError> {
-    let located = locate(state, actor, session_id, artifact, true).await?;
+    let located = locate(state, actor, session_id, artifact, false).await?;
+    // The participant outlives the request, so the access generation is read
+    // before the access check and confirmed after the join (decision 0060
+    // rule 16).
+    let (owner, id) = (actor.clone(), located.artifact.clone());
+    let seen: AccessGeneration = state
+        .run(move |artifacts| {
+            let seen = artifacts.access_generation(&owner, &id)?;
+            artifacts.artifact(&owner, &id)?;
+            Ok(seen)
+        })
+        .await?;
     let request = body?;
     let slot: Slot = text("slot", &request.slot)?;
     let presence = state_of(request.state.as_deref())?;
-    located
+    let joined = located
         .act(state, actor, |rooms, now, caller| {
             rooms.join(now, caller, slot, presence)
         })
-        .map(snapshot)
+        .map(snapshot)?;
+    state.confirm_access(actor, &located.artifact, seen).await?;
+    Ok(joined)
 }
 
 /// Renews a participant's lease and reads the room.
