@@ -24,7 +24,7 @@ use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title};
 use artifree_domain::job::JobState;
 use artifree_domain::package::{FileChange, FilePackage, FileSet, PackageError, PackagePath};
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
-use artifree_ports::access_store::AccessStore;
+use artifree_ports::access_store::{AccessList, AccessStore};
 use artifree_ports::artifact_store::{
     ArtifactListing, ArtifactRecord, ArtifactStore, ChangePage, CleanupReceipt, CleanupRequest,
     CommitReceipt, ConditionalCommit, ContentSetDigest, CopySource, Delivery, FileEdit, FileEntry,
@@ -39,6 +39,19 @@ use crate::listing::{self, ArtifactPage, ListQuery};
 use crate::parts::{self, Boundary, ByteRange, FilePart, RangeError};
 use crate::policy;
 use artifree_domain::access::{AccessGeneration, Need};
+
+/// An artifact's access list as one caller may see it (decision 0060 rules 6
+/// and 8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessView {
+    /// The owner, the members and the access version. A member's `disabled`
+    /// is the store's; an adapter tells it only when [`Self::shows_disabled`]
+    /// (rule 8).
+    pub list: AccessList,
+    /// Whether the caller is the owner, who alone is told which members are
+    /// disabled.
+    pub shows_disabled: bool,
+}
 
 /// What could not be found. Inaccessible artifacts are reported as missing so
 /// that callers cannot probe for identifiers they may not read.
@@ -984,6 +997,27 @@ impl<S: ArtifactStore + AccessStore> ArtifactService<S> {
         id: &ArtifactId,
     ) -> Result<ArtifactRecord, ArtifactError> {
         self.authorized(actor, id)
+    }
+
+    /// The access list of an artifact the actor owns or is a member of
+    /// (decision 0060 rule 6). Only the owner may be told which members are
+    /// disabled: [`AccessView::shows_disabled`] is true for the owner alone.
+    /// The owner reads it in the trash too, where no member reaches the
+    /// artifact.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::NotFound`] or [`ArtifactError::Unavailable`].
+    pub fn access(&self, actor: &ActorId, id: &ArtifactId) -> Result<AccessView, ArtifactError> {
+        let record = self.owned(actor, id, Need::Read)?;
+        let list = self
+            .store
+            .access_list(id)?
+            .ok_or(ArtifactError::NotFound(Missing::Artifact))?;
+        Ok(AccessView {
+            list,
+            shows_disabled: record.owner == *actor,
+        })
     }
 
     /// Whether `actor`, who may read an artifact, may also make the change

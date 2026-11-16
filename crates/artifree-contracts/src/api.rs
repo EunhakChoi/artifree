@@ -2285,6 +2285,70 @@ pub struct UserList {
     pub users: Vec<UserInfo>,
 }
 
+/// Response of `GET /v1/me`: the caller, so that a user can hand their id to
+/// an owner who shares an artifact with them (decision 0060 rule 6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Me {
+    /// The caller's user id: `local` for the owner profile, otherwise `u-`
+    /// and 32 lowercase hexadecimal digits.
+    pub id: String,
+    /// The caller's label (1-64 characters).
+    pub label: String,
+}
+
+/// What a member of an artifact may do (decision 0060 rule 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum MemberRole {
+    /// Reads, commits source and metadata, and enqueues jobs.
+    Editor,
+    /// Reads, and uses its own data and asset space.
+    Viewer,
+}
+
+/// A user named in an access list: their id and label (decision 0060 rule 8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AccessUser {
+    /// The user's id.
+    pub id: String,
+    /// The user's label.
+    pub label: String,
+}
+
+/// One member of an artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AccessMember {
+    /// The member's id.
+    pub id: String,
+    /// The member's label.
+    pub label: String,
+    /// The member's role.
+    pub role: MemberRole,
+    /// Whether the member's user is disabled: told to the owner only, and
+    /// null in a member's answer (decision 0060 rules 6 and 18). A disabled
+    /// member stays a member; nothing they hold authenticates meanwhile.
+    #[schemars(required, extend("type" = ["boolean", "null"]))]
+    pub disabled: Option<bool>,
+}
+
+/// Response of `GET /v1/artifacts/{id}/access`: who may reach the artifact
+/// (decision 0060 rule 6). Its owner and its members may read it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactAccess {
+    /// The artifact.
+    pub artifact_id: String,
+    /// The artifact's owner.
+    pub owner: AccessUser,
+    /// The members, ordered by user id.
+    pub members: Vec<AccessMember>,
+    /// The artifact's access version, which a change of access is based on.
+    pub access_version: u64,
+}
+
 /// Data of a `change` event of `GET /v1/changes`: one commit that wrote a
 /// revision or changed metadata, one data write that changed the actor's data
 /// space, or one job that was created or changed. Retries that replay a

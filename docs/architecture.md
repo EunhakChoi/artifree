@@ -203,6 +203,8 @@ in the Rust core.
 | `PATCH /v1/artifacts/{id}/data`                                                    | Merge-patch a value (`Idempotency-Key`)                 |
 | `DELETE /v1/artifacts/{id}/data`                                                   | Remove a value (`Idempotency-Key`, JSON body)           |
 | `GET /v1/artifacts/{id}/data/members`                                              | One page of an object's member names (`?path=`)         |
+| `GET /v1/me`                                                                       | The caller's user id and label                          |
+| `GET /v1/artifacts/{id}/access`                                                    | Owner, members with roles, access version (0060)        |
 
 The table lists the main routes. The contract in
 `crates/artifree-contracts/src/api.rs` and the generated schema are

@@ -367,10 +367,17 @@ pub fn make_member(
         created_at: "2026-11-16T00:00:00Z".to_owned(),
     })?;
     let store = SqliteStore::open(database)?;
-    let base = store
-        .access_list(artifact)?
-        .ok_or("the artifact has no access list")?
-        .version;
+    // Read directly: the access list names the owner's label, and these
+    // fixtures' owners are often actors no registry holds.
+    let base = artifree_domain::access::AccessVersion(
+        Connection::open(database)?
+            .query_row(
+                "SELECT access_version FROM artifacts WHERE id = ?1",
+                [artifact.as_str()],
+                |row| row.get::<_, i64>(0),
+            )?
+            .try_into()?,
+    );
     store.change_access(AccessRequest {
         request: RequestIdentity {
             actor: owner,

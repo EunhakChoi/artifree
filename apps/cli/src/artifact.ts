@@ -22,6 +22,7 @@ import {
   readRegularFile,
   writeNewFile,
 } from './files.js';
+import { runAccess } from './access.js';
 import { resolveConnection } from './profiles.js';
 
 export { UsageError };
@@ -52,6 +53,7 @@ export const ARTIFACT_HELP = `Usage:
   artifree artifact export <id> --output <file> [--revision <n>]
   artifree artifact preview <id> [--revision <n>] [--build <profile>]
   artifree artifact build-status <id> --build <profile>
+  artifree artifact access list <id> [--json]
 
 Connection:
   --server <url>         API URL [env ARTIFREE_SERVER, ARTIFREE_URL, default http://127.0.0.1:7410]
@@ -128,6 +130,8 @@ the current revision's build: built, pending (job_id names the build job),
 failed (with job_id, failure and diagnostics, whose messages come from the
 bundler), or none (queue one with artifree job enqueue --build). A server
 whose build cannot build the profile refuses both with 422 profile_unknown.
+access list prints the owner and the members with their roles; see
+artifree artifact access --help.
 
 create, save, edit, restore, duplicate, rename, pin, unpin, delete, recover, and
 purge accept --idempotency-key <key>. Without it a new key is
@@ -229,6 +233,8 @@ export async function runArtifact(args: string[]): Promise<void> {
       return preview(rest);
     case 'build-status':
       return buildStatus(rest);
+    case 'access':
+      return runAccess(rest);
     default:
       throw new UsageError(
         `Unknown artifact command: ${command}. Use artifree artifact --help.`,

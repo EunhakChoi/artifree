@@ -157,6 +157,7 @@ fn a_grant_a_role_change_and_a_revocation_each_raise_the_version() -> TestResult
         fixture.members()?,
         [Member {
             user: ana.clone(),
+            label: "Ana".parse()?,
             role: Role::Viewer,
             disabled: false
         }]
@@ -283,6 +284,7 @@ fn a_disabled_member_stays_a_member_and_its_role_can_change() -> TestResult {
         fixture.members()?,
         [Member {
             user: ana.clone(),
+            label: "Ana".parse()?,
             role: Role::Viewer,
             disabled: true
         }]
