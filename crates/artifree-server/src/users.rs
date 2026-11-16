@@ -38,7 +38,7 @@ fn info(record: UserRecord) -> UserInfo {
     }
 }
 
-fn store_error(error: UserStoreError) -> ApiError {
+pub(crate) fn store_error(error: UserStoreError) -> ApiError {
     match error {
         UserStoreError::NotFound(_) => ApiError::not_found("user"),
         UserStoreError::Conflict(message) => ApiError::conflict(message),

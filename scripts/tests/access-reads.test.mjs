@@ -148,3 +148,30 @@ test('the CLI access commands reject bad arguments before any request', () => {
     assert.equal(result.stdout, '');
   }
 });
+
+test('CLI access help is printed after the command, and only on its own', () => {
+  const cli = (...args) =>
+    spawnSync(process.execPath, ['apps/cli/dist/main.js', ...args], {
+      cwd: root,
+      encoding: 'utf8',
+      env: { ...process.env, ARTIFREE_URL: 'http://127.0.0.1:9' },
+      timeout: 10_000,
+    });
+  for (const args of [
+    ['artifact', 'access', '--help'],
+    ['artifact', 'access', 'list', '--help'],
+  ]) {
+    const result = cli(...args);
+    assert.equal(result.status, 0, args.join(' '));
+    assert.match(result.stdout, /artifree artifact access list <id>/);
+  }
+  assert.match(cli('me', '--help').stdout, /artifree me \[--json\]/);
+  for (const args of [
+    ['me', '--json', '--help'],
+    ['artifact', 'access', 'list', artifactId, '--help'],
+  ]) {
+    const result = cli(...args);
+    assert.notEqual(result.status, 0, args.join(' '));
+    assert.match(result.stderr, /on its own/, args.join(' '));
+  }
+});

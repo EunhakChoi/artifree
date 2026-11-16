@@ -4,7 +4,7 @@
 //! Changing access (grant, role change, revoke) is not part of this slice.
 //! Each read reveals only what rule 8 allows: an owner and the members of one
 //! artifact see each other's id, label and role there, and only the owner is
-//! told which members are disabled.
+//! told which members are disabled; the application core decides both.
 
 use artifree_contracts::api::{AccessMember, AccessUser, ArtifactAccess, Me, MemberRole};
 use artifree_core::artifacts::AccessView;
@@ -17,6 +17,7 @@ use axum::{Json, Router};
 
 use crate::http::{AppState, Authenticated};
 use crate::operations::{self, ApiError};
+use crate::users;
 
 /// Routes for the access reads.
 pub(crate) fn routes() -> Router<AppState> {
@@ -36,7 +37,7 @@ async fn me(
     let user = state
         .identity(move |store| store.user(&id))
         .await?
-        .map_err(|error| ApiError::unavailable(error.to_string()))?
+        .map_err(users::store_error)?
         // A caller authenticated, so its user exists; one removed meanwhile
         // is answered as a token nobody issued.
         .ok_or_else(ApiError::unauthenticated)?;
@@ -64,17 +65,13 @@ async fn read_access(
 }
 
 fn access_body(artifact_id: String, view: AccessView) -> ArtifactAccess {
-    let AccessView {
-        list,
-        shows_disabled,
-    } = view;
     ArtifactAccess {
         artifact_id,
         owner: AccessUser {
-            id: list.owner.to_string(),
-            label: list.owner_label.to_string(),
+            id: view.owner.to_string(),
+            label: view.owner_label.to_string(),
         },
-        members: list
+        members: view
             .members
             .into_iter()
             .map(|member| AccessMember {
@@ -84,9 +81,9 @@ fn access_body(artifact_id: String, view: AccessView) -> ArtifactAccess {
                     Role::Editor => MemberRole::Editor,
                     Role::Viewer => MemberRole::Viewer,
                 },
-                disabled: shows_disabled.then_some(member.disabled),
+                disabled: member.disabled,
             })
             .collect(),
-        access_version: list.version.0,
+        access_version: view.version.0,
     }
 }

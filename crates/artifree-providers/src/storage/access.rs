@@ -370,28 +370,29 @@ impl AccessStore for SqliteStore {
         let mut connection = self.connect()?;
         // One snapshot: the owner, the version and the members agree.
         let snapshot = connection.transaction().map_err(unavailable)?;
-        let head: Option<(String, i64, Option<String>)> = snapshot
+        let head: Option<(String, i64, Option<String>, bool)> = snapshot
             .query_row(
-                "SELECT a.owner, a.access_version, u.label
+                "SELECT a.owner, a.access_version, u.label, a.deleted_at IS NOT NULL
                  FROM artifacts a LEFT JOIN users u ON u.id = a.owner
                  WHERE a.id = ?1 AND a.purged_at IS NULL",
                 [artifact.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()
             .map_err(unavailable)?;
-        let Some((owner, version, owner_label)) = head else {
+        let Some((owner, version, owner_label, in_trash)) = head else {
             return Ok(None);
         };
-        // Every owner is a registered user (0036); a missing row is damage.
+        // Artifacts and members name actors as text (0036), so an actor the
+        // registry never saw is listed under its id, never left out.
         let owner_label = owner_label
-            .ok_or_else(|| corrupt("an artifact's owner is not a user"))?
+            .unwrap_or_else(|| owner.clone())
             .parse()
             .map_err(corrupt)?;
-        let rows: Vec<(String, String, String, bool)> = snapshot
+        let rows: Vec<(String, Option<String>, String, bool)> = snapshot
             .prepare(
                 "SELECT m.user_id, u.label, m.role, u.disabled_at IS NOT NULL
-                 FROM artifact_members m JOIN users u ON u.id = m.user_id
+                 FROM artifact_members m LEFT JOIN users u ON u.id = m.user_id
                  WHERE m.artifact_id = ?1 AND m.role IS NOT NULL
                  ORDER BY m.user_id",
             )
@@ -407,7 +408,10 @@ impl AccessStore for SqliteStore {
             .map(|(user, label, role, disabled)| {
                 Ok(Member {
                     user: user.parse().map_err(corrupt)?,
-                    label: label.parse().map_err(corrupt)?,
+                    label: label
+                        .unwrap_or_else(|| user.clone())
+                        .parse()
+                        .map_err(corrupt)?,
                     role: role.parse().map_err(corrupt)?,
                     disabled,
                 })
@@ -417,6 +421,7 @@ impl AccessStore for SqliteStore {
             owner: owner.parse().map_err(corrupt)?,
             owner_label,
             members,
+            in_trash,
             version: AccessVersion(count(version)?),
         }))
     }

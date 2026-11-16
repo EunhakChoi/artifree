@@ -513,24 +513,4 @@ owner, an editor and a viewer, and
 guard is broken. Not in S02d4: the shared space's write capabilities as
 rule 10 declares them (S02f).
 
-**S02e1 (implemented).** The reads of rule 6. `GET /v1/me` answers the
-caller's id and label to every authenticated caller, an agent token of the
-owner profile included; it names no artifact. `GET /v1/artifacts/{id}/access`
-answers the owner (id and label), the members ordered by user id (id, label,
-role) and the `access_version`, through `ArtifactService::access`, which
-checks the caller's access as every read does (rule 4): a user who is
-neither owner nor member, and a member while the artifact is in the trash,
-gets the `404` of an unknown artifact; the owner reads it in the trash too.
-Each member carries `disabled`, which is rule 18's mark in the owner's
-answer and `null` in a member's, so a member learns no more about another
-member than rule 8 allows. The store reads the labels with the list, in one
-transaction. Contract 0.35.0 adds `Me`, `ArtifactAccess` and the wire
-`MemberRole`; the TypeScript client gains `readMe` and `readAccess`, and the
-CLI `artifree me` and `artifree artifact access list <id> [--json]`. The
-isolation table of `multi_user.rs` walks the access route as another user.
-Behavioural tests (`crates/artifree-server/tests/access_reads.rs`, and
-`scripts/tests/access-reads.test.mjs` for the client's parsers and the CLI)
-fail when each guard is broken. Not in S02e1: the routes that grant, change
-or revoke a role, and what a revocation or a downgrade removes from memory
-(S02e2); listings with the caller's role, and the role in MCP read tools
-(S02e3).
+**S02e1 (implemented).** The reads of rule 6. `GET /v1/me` answers the caller's id and label to every authenticated caller, an agent token of the owner profile included; it names no artifact. `GET /v1/artifacts/{id}/access` answers the owner (id and label), the members ordered by user id (id, label, role) and the `access_version`, through `ArtifactService::access`, which checks the caller's access as every read does (rule 4): a user who is neither owner nor member, and a member while the artifact is in the trash, gets the `404` of an unknown artifact; the owner reads it in the trash too. Access is checked again against the list, which the store reads in one snapshot with whether the artifact is in the trash, so a member revoked, or an artifact moved to the trash, between the first check and the read is not found rather than shown the list. Each member carries `disabled`, which is rule 18's mark in the owner's answer and `null` in a member's, so a member learns no more about another member than rule 8 allows. The store reads the labels with the list, in one transaction; an owner whom no registry holds, which 0036 lets a database name, is listed under its id. The core decides what each caller is told, so every adapter shows the same. Contract 0.35.0 adds `Me`, `ArtifactAccess` and the wire `MemberRole`; the TypeScript client gains `readMe` and `readAccess`, and the CLI `artifree me` and `artifree artifact access list <id> [--json]`. The isolation table of `multi_user.rs` walks the access route as another user. Behavioural tests (`crates/artifree-server/tests/access_reads.rs`, `the_access_list_is_checked_again_against_its_own_snapshot` in the core, `the_list_names_the_owner_and_whether_the_artifact_is_in_the_trash` in `crates/artifree-providers/tests/access.rs`, and `scripts/tests/access-reads.test.mjs` for the client's parsers and the CLI) fail when each guard is broken. Not in S02e1: the routes that grant, change or revoke a role, and what a revocation or a downgrade removes from memory (S02e2); listings with the caller's role, and the role in MCP read tools (S02e3).

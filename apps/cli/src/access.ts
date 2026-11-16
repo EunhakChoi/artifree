@@ -41,8 +41,9 @@ function options(args: string[]) {
   });
 }
 
+/** Whether `args` ask for help, wherever the flag stands. */
 function isHelp(args: string[]): boolean {
-  return args[0] === '--help' || args[0] === '-h';
+  return args.includes('--help') || args.includes('-h');
 }
 
 /** Runs `artifree me`. */
@@ -65,8 +66,9 @@ export async function runMe(args: string[]): Promise<void> {
 export async function runAccess(args: string[]): Promise<void> {
   const [subcommand, ...rest] = args;
   if (subcommand === undefined || isHelp(args)) {
-    if (rest.length > 0)
-      throw new UsageError('--help must be used on its own.');
+    // `access --help` and `access list --help`, and nothing else beside it.
+    const own = subcommand === 'list' ? rest : args;
+    if (own.length > 1) throw new UsageError('--help must be used on its own.');
     process.stdout.write(ACCESS_HELP);
     return;
   }
