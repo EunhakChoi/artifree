@@ -310,19 +310,19 @@ S02 is complete only with behavioural tests, proven by mutation, for:
 
 S02 is split into slices, each its own pull request, in this order:
 
-| Slice | Rules                 | What it adds                                                                                                             | State                                   |
-| ----- | --------------------- | ------------------------------------------------------------------------------------------------------------------------ | --------------------------------------- |
-| S02a  | 1, 6 and 16 (storage) | Schema 18: `artifact_members`, `access_requests`, `artifacts.access_version`; the `AccessStore` port                     | implemented                             |
-| S02b  | 2 to 5, 9, 11, 17     | The core's access and role checks on every artifact operation, read again in the committing transaction                  | implemented, except as its section says |
-| S02c  | 13, 14                | Feed delivery to every reader and the access change rows                                                                 | implemented                             |
-| S02d1 | 11, 15 (jobs), 17     | The queued jobs a revocation and a downgrade take, the owner's cancel, and member replays in the store                   | implemented                             |
-| S02d2 | 15 (memory, trash)    | What the trash removes from runtime memory, and the closure a revocation will call                                       | implemented                             |
-| S02d3 | 16 (memory)           | The confirmations against the access generation of what a request registers                                              | implemented                             |
-| S02d4 | 3 (runtime), 18       | Runtime capabilities offered by role; the disabled mark, which the S02a store already returns                            | implemented                             |
-| S02e  | 6 to 8                | `/v1/me`, the access routes, listings with roles, the CLI and the contract; what a downgrade removes from runtime memory | not implemented                         |
-| S02f  | 10                    | The declared shared space                                                                                                | not implemented                         |
-| S02g  | 12                    | Rooms per artifact                                                                                                       | not implemented                         |
-| S02h  | Acceptance (web)      | The web workspace's sharing                                                                                              | not implemented                         |
+| Slice | Rules                   | What it adds                                                                                                             | State                                    |
+| ----- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------- |
+| S02a  | 1, 6 and 16 (storage)   | Schema 18: `artifact_members`, `access_requests`, `artifacts.access_version`; the `AccessStore` port                     | implemented                              |
+| S02b  | 2 to 5, 9, 11, 17       | The core's access and role checks on every artifact operation, read again in the committing transaction                  | implemented, except as its section says  |
+| S02c  | 13, 14                  | Feed delivery to every reader and the access change rows                                                                 | implemented                              |
+| S02d1 | 11, 15 (jobs), 17       | The queued jobs a revocation and a downgrade take, the owner's cancel, and member replays in the store                   | implemented                              |
+| S02d2 | 15 (memory, trash)      | What the trash removes from runtime memory, and the closure a revocation will call                                       | implemented                              |
+| S02d3 | 16 (memory)             | The confirmations against the access generation of what a request registers                                              | implemented                              |
+| S02d4 | 3 (runtime), 18 (store) | Runtime capabilities offered by role; the disabled mark the store returns                                                | implemented; the mark is shown with S02e |
+| S02e  | 6 to 8                  | `/v1/me`, the access routes, listings with roles, the CLI and the contract; what a downgrade removes from runtime memory | not implemented                          |
+| S02f  | 10                      | The declared shared space                                                                                                | not implemented                          |
+| S02g  | 12                      | Rooms per artifact                                                                                                       | not implemented                          |
+| S02h  | Acceptance (web)        | The web workspace's sharing                                                                                              | not implemented                          |
 
 Nothing reaches a member's access before S02e exposes the routes, and S02e
 waits for S02b to S02d4, so no slice opens an artifact to another user without
@@ -490,17 +490,22 @@ and the routes that change access (S02e).
 every capability except `source.write`. Its runtime view leaves
 `source.write` out of `supported`, so the workspace shows a declared
 `source.write` as not available. A grant that asks for it is not refused,
-but `source.write` is left out of what is granted. The role is read with the
+but `source.write` is left out of what is granted; the next runtime view
+reports what was granted. A view reports a grant only as the caller's role
+offers it now, so a grant an editor held before a downgrade never shows
+`source.write` beside a `supported` without it. The role is read with the
 runtime view's or grant's access check through `ArtifactService::allows`.
 Every runtime source write still checks the current role in the committing
 transaction (S02b), so a grant that an editor holds when downgraded writes
 nothing; removing that grant from memory comes with the role route (S02e).
 Rule 18's mark is the `disabled` flag that the S02a store already returns
 with each member (`a_disabled_member_stays_a_member_and_its_role_can_change`
-in `crates/artifree-providers/tests/access.rs`); the owner sees it with the
-access list route (S02e). A disabled member's grants are kept, and nothing
+in `crates/artifree-providers/tests/access.rs`); the access list that marks
+them for the owner is a route of S02e, so rule 18's mark is not visible yet. A disabled member's grants are kept, and nothing
 they hold authenticates while they are disabled (S01). Behavioural tests
-(`a_viewer_is_offered_every_capability_but_source_write` in
+(`a_viewer_is_offered_every_capability_but_source_write`, which walks the
+owner, an editor and a viewer, and
+`a_downgraded_editors_view_reports_only_what_a_viewer_is_offered`, in
 `runtime_tests.rs`, and a unit test in `runtime_policy.rs`) fail when each
 guard is broken. Not in S02d4: the shared space's write capabilities as
 rule 10 declares them (S02f).

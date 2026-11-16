@@ -1495,7 +1495,10 @@ pub struct SetRuntimeGrantRequest {
     pub head_revision: u64,
     /// Version observed before the change.
     pub expected_version: u64,
-    /// Complete supported subset; an empty list revokes every capability.
+    /// Complete supported subset; an empty list revokes every capability. A
+    /// capability the caller's role does not offer (`source.write` for a
+    /// viewer) is accepted and left out of the grant; the next runtime view
+    /// reports what was granted.
     pub capabilities: Vec<String>,
 }
 

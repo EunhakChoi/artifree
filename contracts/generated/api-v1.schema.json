@@ -3783,7 +3783,7 @@
       "description": "Replaces the grant only if the user observed the same source and grant.",
       "properties": {
         "capabilities": {
-          "description": "Complete supported subset; an empty list revokes every capability.",
+          "description": "Complete supported subset; an empty list revokes every capability. A\ncapability the caller's role does not offer (`source.write` for a\nviewer) is accepted and left out of the grant; the next runtime view\nreports what was granted.",
           "items": {
             "type": "string"
           },

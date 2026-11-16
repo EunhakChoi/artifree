@@ -1047,7 +1047,10 @@ export interface RuntimeView {
  */
 export interface SetRuntimeGrantRequest {
   /**
-   * Complete supported subset; an empty list revokes every capability.
+   * Complete supported subset; an empty list revokes every capability. A
+   * capability the caller's role does not offer (`source.write` for a
+   * viewer) is accepted and left out of the grant; the next runtime view
+   * reports what was granted.
    */
   capabilities: string[];
   /**

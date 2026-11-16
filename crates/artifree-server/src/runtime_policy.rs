@@ -123,6 +123,11 @@ impl CapabilitySet {
         }
     }
 
+    /// The capabilities in both sets.
+    pub(crate) fn and(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+
     pub(crate) fn contains(self, capability: Capability) -> bool {
         self.0 & capability.bit() != 0
     }
@@ -238,17 +243,10 @@ impl RuntimePolicy {
         self.lifecycle
     }
 
-    /// The capabilities the server supports for a caller whose role offers
-    /// `offered`; the others are shown as not available (decision 0060 rule
-    /// 3).
-    pub(crate) fn supported_for(offered: CapabilitySet) -> Vec<String> {
-        offered.names()
-    }
-
     /// Every capability the server supports, as an owner is offered them.
     #[cfg(test)]
     pub(crate) fn supported() -> Vec<String> {
-        Self::supported_for(CapabilitySet::offered(true))
+        CapabilitySet::offered(true).names()
     }
 
     /// The set a user may grant, or `None` when `requested` names a
@@ -269,7 +267,7 @@ impl RuntimePolicy {
             }
             set.0 |= capability.bit();
         }
-        Some(CapabilitySet(set.0 & offered.0))
+        Some(set.and(offered))
     }
 
     /// [`Self::grant_for`] as an owner is offered capabilities.
@@ -301,13 +299,33 @@ mod tests {
 
     #[test]
     fn a_caller_who_may_not_change_is_offered_all_but_source_write() {
-        let viewer = CapabilitySet::offered(false);
-        assert!(!viewer.contains(Capability::SourceWrite));
         assert_eq!(
-            RuntimePolicy::supported_for(viewer).len() + 1,
-            RuntimePolicy::supported().len()
+            CapabilitySet::offered(false).names(),
+            [
+                ASSETS_DOWNLOAD,
+                ASSETS_READ,
+                ASSETS_WRITE,
+                DATA_READ,
+                DATA_WRITE,
+                METADATA_READ,
+                SOURCE_DOWNLOAD,
+                SOURCE_READ,
+            ]
         );
-        assert!(CapabilitySet::offered(true).contains(Capability::SourceWrite));
+        assert_eq!(
+            CapabilitySet::offered(true).names(),
+            [
+                ASSETS_DOWNLOAD,
+                ASSETS_READ,
+                ASSETS_WRITE,
+                DATA_READ,
+                DATA_WRITE,
+                METADATA_READ,
+                SOURCE_DOWNLOAD,
+                SOURCE_READ,
+                SOURCE_WRITE,
+            ]
+        );
     }
 
     #[test]

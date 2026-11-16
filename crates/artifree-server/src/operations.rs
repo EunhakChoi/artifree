@@ -1547,12 +1547,10 @@ pub(crate) async fn create_runtime_view(
         head_revision: record.current_revision.0,
         sdk: enabled.then(|| SDK_PIN.to_owned()),
         declared: policy.declared(),
-        supported: if enabled {
-            RuntimePolicy::supported_for(offered)
-        } else {
-            Vec::new()
-        },
-        granted: granted.names(),
+        supported: if enabled { offered.names() } else { Vec::new() },
+        // A grant held from a role that offered more (until S02e removes it)
+        // is reported as the role offers it now (decision 0060 rule 3).
+        granted: granted.and(offered).names(),
         grant_version,
         view_id: request.view_id,
         generation: request.generation,
