@@ -926,6 +926,13 @@ fn http_cases() -> Vec<Case> {
             Succeeds,
         ),
         case(
+            "access list",
+            "GET",
+            "/v1/artifacts/{artifact}/access",
+            None,
+            Succeeds,
+        ),
+        case(
             "agent sessions",
             "GET",
             "/v1/agent-sessions?workspace_session_id={session}",
@@ -1294,7 +1301,7 @@ async fn send_case(
 /// Routes that name no artifact. Each has its own caller-scoped or
 /// administrative authorization tests; the type catalog routes read only the
 /// built-in catalog, which is the same for every caller (decision 0059).
-const NOT_ARTIFACT_SCOPED: [&str; 18] = [
+const NOT_ARTIFACT_SCOPED: [&str; 19] = [
     "/mcp",
     "/v1/artifacts",
     "/v1/background",
@@ -1302,6 +1309,7 @@ const NOT_ARTIFACT_SCOPED: [&str; 18] = [
     "/v1/data-outbox/binding",
     "/v1/content/unreferenced",
     "/v1/jobs",
+    "/v1/me",
     "/v1/runtime-sessions",
     "/v1/tokens",
     "/v1/tokens/{}",
@@ -1339,6 +1347,7 @@ fn declared_routes() -> BTreeSet<String> {
     let mut routes = BTreeSet::new();
     let mut prefixes = std::collections::BTreeMap::new();
     for source in [
+        include_str!("../src/access.rs"),
         include_str!("../src/http.rs"),
         include_str!("../src/http/assets.rs"),
         include_str!("../src/http/runtime.rs"),

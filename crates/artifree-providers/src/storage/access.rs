@@ -370,37 +370,48 @@ impl AccessStore for SqliteStore {
         let mut connection = self.connect()?;
         // One snapshot: the owner, the version and the members agree.
         let snapshot = connection.transaction().map_err(unavailable)?;
-        let head: Option<(String, i64)> = snapshot
+        let head: Option<(String, i64, Option<String>, bool)> = snapshot
             .query_row(
-                "SELECT owner, access_version FROM artifacts
-                 WHERE id = ?1 AND purged_at IS NULL",
+                "SELECT a.owner, a.access_version, u.label, a.deleted_at IS NOT NULL
+                 FROM artifacts a LEFT JOIN users u ON u.id = a.owner
+                 WHERE a.id = ?1 AND a.purged_at IS NULL",
                 [artifact.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()
             .map_err(unavailable)?;
-        let Some((owner, version)) = head else {
+        let Some((owner, version, owner_label, in_trash)) = head else {
             return Ok(None);
         };
-        let rows: Vec<(String, String, bool)> = snapshot
+        // Artifacts and members name actors as text (0036), so an actor the
+        // registry never saw is listed under its id, never left out.
+        let owner_label = owner_label
+            .unwrap_or_else(|| owner.clone())
+            .parse()
+            .map_err(corrupt)?;
+        let rows: Vec<(String, Option<String>, String, bool)> = snapshot
             .prepare(
-                "SELECT m.user_id, m.role, u.disabled_at IS NOT NULL
-                 FROM artifact_members m JOIN users u ON u.id = m.user_id
+                "SELECT m.user_id, u.label, m.role, u.disabled_at IS NOT NULL
+                 FROM artifact_members m LEFT JOIN users u ON u.id = m.user_id
                  WHERE m.artifact_id = ?1 AND m.role IS NOT NULL
                  ORDER BY m.user_id",
             )
             .map_err(unavailable)?
             .query_map([artifact.as_str()], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
             })
             .map_err(unavailable)?
             .collect::<Result<_, _>>()
             .map_err(unavailable)?;
         let members = rows
             .into_iter()
-            .map(|(user, role, disabled)| {
+            .map(|(user, label, role, disabled)| {
                 Ok(Member {
                     user: user.parse().map_err(corrupt)?,
+                    label: label
+                        .unwrap_or_else(|| user.clone())
+                        .parse()
+                        .map_err(corrupt)?,
                     role: role.parse().map_err(corrupt)?,
                     disabled,
                 })
@@ -408,7 +419,9 @@ impl AccessStore for SqliteStore {
             .collect::<Result<_, StoreError>>()?;
         Ok(Some(AccessList {
             owner: owner.parse().map_err(corrupt)?,
+            owner_label,
             members,
+            in_trash,
             version: AccessVersion(count(version)?),
         }))
     }

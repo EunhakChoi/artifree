@@ -2,6 +2,7 @@
 import { parseArgs } from 'node:util';
 import { ArtifreeApiError, FileConflictError } from '@artifree/client';
 import { scaffoldDescription } from '@artifree/contracts';
+import { runMe } from './access.js';
 import { runArtifact, UsageError } from './artifact.js';
 import { runAsset } from './asset.js';
 import { runContent } from './content.js';
@@ -19,6 +20,7 @@ Usage:
   artifree content <command>   Find and delete file content no revision refers to (cleanup)
   artifree data <command>      Read and write the application data of an artifact (get, set, update, delete)
   artifree job <command>       Queue, read, list, and cancel verification jobs (enqueue, show, list, cancel)
+  artifree me [--json]         Print the id and label of the user the token belongs to
   artifree token <command>     Manage agent access tokens (list, create, rotate, revoke)
   artifree type <command>      Read the built-in artifact types and their guides (list, show)
   artifree user <command>      Register and manage users (list, create, disable, enable)
@@ -132,6 +134,7 @@ async function main(): Promise<void> {
   else if (args[0] === 'content') await runContent(args.slice(1));
   else if (args[0] === 'data') await runData(args.slice(1));
   else if (args[0] === 'job') await runJob(args.slice(1));
+  else if (args[0] === 'me') await runMe(args.slice(1));
   else if (args[0] === 'token') await runToken(args.slice(1));
   else if (args[0] === 'type') await runType(args.slice(1));
   else if (args[0] === 'user') await runUser(args.slice(1));

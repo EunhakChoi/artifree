@@ -1,5 +1,56 @@
 {
   "$defs": {
+    "AccessMember": {
+      "additionalProperties": false,
+      "description": "One member of an artifact.",
+      "properties": {
+        "disabled": {
+          "description": "Whether the member's user is disabled: told to the owner only, and\nnull in a member's answer (decision 0060 rules 6 and 18). A disabled\nmember stays a member; nothing they hold authenticates meanwhile.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "The member's id.",
+          "type": "string"
+        },
+        "label": {
+          "description": "The member's label.",
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/MemberRole",
+          "description": "The member's role."
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "role",
+        "disabled"
+      ],
+      "type": "object"
+    },
+    "AccessUser": {
+      "additionalProperties": false,
+      "description": "A user named in an access list: their id and label (decision 0060 rule 8).",
+      "properties": {
+        "id": {
+          "description": "The user's id.",
+          "type": "string"
+        },
+        "label": {
+          "description": "The user's label.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ],
+      "type": "object"
+    },
     "AdoptRuntimeView": {
       "additionalProperties": false,
       "description": "The live generation whose frame an adoption keeps (decision 0054, rule 3).",
@@ -167,6 +218,40 @@
         "deleted_at_ms",
         "created_at_ms",
         "updated_at_ms"
+      ],
+      "type": "object"
+    },
+    "ArtifactAccess": {
+      "additionalProperties": false,
+      "description": "Response of `GET /v1/artifacts/{id}/access`: who may reach the artifact\n(decision 0060 rule 6). Its owner and its members may read it.",
+      "properties": {
+        "access_version": {
+          "description": "The artifact's access version, which a change of access is based on.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "artifact_id": {
+          "description": "The artifact.",
+          "type": "string"
+        },
+        "members": {
+          "description": "The members, ordered by user id.",
+          "items": {
+            "$ref": "#/$defs/AccessMember"
+          },
+          "type": "array"
+        },
+        "owner": {
+          "$ref": "#/$defs/AccessUser",
+          "description": "The artifact's owner."
+        }
+      },
+      "required": [
+        "artifact_id",
+        "owner",
+        "members",
+        "access_version"
       ],
       "type": "object"
     },
@@ -2304,6 +2389,40 @@
         {
           "const": "created",
           "description": "The most recently created first.",
+          "type": "string"
+        }
+      ]
+    },
+    "Me": {
+      "additionalProperties": false,
+      "description": "Response of `GET /v1/me`: the caller, so that a user can hand their id to\nan owner who shares an artifact with them (decision 0060 rule 6).",
+      "properties": {
+        "id": {
+          "description": "The caller's user id: `local` for the owner profile, otherwise `u-`\nand 32 lowercase hexadecimal digits.",
+          "type": "string"
+        },
+        "label": {
+          "description": "The caller's label (1-64 characters).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ],
+      "type": "object"
+    },
+    "MemberRole": {
+      "description": "What a member of an artifact may do (decision 0060 rule 3).",
+      "oneOf": [
+        {
+          "const": "editor",
+          "description": "Reads, commits source and metadata, and enqueues jobs.",
+          "type": "string"
+        },
+        {
+          "const": "viewer",
+          "description": "Reads, and uses its own data and asset space.",
           "type": "string"
         }
       ]
@@ -4723,6 +4842,12 @@
     },
     {
       "$ref": "#/$defs/UserList"
+    },
+    {
+      "$ref": "#/$defs/Me"
+    },
+    {
+      "$ref": "#/$defs/ArtifactAccess"
     },
     {
       "$ref": "#/$defs/EnqueueJobRequest"

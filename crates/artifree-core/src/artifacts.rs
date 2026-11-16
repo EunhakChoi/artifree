@@ -20,7 +20,7 @@ use artifree_domain::AppDataVersion;
 use artifree_domain::artifact_type::TypeId;
 use artifree_domain::change::ChangeSequence;
 use artifree_domain::data::DataError;
-use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title};
+use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, UserLabel};
 use artifree_domain::job::JobState;
 use artifree_domain::package::{FileChange, FilePackage, FileSet, PackageError, PackagePath};
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
@@ -38,7 +38,35 @@ use crate::catalog::{Catalog, Release};
 use crate::listing::{self, ArtifactPage, ListQuery};
 use crate::parts::{self, Boundary, ByteRange, FilePart, RangeError};
 use crate::policy;
-use artifree_domain::access::{AccessGeneration, Need};
+use artifree_domain::access::{AccessGeneration, AccessVersion, Need, Role};
+
+/// An artifact's access list as one caller may see it (decision 0060 rules 6
+/// and 8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessView {
+    /// The artifact's owner.
+    pub owner: ActorId,
+    /// The owner's label.
+    pub owner_label: UserLabel,
+    /// The members, ordered by user id.
+    pub members: Vec<MemberView>,
+    /// The artifact's access version.
+    pub version: AccessVersion,
+}
+
+/// One member of an access list as one caller may see it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberView {
+    /// The member.
+    pub user: ActorId,
+    /// The member's label.
+    pub label: UserLabel,
+    /// The member's role.
+    pub role: Role,
+    /// Whether the member's user is disabled, told to the owner only:
+    /// `None` for anyone else (decision 0060 rules 8 and 18).
+    pub disabled: Option<bool>,
+}
 
 /// What could not be found. Inaccessible artifacts are reported as missing so
 /// that callers cannot probe for identifiers they may not read.
@@ -986,6 +1014,46 @@ impl<S: ArtifactStore + AccessStore> ArtifactService<S> {
         self.authorized(actor, id)
     }
 
+    /// The access list of an artifact the actor owns or is a member of
+    /// (decision 0060 rule 6). Only the owner is told which members are
+    /// disabled; for anyone else each [`MemberView::disabled`] is `None`
+    /// (rules 8 and 18). The owner reads it in the trash too, where no
+    /// member reaches the artifact. Access is checked again against the
+    /// list itself, which the store reads in one snapshot, so a member
+    /// revoked, or an artifact moved to the trash, after the first check
+    /// is not found rather than shown the list.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::NotFound`] or [`ArtifactError::Unavailable`].
+    pub fn access(&self, actor: &ActorId, id: &ArtifactId) -> Result<AccessView, ArtifactError> {
+        self.owned(actor, id, Need::Read)?;
+        let list = self
+            .store
+            .access_list(id)?
+            .ok_or(ArtifactError::NotFound(Missing::Artifact))?;
+        let is_owner = list.owner == *actor;
+        let is_member = !list.in_trash && list.members.iter().any(|member| member.user == *actor);
+        if !is_owner && !is_member {
+            return Err(ArtifactError::NotFound(Missing::Artifact));
+        }
+        Ok(AccessView {
+            owner: list.owner,
+            owner_label: list.owner_label,
+            members: list
+                .members
+                .into_iter()
+                .map(|member| MemberView {
+                    user: member.user,
+                    label: member.label,
+                    role: member.role,
+                    disabled: is_owner.then_some(member.disabled),
+                })
+                .collect(),
+            version: list.version,
+        })
+    }
+
     /// Whether `actor`, who may read an artifact, may also make the change
     /// `need` names on it, without making one: what a runtime surface offers
     /// by role (decision 0060 rule 3).
@@ -1539,17 +1607,24 @@ mod tests {
     /// A store whose artifact is in place for the authorization check and gone
     /// for every read after it: what a reader sees when a purge commits
     /// between the two (decision 0029). Writes are not used.
+    /// With `role` and `list`, it is instead a store whose member passes the
+    /// first access check and whose access list is read after a change of
+    /// access: the list's own snapshot.
     struct PurgedAfterTheCheck {
         record: ArtifactRecord,
+        role: Option<Role>,
+        list: Option<AccessList>,
     }
 
-    /// Only the owner is asked about, so no one is a member.
     impl AccessStore for PurgedAfterTheCheck {
         fn access_list(&self, _: &ArtifactId) -> Result<Option<AccessList>, StoreError> {
-            Err(StoreError::Unavailable("unused".into()))
+            self.list
+                .clone()
+                .map(Some)
+                .ok_or_else(|| StoreError::Unavailable("unused".into()))
         }
         fn member_role(&self, _: &ArtifactId, _: &ActorId) -> Result<Option<Role>, StoreError> {
-            Ok(None)
+            Ok(self.role)
         }
         fn access_generation(
             &self,
@@ -1657,6 +1732,8 @@ mod tests {
                 created_at: artifree_domain::identity::UnixMillis(1),
                 updated_at: artifree_domain::identity::UnixMillis(1),
             },
+            role: None,
+            list: None,
         });
 
         assert_eq!(
@@ -1672,6 +1749,72 @@ mod tests {
             service.export(&owner, &id, SourceRevision(1)).err(),
             Some(ArtifactError::NotFound(Missing::Artifact))
         );
+        Ok(())
+    }
+
+    /// Decision 0060 rules 4 and 8: a member whom the list read after the
+    /// first check no longer names, or who reads it after a move to the
+    /// trash, is not found; only the owner is told who is disabled.
+    #[test]
+    fn the_access_list_is_checked_again_against_its_own_snapshot()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let owner: ActorId = "owner".parse()?;
+        let viewer = ActorId::user([2; 16]);
+        let id: ArtifactId = "art_0123456789abcdef0123456789abcdef".parse()?;
+        let record = ArtifactRecord {
+            id: id.clone(),
+            owner: owner.clone(),
+            kind: ArtifactKind::App,
+            artifact_type: None,
+            title: "Demo".parse()?,
+            pinned: false,
+            current_revision: SourceRevision(1),
+            metadata_revision: MetadataRevision(1),
+            deleted_at: None,
+            created_at: artifree_domain::identity::UnixMillis(1),
+            updated_at: artifree_domain::identity::UnixMillis(1),
+        };
+        let member = artifree_ports::access_store::Member {
+            user: viewer.clone(),
+            label: "Vi".parse()?,
+            role: Role::Viewer,
+            disabled: true,
+        };
+        let owner_label: UserLabel = "Owner".parse()?;
+        let list = |members: Vec<artifree_ports::access_store::Member>, in_trash| AccessList {
+            owner: owner.clone(),
+            owner_label: owner_label.clone(),
+            members,
+            version: AccessVersion(1),
+            in_trash,
+        };
+        let service = |list| {
+            ArtifactService::new(PurgedAfterTheCheck {
+                record: record.clone(),
+                role: Some(Role::Viewer),
+                list: Some(list),
+            })
+        };
+        let hidden = Some(ArtifactError::NotFound(Missing::Artifact));
+        assert_eq!(
+            service(list(Vec::new(), false)).access(&viewer, &id).err(),
+            hidden,
+            "revoked"
+        );
+        assert_eq!(
+            service(list(vec![member.clone()], true))
+                .access(&viewer, &id)
+                .err(),
+            hidden,
+            "in the trash"
+        );
+        let shown = service(list(vec![member.clone()], false));
+        let disabled =
+            |view: AccessView| view.members.iter().map(|m| m.disabled).collect::<Vec<_>>();
+        assert_eq!(disabled(shown.access(&viewer, &id)?), [None]);
+        assert_eq!(disabled(shown.access(&owner, &id)?), [Some(true)]);
+        let trashed = service(list(vec![member], true));
+        assert_eq!(disabled(trashed.access(&owner, &id)?), [Some(true)]);
         Ok(())
     }
 

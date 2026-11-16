@@ -17,9 +17,10 @@ Connection:
   --profile-file <path>  Path to profile configuration file [env ARTIFREE_PROFILES_FILE]
 
 Every command needs the owner profile's bootstrap token; a token issued to any
-user is refused. A user owns its own artifacts and sees no one else's. There
-are no roles and no sharing, and a user holds no credential until a token is
-issued for it: artifree token create <name> --user <id>.
+user is refused. A user owns its own artifacts and reaches another user's only
+as a member (artifree artifact access list <id>); no command grants a role
+yet. A user holds no credential until a token is issued for it:
+artifree token create <name> --user <id>, and artifree me prints its id.
 
 Subcommands:
   list     List the registered users, the owner first.

@@ -13,7 +13,7 @@
 use std::fmt;
 
 use artifree_domain::access::{AccessGeneration, AccessVersion, Role};
-use artifree_domain::identity::{ActorId, ArtifactId, UnixMillis};
+use artifree_domain::identity::{ActorId, ArtifactId, UnixMillis, UserLabel};
 
 use crate::artifact_store::{Delivery, RequestIdentity, StoreError};
 
@@ -22,6 +22,9 @@ use crate::artifact_store::{Delivery, RequestIdentity, StoreError};
 pub struct Member {
     /// The member.
     pub user: ActorId,
+    /// The member's label, which the owner and members see (0060 rule 8),
+    /// or the member's id for an actor the registry never saw.
+    pub label: UserLabel,
     /// What the member may do (0060 rule 3).
     pub role: Role,
     /// Whether the member's user is disabled now (0060 rule 18). Only the
@@ -34,10 +37,15 @@ pub struct Member {
 pub struct AccessList {
     /// The artifact's owner.
     pub owner: ActorId,
+    /// The owner's label, or the owner's id for an actor the registry never
+    /// saw (decision 0036 lets a database name one).
+    pub owner_label: UserLabel,
     /// The members, ordered by user id.
     pub members: Vec<Member>,
     /// The artifact's access version.
     pub version: AccessVersion,
+    /// Whether the artifact is in the trash, where no member reaches it.
+    pub in_trash: bool,
 }
 
 /// What a change of access does to one user.

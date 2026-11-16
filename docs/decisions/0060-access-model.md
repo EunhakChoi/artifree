@@ -4,9 +4,10 @@ Date: 2026-11-16. Status: **accepted as S02's design (S02s). S02a (the
 stored part of rules 1, 6 and 16: members, roles, the access version and
 the access generation, schema 18), S02b (the core's and the store's role
 checks of rules 2 to 5, 9 and 17) and S02c (the feed of rules 13 and 14,
-schema 19, contract 0.34.0) are implemented; no route grants a role yet, so
-no request reaches them as a member, and every other rule is not
-implemented.**
+schema 19, contract 0.34.0) are implemented, as are the slices S02d1 to S02d4
+and S02e1 (the access reads, contract 0.35.0) that the implementation status
+lists; no route grants a role yet, so no request reaches them as a member, and
+every other rule is not implemented.**
 Roadmap: S02s, S02.
 
 > Builds on [0036](0036-multi-user-identity.md) (users, tokens, isolation and
@@ -310,22 +311,24 @@ S02 is complete only with behavioural tests, proven by mutation, for:
 
 S02 is split into slices, each its own pull request, in this order:
 
-| Slice | Rules                   | What it adds                                                                                                             | State                                    |
-| ----- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------- |
-| S02a  | 1, 6 and 16 (storage)   | Schema 18: `artifact_members`, `access_requests`, `artifacts.access_version`; the `AccessStore` port                     | implemented                              |
-| S02b  | 2 to 5, 9, 11, 17       | The core's access and role checks on every artifact operation, read again in the committing transaction                  | implemented, except as its section says  |
-| S02c  | 13, 14                  | Feed delivery to every reader and the access change rows                                                                 | implemented                              |
-| S02d1 | 11, 15 (jobs), 17       | The queued jobs a revocation and a downgrade take, the owner's cancel, and member replays in the store                   | implemented                              |
-| S02d2 | 15 (memory, trash)      | What the trash removes from runtime memory, and the closure a revocation will call                                       | implemented                              |
-| S02d3 | 16 (memory)             | The confirmations against the access generation of what a request registers                                              | implemented                              |
-| S02d4 | 3 (runtime), 18 (store) | Runtime capabilities offered by role; the disabled mark the store returns                                                | implemented; the mark is shown with S02e |
-| S02e  | 6 to 8                  | `/v1/me`, the access routes, listings with roles, the CLI and the contract; what a downgrade removes from runtime memory | not implemented                          |
-| S02f  | 10                      | The declared shared space                                                                                                | not implemented                          |
-| S02g  | 12                      | Rooms per artifact                                                                                                       | not implemented                          |
-| S02h  | Acceptance (web)        | The web workspace's sharing                                                                                              | not implemented                          |
+| Slice | Rules                   | What it adds                                                                                                         | State                                   |
+| ----- | ----------------------- | -------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| S02a  | 1, 6 and 16 (storage)   | Schema 18: `artifact_members`, `access_requests`, `artifacts.access_version`; the `AccessStore` port                 | implemented                             |
+| S02b  | 2 to 5, 9, 11, 17       | The core's access and role checks on every artifact operation, read again in the committing transaction              | implemented, except as its section says |
+| S02c  | 13, 14                  | Feed delivery to every reader and the access change rows                                                             | implemented                             |
+| S02d1 | 11, 15 (jobs), 17       | The queued jobs a revocation and a downgrade take, the owner's cancel, and member replays in the store               | implemented                             |
+| S02d2 | 15 (memory, trash)      | What the trash removes from runtime memory, and the closure a revocation will call                                   | implemented                             |
+| S02d3 | 16 (memory)             | The confirmations against the access generation of what a request registers                                          | implemented                             |
+| S02d4 | 3 (runtime), 18 (store) | Runtime capabilities offered by role; the disabled mark the store returns                                            | implemented                             |
+| S02e1 | 6 (reads), 8, 18 (mark) | `GET /v1/me` and `GET /v1/artifacts/{id}/access`, `artifree me` and `artifree artifact access list`, contract 0.35.0 | implemented                             |
+| S02e2 | 6 (changes), 15         | The grant, role and revoke routes, the CLI's grant and revoke; what a revocation and a downgrade remove from memory  | not implemented                         |
+| S02e3 | 6 (MCP), 7              | Listings with the caller's role, the owner and a filter; the role in MCP read tools                                  | not implemented                         |
+| S02f  | 10                      | The declared shared space                                                                                            | not implemented                         |
+| S02g  | 12                      | Rooms per artifact                                                                                                   | not implemented                         |
+| S02h  | Acceptance (web)        | The web workspace's sharing                                                                                          | not implemented                         |
 
-Nothing reaches a member's access before S02e exposes the routes, and S02e
-waits for S02b to S02d4, so no slice opens an artifact to another user without
+Nothing reaches a member's access before S02e2 exposes the routes that
+grant, and S02e waits for S02b to S02d4, so no slice opens an artifact to another user without
 the checks, the delivery and the revocation that go with it.
 
 **S02a (implemented).** Schema 18 adds `artifact_members` (one row per
@@ -501,7 +504,7 @@ nothing; removing that grant from memory comes with the role route (S02e).
 Rule 18's mark is the `disabled` flag that the S02a store already returns
 with each member (`a_disabled_member_stays_a_member_and_its_role_can_change`
 in `crates/artifree-providers/tests/access.rs`); the access list that marks
-them for the owner is a route of S02e, so rule 18's mark is not visible yet. A disabled member's grants are kept, and nothing
+them for the owner is S02e1's route. A disabled member's grants are kept, and nothing
 they hold authenticates while they are disabled (S01). Behavioural tests
 (`a_viewer_is_offered_every_capability_but_source_write`, which walks the
 owner, an editor and a viewer, and
@@ -509,3 +512,5 @@ owner, an editor and a viewer, and
 `runtime_tests.rs`, and a unit test in `runtime_policy.rs`) fail when each
 guard is broken. Not in S02d4: the shared space's write capabilities as
 rule 10 declares them (S02f).
+
+**S02e1 (implemented).** The reads of rule 6. `GET /v1/me` answers the caller's id and label to every authenticated caller, an agent token of the owner profile included; it names no artifact. `GET /v1/artifacts/{id}/access` answers the owner (id and label), the members ordered by user id (id, label, role) and the `access_version`, through `ArtifactService::access`, which checks the caller's access as every read does (rule 4): a user who is neither owner nor member, and a member while the artifact is in the trash, gets the `404` of an unknown artifact; the owner reads it in the trash too. Access is checked again against the list, which the store reads in one snapshot with whether the artifact is in the trash, so a member revoked, or an artifact moved to the trash, between the first check and the read is not found rather than shown the list. Each member carries `disabled`, which is rule 18's mark in the owner's answer and `null` in a member's, so a member learns no more about another member than rule 8 allows. The store reads the labels with the list, in one transaction; an owner whom no registry holds, which 0036 lets a database name, is listed under its id. The core decides what each caller is told, so every adapter shows the same. Contract 0.35.0 adds `Me`, `ArtifactAccess` and the wire `MemberRole`; the TypeScript client gains `readMe` and `readAccess`, and the CLI `artifree me` and `artifree artifact access list <id> [--json]`. The isolation table of `multi_user.rs` walks the access route as another user. Behavioural tests (`crates/artifree-server/tests/access_reads.rs`, `the_access_list_is_checked_again_against_its_own_snapshot` in the core, `the_list_names_the_owner_and_whether_the_artifact_is_in_the_trash` in `crates/artifree-providers/tests/access.rs`, and `scripts/tests/access-reads.test.mjs` for the client's parsers and the CLI) fail when each guard is broken. Not in S02e1: the routes that grant, change or revoke a role, and what a revocation or a downgrade removes from memory (S02e2); listings with the caller's role, and the role in MCP read tools (S02e3).

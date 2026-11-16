@@ -76,6 +76,8 @@ export type ApiBody =
   | CreateUserRequest
   | UserInfo
   | UserList
+  | Me
+  | ArtifactAccess
   | EnqueueJobRequest
   | EnqueueJobResponse
   | CancelJobResponse
@@ -235,6 +237,10 @@ export type SourceExportFormat = 'artifree.source-export.v1' | 'artifree.source-
  * What exported files need from a host to run as they do in Artifree.
  */
 export type ExportRuntime = 'none' | 'metadata';
+/**
+ * What a member of an artifact may do (decision 0060 rule 3).
+ */
+export type MemberRole = 'editor' | 'viewer';
 /**
  * What a job does (decisions 0030 and 0058). A verification is trusted
  * in-repository code that runs in the Artifree worker process. A build runs
@@ -2104,6 +2110,73 @@ export interface UserList {
    * The users.
    */
   users: UserInfo[];
+}
+/**
+ * Response of `GET /v1/me`: the caller, so that a user can hand their id to
+ * an owner who shares an artifact with them (decision 0060 rule 6).
+ */
+export interface Me {
+  /**
+   * The caller's user id: `local` for the owner profile, otherwise `u-`
+   * and 32 lowercase hexadecimal digits.
+   */
+  id: string;
+  /**
+   * The caller's label (1-64 characters).
+   */
+  label: string;
+}
+/**
+ * Response of `GET /v1/artifacts/{id}/access`: who may reach the artifact
+ * (decision 0060 rule 6). Its owner and its members may read it.
+ */
+export interface ArtifactAccess {
+  /**
+   * The artifact's access version, which a change of access is based on.
+   */
+  access_version: number;
+  /**
+   * The artifact.
+   */
+  artifact_id: string;
+  /**
+   * The members, ordered by user id.
+   */
+  members: AccessMember[];
+  owner: AccessUser;
+}
+/**
+ * One member of an artifact.
+ */
+export interface AccessMember {
+  /**
+   * Whether the member's user is disabled: told to the owner only, and
+   * null in a member's answer (decision 0060 rules 6 and 18). A disabled
+   * member stays a member; nothing they hold authenticates meanwhile.
+   */
+  disabled: boolean | null;
+  /**
+   * The member's id.
+   */
+  id: string;
+  /**
+   * The member's label.
+   */
+  label: string;
+  role: MemberRole;
+}
+/**
+ * A user named in an access list: their id and label (decision 0060 rule 8).
+ */
+export interface AccessUser {
+  /**
+   * The user's id.
+   */
+  id: string;
+  /**
+   * The user's label.
+   */
+  label: string;
 }
 /**
  * Body of `POST /v1/artifacts/{id}/jobs`, with an `Idempotency-Key` header:

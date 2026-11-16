@@ -71,8 +71,8 @@ use crate::rooms::{self, ProcessClock, RoomClock, RoomHub, RoomNames};
 use crate::runtime_sessions::RuntimeSessions;
 use crate::supervisor::WorkerStatusHandle;
 use crate::tokens;
-use crate::users;
 use crate::web::WebAssets;
+use crate::{access, users};
 
 use self::unread::Unread;
 
@@ -672,6 +672,7 @@ fn api_v1_routes(state: &AppState) -> Router<AppState> {
         .merge(mcp::routes(state.clone()))
         .merge(tokens::routes())
         .merge(users::routes())
+        .merge(access::routes())
         .merge(job_routes())
         .route("/v1/artifacts", get(list_artifacts).post(create_artifact))
         .route(

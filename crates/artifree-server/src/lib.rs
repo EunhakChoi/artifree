@@ -1,6 +1,7 @@
 //! Composition root: wires the application core to `SQLite` storage, the
 //! Axum HTTP adapters, and the MCP adapter.
 
+mod access;
 pub mod auth;
 pub mod changes;
 mod handoffs;

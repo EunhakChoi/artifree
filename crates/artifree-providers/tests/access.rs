@@ -157,6 +157,7 @@ fn a_grant_a_role_change_and_a_revocation_each_raise_the_version() -> TestResult
         fixture.members()?,
         [Member {
             user: ana.clone(),
+            label: "Ana".parse()?,
             role: Role::Viewer,
             disabled: false
         }]
@@ -283,6 +284,7 @@ fn a_disabled_member_stays_a_member_and_its_role_can_change() -> TestResult {
         fixture.members()?,
         [Member {
             user: ana.clone(),
+            label: "Ana".parse()?,
             role: Role::Viewer,
             disabled: true
         }]
@@ -461,6 +463,34 @@ fn no_member_has_a_role_while_the_artifact_is_in_the_trash() -> TestResult {
             .store
             .member_role(&fixture.created.artifact.id, &ana)?,
         Some(Role::Editor)
+    );
+    Ok(())
+}
+
+/// The list names the owner's label, and an owner that no registry holds,
+/// which decision 0036 lets a database name, under its id rather than as
+/// damage. It says whether the artifact is in the trash, in its snapshot.
+#[test]
+fn the_list_names_the_owner_and_whether_the_artifact_is_in_the_trash() -> TestResult {
+    let fixture = Fixture::new()?;
+    let list = |id: &ArtifactId| -> Result<_, Box<dyn std::error::Error>> {
+        let list = fixture.store.access_list(id)?.ok_or("no access list")?;
+        Ok((list.owner_label.to_string(), list.in_trash))
+    };
+    assert_eq!(
+        list(&fixture.created.artifact.id)?,
+        ("Local owner".to_owned(), false)
+    );
+    fixture.trash("trash", 1, true)?;
+    assert_eq!(
+        list(&fixture.created.artifact.id)?,
+        ("Local owner".to_owned(), true)
+    );
+    let ghost = actor("ghost");
+    let unregistered = create_demo(&fixture.store, &ghost, &key("ghost"), "Ghost", "<p>g</p>")?;
+    assert_eq!(
+        list(&unregistered.artifact.id)?,
+        ("ghost".to_owned(), false)
     );
     Ok(())
 }

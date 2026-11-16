@@ -244,5 +244,5 @@ test('CLI user --help documents who may manage users', () => {
   assert.equal(result.status, 0);
   assert.match(result.stdout, /artifree user create <label>/);
   assert.match(result.stdout, /bootstrap token/);
-  assert.match(result.stdout, /no roles and no sharing/);
+  assert.match(result.stdout, /no command grants a role/);
 });
