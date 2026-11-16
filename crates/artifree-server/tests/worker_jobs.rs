@@ -26,9 +26,9 @@ use artifree_ports::access_store::{
 };
 use artifree_ports::artifact_store::{
     ArtifactListing, ArtifactRecord, ArtifactStore, ChangePage, CleanupReceipt, CleanupRequest,
-    CommitReceipt, ConditionalCommit, MetadataReceipt, MetadataUpdate, NewArtifact, PurgeReceipt,
-    PurgeRequest, RequestFingerprint, RequestIdentity, RevisionCommit, RevisionRecord, StoreError,
-    UnreferencedContent,
+    CommitReceipt, ConditionalCommit, ListedArtifact, MetadataReceipt, MetadataUpdate, NewArtifact,
+    PurgeReceipt, PurgeRequest, RequestFingerprint, RequestIdentity, RevisionCommit,
+    RevisionRecord, StoreError, UnreferencedContent,
 };
 use artifree_ports::job_store::{
     AttemptRow, Checkpoint, Claim, JobCancel, JobClaim, JobListing, JobReceipt, JobRecord,
@@ -170,7 +170,7 @@ impl ArtifactStore for Flaky {
     fn list_artifacts(
         &self,
         listing: ArtifactListing<'_>,
-    ) -> Result<Vec<ArtifactRecord>, StoreError> {
+    ) -> Result<Vec<ListedArtifact>, StoreError> {
         self.inner.list_artifacts(listing)
     }
     fn revisions(&self, id: &ArtifactId) -> Result<Vec<RevisionRecord>, StoreError> {

@@ -331,8 +331,9 @@ mod tests {
     };
     use artifree_ports::artifact_store::{
         ArtifactListing, ArtifactRecord, ChangePage, CleanupReceipt, CleanupRequest, CommitReceipt,
-        ConditionalCommit, MetadataReceipt, MetadataUpdate, NewArtifact, PurgeReceipt,
-        PurgeRequest, RevisionCommit, RevisionRecord, StoreError, UnreferencedContent,
+        ConditionalCommit, ListedArtifact, MetadataReceipt, MetadataUpdate, NewArtifact,
+        PurgeReceipt, PurgeRequest, RevisionCommit, RevisionRecord, StoreError,
+        UnreferencedContent,
     };
     use artifree_ports::data_store::DataSnapshot;
 
@@ -466,7 +467,7 @@ mod tests {
         fn list_artifacts(
             &self,
             _: ArtifactListing<'_>,
-        ) -> Result<Vec<ArtifactRecord>, StoreError> {
+        ) -> Result<Vec<ListedArtifact>, StoreError> {
             Ok(Vec::new())
         }
         fn revisions(&self, _: &ArtifactId) -> Result<Vec<RevisionRecord>, StoreError> {

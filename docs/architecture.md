@@ -155,7 +155,7 @@ in the Rust core.
 
 | Method and path                                                                    | Purpose                                                 |
 | ---------------------------------------------------------------------------------- | ------------------------------------------------------- |
-| `GET /v1/artifacts`                                                                | Owned artifacts: search, pin filter, order, pages       |
+| `GET /v1/artifacts`                                                                | Owned and shared artifacts, role, owner, filters, pages |
 | `POST /v1/artifacts`                                                               | Create revision 1 (`Idempotency-Key`)                   |
 | `GET /v1/artifacts/{id}`                                                           | Metadata and current revision                           |
 | `PATCH /v1/artifacts/{id}`                                                         | Conditional rename or pin (`Idempotency-Key`)           |

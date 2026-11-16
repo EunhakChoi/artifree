@@ -553,3 +553,115 @@ async fn members_and_strangers_change_no_access() -> TestResult {
     assert_eq!(trashed.0, 404, "{}", trashed.1);
     Ok(())
 }
+
+/// Decision 0060 rule 7 over HTTP: a member finds the artifact in their list
+/// with their role and the owner's id and label, under the shared filter and
+/// not the owned one; the trash lists only the caller's own; and reading the
+/// artifact reports the caller's role.
+#[tokio::test]
+async fn a_member_finds_the_shared_artifact_in_their_list() -> TestResult {
+    let harness = Harness::new()?;
+    let (ana, bob) = (harness.person("Ana").await?, harness.person("Bob").await?);
+    let shared = harness.artifact(&ana.secret, "create-listed").await?;
+    let (status, text) = harness
+        .put(
+            &ana.secret,
+            Some("key-list-grant"),
+            &shared,
+            &bob.id,
+            role("viewer", 0),
+        )
+        .await?;
+    assert_eq!(status, 200, "{text}");
+
+    let listed: Value = harness
+        .expect(
+            200,
+            "GET",
+            "/v1/artifacts?access=shared",
+            &bob.secret,
+            None,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        listed["artifacts"],
+        json!([{
+            "id": shared,
+            "kind": listed["artifacts"][0]["kind"],
+            "type": null,
+            "title": "Shared",
+            "pinned": false,
+            "current_revision": 1,
+            "metadata_revision": 1,
+            "deleted_at_ms": null,
+            "created_at_ms": listed["artifacts"][0]["created_at_ms"],
+            "updated_at_ms": listed["artifacts"][0]["updated_at_ms"],
+            "role": "viewer",
+            "owner": { "id": ana.id, "label": "Ana" },
+        }])
+    );
+    for path in ["/v1/artifacts?access=owned", "/v1/artifacts?deleted=true"] {
+        let none: Value = harness
+            .expect(200, "GET", path, &bob.secret, None, None)
+            .await?;
+        assert_eq!(none["artifacts"], json!([]), "{path}");
+    }
+    let mine: Value = harness
+        .expect(200, "GET", "/v1/artifacts", &ana.secret, None, None)
+        .await?;
+    assert_eq!(mine["artifacts"][0]["role"], "owner");
+    let read: Value = harness
+        .expect(
+            200,
+            "GET",
+            &format!("/v1/artifacts/{shared}"),
+            &bob.secret,
+            None,
+            None,
+        )
+        .await?;
+    assert_eq!(read["role"], "viewer");
+    assert_eq!(read.get("owner"), None);
+    let (status, text) = harness
+        .send(
+            "GET",
+            "/v1/artifacts?access=everyone",
+            Some(&bob.secret),
+            None,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        (status, code(&text)?.as_str()),
+        (400, "invalid_request"),
+        "{text}"
+    );
+
+    let (status, text) = harness
+        .send(
+            "PATCH",
+            &format!("/v1/artifacts/{shared}"),
+            Some(&ana.secret),
+            Some("key-list-trash"),
+            Some(json!({ "base_metadata_revision": 1, "deleted": true })),
+        )
+        .await?;
+    assert_eq!(status, 200, "{text}");
+    let after: Value = harness
+        .expect(200, "GET", "/v1/artifacts", &bob.secret, None, None)
+        .await?;
+    assert_eq!(after["artifacts"], json!([]));
+    let trash: Value = harness
+        .expect(
+            200,
+            "GET",
+            "/v1/artifacts?deleted=true",
+            &ana.secret,
+            None,
+            None,
+        )
+        .await?;
+    assert_eq!(trash["artifacts"][0]["role"], "owner");
+    Ok(())
+}

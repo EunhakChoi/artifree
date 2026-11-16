@@ -61,7 +61,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::schema;
-use artifree_domain::access::Need;
+use artifree_domain::access::{Access, Need};
 use artifree_domain::artifact_type::{ArtifactType, TypeRelease};
 use artifree_domain::change::{ChangeSequence, FeedId};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, UnixMillis};
@@ -71,9 +71,9 @@ use artifree_domain::{AppDataVersion, ArtifactKind, MetadataRevision, SourceRevi
 use artifree_ports::artifact_store::{
     ArtifactListing, ArtifactRecord, ArtifactStore, ChangeKind, ChangePage, ChangeRecord,
     CleanupReceipt, CleanupRequest, CommitReceipt, ConditionalCommit, ContentSetDigest, Delivery,
-    FileEntry, ListOrder, MAX_LISTED_MISMATCHES, MetadataReceipt, MetadataUpdate, NewArtifact,
-    PurgeReceipt, PurgeRequest, RequestIdentity, RevisionCommit, RevisionRecord, StoreError,
-    UnreferencedContent, unmet_expectations,
+    FileEntry, ListAccess, ListOrder, ListedArtifact, MAX_LISTED_MISMATCHES, MetadataReceipt,
+    MetadataUpdate, NewArtifact, PurgeReceipt, PurgeRequest, RequestIdentity, RevisionCommit,
+    RevisionRecord, StoreError, UnreferencedContent, unmet_expectations,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
@@ -709,7 +709,7 @@ impl ArtifactStore for SqliteStore {
     fn list_artifacts(
         &self,
         listing: ArtifactListing<'_>,
-    ) -> Result<Vec<ArtifactRecord>, StoreError> {
+    ) -> Result<Vec<ListedArtifact>, StoreError> {
         let connection = self.connect()?;
         let mut statement = connection
             .prepare(match listing.order {
@@ -726,16 +726,48 @@ impl ArtifactStore for SqliteStore {
                     listing.after.map(|position| position.at.0),
                     listing.after.map(|position| position.id.as_str()),
                     i64::try_from(listing.limit).unwrap_or(i64::MAX),
-                    listing.deleted
+                    listing.deleted,
+                    listing.access.map(|access| match access {
+                        ListAccess::Owned => "owned",
+                        ListAccess::Shared => "shared",
+                    })
                 ],
-                RawArtifact::from_row,
+                |row| {
+                    Ok((
+                        RawArtifact::from_row(row)?,
+                        row.get::<_, Option<String>>(12)?,
+                        row.get::<_, Option<String>>(13)?,
+                    ))
+                },
             )
             .map_err(unavailable)?;
-        let mut records = Vec::new();
+        let mut listed = Vec::new();
         for row in rows {
-            records.push(row.map_err(unavailable)?.into_record()?);
+            let (raw, role, label) = row.map_err(unavailable)?;
+            let record = raw.into_record()?;
+            // The query lists a member's artifact only with a role.
+            let access = if record.owner == *listing.owner {
+                Access::Owner
+            } else {
+                Access::Member(
+                    role.ok_or_else(|| corrupt("a listed artifact has no role"))?
+                        .parse()
+                        .map_err(corrupt)?,
+                )
+            };
+            // Artifacts name actors as text (0036), so an owner the registry
+            // never saw is listed under its id.
+            let owner_label = label
+                .unwrap_or_else(|| record.owner.to_string())
+                .parse()
+                .map_err(corrupt)?;
+            listed.push(ListedArtifact {
+                record,
+                access,
+                owner_label,
+            });
         }
-        Ok(records)
+        Ok(listed)
     }
 
     fn revisions(&self, id: &ArtifactId) -> Result<Vec<RevisionRecord>, StoreError> {
@@ -1557,34 +1589,51 @@ fn artifact_record(
         .transpose()
 }
 
-/// An owner's artifacts by update time. `?2` is the search text, `?3` the
-/// pin, `?4` and `?5` the position to continue after, `?6` the limit, and
-/// `?7` whether to list the trash. `lower` folds ASCII letters only.
+/// The artifacts `?1` reaches, by update time (decision 0060 rule 7): their
+/// own and, outside the trash, those they are a member of, with the role and
+/// the owner's label. `?2` is the search text, `?3` the pin, `?4` and `?5`
+/// the position to continue after, `?6` the limit, `?7` whether to list the
+/// trash, and `?8` `owned`, `shared` or `NULL` for both. A revoked member's
+/// row has no role and lists nothing. `lower` folds ASCII letters only.
 const LIST_BY_UPDATE: &str = "
-SELECT id, owner, kind, title, pinned, current_revision, metadata_revision, created_at, updated_at,
-    deleted_at, type_id, type_release
-FROM artifacts
-WHERE owner = ?1
-  AND purged_at IS NULL
-  AND (deleted_at IS NOT NULL) = ?7
-  AND (?2 IS NULL OR instr(lower(title), lower(?2)) > 0)
-  AND (?3 IS NULL OR pinned = ?3)
-  AND (?4 IS NULL OR updated_at < ?4 OR (updated_at = ?4 AND id > ?5))
-ORDER BY updated_at DESC, id
+SELECT a.id, a.owner, a.kind, a.title, a.pinned, a.current_revision, a.metadata_revision,
+    a.created_at, a.updated_at, a.deleted_at, a.type_id, a.type_release, m.role, u.label
+FROM artifacts a
+LEFT JOIN artifact_members m
+    ON m.artifact_id = a.id AND m.user_id = ?1 AND m.role IS NOT NULL
+LEFT JOIN users u ON u.id = a.owner
+WHERE a.purged_at IS NULL
+  AND (a.deleted_at IS NOT NULL) = ?7
+  AND a.id IN (
+      SELECT id FROM artifacts WHERE owner = ?1 AND (?8 IS NULL OR ?8 = 'owned')
+      UNION ALL
+      SELECT artifact_id FROM artifact_members
+      WHERE user_id = ?1 AND role IS NOT NULL AND ?7 = 0 AND (?8 IS NULL OR ?8 = 'shared'))
+  AND (?2 IS NULL OR instr(lower(a.title), lower(?2)) > 0)
+  AND (?3 IS NULL OR a.pinned = ?3)
+  AND (?4 IS NULL OR a.updated_at < ?4 OR (a.updated_at = ?4 AND a.id > ?5))
+ORDER BY a.updated_at DESC, a.id
 LIMIT ?6";
 
 /// As [`LIST_BY_UPDATE`], by creation time.
 const LIST_BY_CREATION: &str = "
-SELECT id, owner, kind, title, pinned, current_revision, metadata_revision, created_at, updated_at,
-    deleted_at, type_id, type_release
-FROM artifacts
-WHERE owner = ?1
-  AND purged_at IS NULL
-  AND (deleted_at IS NOT NULL) = ?7
-  AND (?2 IS NULL OR instr(lower(title), lower(?2)) > 0)
-  AND (?3 IS NULL OR pinned = ?3)
-  AND (?4 IS NULL OR created_at < ?4 OR (created_at = ?4 AND id > ?5))
-ORDER BY created_at DESC, id
+SELECT a.id, a.owner, a.kind, a.title, a.pinned, a.current_revision, a.metadata_revision,
+    a.created_at, a.updated_at, a.deleted_at, a.type_id, a.type_release, m.role, u.label
+FROM artifacts a
+LEFT JOIN artifact_members m
+    ON m.artifact_id = a.id AND m.user_id = ?1 AND m.role IS NOT NULL
+LEFT JOIN users u ON u.id = a.owner
+WHERE a.purged_at IS NULL
+  AND (a.deleted_at IS NOT NULL) = ?7
+  AND a.id IN (
+      SELECT id FROM artifacts WHERE owner = ?1 AND (?8 IS NULL OR ?8 = 'owned')
+      UNION ALL
+      SELECT artifact_id FROM artifact_members
+      WHERE user_id = ?1 AND role IS NOT NULL AND ?7 = 0 AND (?8 IS NULL OR ?8 = 'shared'))
+  AND (?2 IS NULL OR instr(lower(a.title), lower(?2)) > 0)
+  AND (?3 IS NULL OR a.pinned = ?3)
+  AND (?4 IS NULL OR a.created_at < ?4 OR (a.created_at = ?4 AND a.id > ?5))
+ORDER BY a.created_at DESC, a.id
 LIMIT ?6";
 
 /// Whether `package` has exactly the paths and bytes of a stored revision,

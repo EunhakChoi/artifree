@@ -167,6 +167,11 @@ export type FileEdit =
  */
 export type ArtifactKind = 'app' | 'document' | 'slides' | 'dashboard' | 'design' | 'motion';
 /**
+ * How a caller stands towards an artifact: its owner, or a member with a
+ * role (decision 0060 rule 3).
+ */
+export type CallerRole = 'owner' | 'editor' | 'viewer';
+/**
  * A part of an artifact that a duplicate copies.
  */
 export type CopiedPart = 'files' | 'data' | 'assets';
@@ -578,9 +583,20 @@ export interface Artifact {
    */
   metadata_revision: number;
   /**
+   * The owner's id and label (decision 0060 rule 7). Present in a list;
+   * absent elsewhere.
+   */
+  owner?: AccessUser | null;
+  /**
    * Whether the owner pinned the artifact.
    */
   pinned: boolean;
+  /**
+   * How the caller stands towards the artifact (decision 0060 rules 6 and
+   * 7). Present in a list and when one artifact is read; absent from the
+   * answers of writes.
+   */
+  role?: CallerRole | null;
   /**
    * Display title.
    */
@@ -595,6 +611,19 @@ export interface Artifact {
    * updates do not change it.
    */
   updated_at_ms: number;
+}
+/**
+ * A user named in an access list: their id and label (decision 0060 rule 8).
+ */
+export interface AccessUser {
+  /**
+   * The user's id.
+   */
+  id: string;
+  /**
+   * The user's label.
+   */
+  label: string;
 }
 /**
  * The catalog type and release an artifact was made from (decision 0059).
@@ -776,7 +805,9 @@ export interface RemoveUnreferencedContentResponse {
  */
 export interface ArtifactList {
   /**
-   * Accessible artifacts that match the query, in its order.
+   * Accessible artifacts that match the query, in its order: the caller's
+   * own and, outside the trash, those they are a member of, each with
+   * `role` and `owner`.
    */
   artifacts: Artifact[];
   /**
@@ -2751,19 +2782,6 @@ export interface AccessMember {
   role: MemberRole;
 }
 /**
- * A user named in an access list: their id and label (decision 0060 rule 8).
- */
-export interface AccessUser {
-  /**
-   * The user's id.
-   */
-  id: string;
-  /**
-   * The user's label.
-   */
-  label: string;
-}
-/**
  * Body of `PUT /v1/artifacts/{id}/access/{user_id}`: grants the user a role
  * on the artifact, or changes the role they have (decision 0060 rule 6).
  * Owner only; it needs an `Idempotency-Key`.
@@ -2816,6 +2834,11 @@ export interface AccessChangeResponse {
 }
 
 /**
+ * Which artifacts a list holds by the caller's relation to them (decision
+ * 0060 rule 7).
+ */
+export type ListAccess = 'owned' | 'shared';
+/**
  * Order of `GET /v1/artifacts`. Ties are broken by identifier.
  */
 export type ListSort = 'updated' | 'created';
@@ -2826,7 +2849,13 @@ export type ListSort = 'updated' | 'created';
  */
 export interface ListArtifactsQuery {
   /**
-   * `true` lists the trash instead of the artifacts outside it.
+   * Only owned or only shared artifacts; both when absent (decision 0060
+   * rule 7).
+   */
+  access?: ListAccess | null;
+  /**
+   * `true` lists the trash instead of the artifacts outside it. The trash
+   * holds only the caller's own artifacts.
    */
   deleted?: boolean | null;
   /**
@@ -2835,7 +2864,7 @@ export interface ListArtifactsQuery {
   limit?: number | null;
   /**
    * `next_page_token` of the previous page, with the same `q`, `sort`,
-   * `pinned`, and `deleted`.
+   * `pinned`, `deleted`, and `access`.
    */
   page_token?: string | null;
   /**

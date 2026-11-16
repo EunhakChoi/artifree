@@ -1,17 +1,19 @@
 //! Artifact access on a real database (decision 0060, slice S02a): grants,
 //! role changes and revocations conditional on the access version, the owner's
 //! key replay, the access generation across a revocation, the trash and a
-//! purge, and the refusals in their order.
+//! purge, and the refusals in their order; listings with the caller's role
+//! (slice S02e3).
 
 mod common;
 
-use artifree_domain::access::{AccessGeneration, AccessVersion, Role};
+use artifree_domain::access::{Access, AccessGeneration, AccessVersion, Role};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, UnixMillis, UserLabel};
 use artifree_ports::access_store::{
     AccessChange, AccessReceipt, AccessRequest, AccessStore, AccessStoreError, Member,
 };
 use artifree_ports::artifact_store::{
-    CommitReceipt, Delivery, PurgeRequest, RequestFingerprint, RequestIdentity,
+    ArtifactListing, ArtifactStore, CommitReceipt, Delivery, ListAccess, ListOrder, ListPosition,
+    PurgeRequest, RequestFingerprint, RequestIdentity,
 };
 use artifree_ports::user_store::{NewUser, UserStore};
 use artifree_providers::storage::SqliteStore;
@@ -492,5 +494,238 @@ fn the_list_names_the_owner_and_whether_the_artifact_is_in_the_trash() -> TestRe
         list(&unregistered.artifact.id)?,
         ("ghost".to_owned(), false)
     );
+    Ok(())
+}
+
+/// A listed artifact's title, the caller's access and the owner's label.
+type Listed = (String, Access, String);
+
+/// The titles, accesses and owner labels `who` lists, by update time.
+fn listed(
+    store: &SqliteStore,
+    who: &ActorId,
+    access: Option<ListAccess>,
+    deleted: bool,
+) -> Result<Vec<Listed>, Box<dyn std::error::Error>> {
+    Ok(store
+        .list_artifacts(ArtifactListing {
+            owner: who,
+            access,
+            search: None,
+            pinned: None,
+            deleted,
+            order: ListOrder::Updated,
+            after: None,
+            limit: 50,
+        })?
+        .into_iter()
+        .map(|listed| {
+            (
+                listed.record.title.as_str().to_owned(),
+                listed.access,
+                listed.owner_label.as_str().to_owned(),
+            )
+        })
+        .collect())
+}
+
+fn titles(listed: &[Listed]) -> Vec<&str> {
+    let mut titles: Vec<&str> = listed.iter().map(|(title, ..)| title.as_str()).collect();
+    titles.sort_unstable();
+    titles
+}
+
+/// Decision 0060 rule 7: a member lists what they own and what they are a
+/// member of, each with their access and the owner's label; the filter
+/// selects one or the other; the trash and a revoked membership list nothing
+/// shared.
+#[test]
+fn a_member_lists_what_they_own_and_what_is_shared_with_them() -> TestResult {
+    let fixture = Fixture::new()?;
+    let ana = fixture.register("Ana", 1)?;
+    let ben = fixture.register("Ben", 2)?;
+    create_demo(&fixture.store, &ana, &key("ana-own"), "Mine", "<h1>a</h1>")?;
+    fixture.change("grant ana", &ana, AccessChange::Grant(Role::Viewer), 0)?;
+    fixture.change("grant ben", &ben, AccessChange::Grant(Role::Editor), 1)?;
+
+    let all = listed(&fixture.store, &ana, None, false)?;
+    assert_eq!(titles(&all), ["Mine", "Shared"]);
+    for (title, access, label) in &all {
+        match title.as_str() {
+            "Shared" => assert_eq!(
+                (access, label.as_str()),
+                (&Access::Member(Role::Viewer), "Local owner")
+            ),
+            _ => assert_eq!((access, label.as_str()), (&Access::Owner, "Ana")),
+        }
+    }
+    let shared = listed(&fixture.store, &ben, Some(ListAccess::Shared), false)?;
+    assert_eq!(
+        shared,
+        [(
+            "Shared".to_owned(),
+            Access::Member(Role::Editor),
+            "Local owner".to_owned()
+        )]
+    );
+    assert!(listed(&fixture.store, &ben, Some(ListAccess::Owned), false)?.is_empty());
+    assert_eq!(
+        titles(&listed(
+            &fixture.store,
+            &ana,
+            Some(ListAccess::Owned),
+            false
+        )?),
+        ["Mine"]
+    );
+    // The owner's list holds the owner's artifacts only, as before.
+    assert_eq!(
+        titles(&listed(&fixture.store, &fixture.owner, None, false)?),
+        ["Other", "Shared"]
+    );
+    assert!(
+        listed(
+            &fixture.store,
+            &fixture.owner,
+            Some(ListAccess::Shared),
+            false
+        )?
+        .is_empty()
+    );
+
+    // In the trash the artifact is the owner's only.
+    fixture.trash("trash", 1, true)?;
+    assert_eq!(
+        titles(&listed(&fixture.store, &ana, None, false)?),
+        ["Mine"]
+    );
+    assert!(listed(&fixture.store, &ana, None, true)?.is_empty());
+    assert!(listed(&fixture.store, &ana, Some(ListAccess::Shared), true)?.is_empty());
+    assert_eq!(
+        titles(&listed(&fixture.store, &fixture.owner, None, true)?),
+        ["Shared"]
+    );
+    fixture.trash("restore", 2, false)?;
+    assert_eq!(
+        titles(&listed(&fixture.store, &ana, None, false)?),
+        ["Mine", "Shared"]
+    );
+
+    fixture.change("revoke ana", &ana, AccessChange::Revoke, 2)?;
+    assert_eq!(
+        titles(&listed(&fixture.store, &ana, None, false)?),
+        ["Mine"]
+    );
+    assert_eq!(
+        titles(&listed(&fixture.store, &ben, None, false)?),
+        ["Shared"]
+    );
+    Ok(())
+}
+
+/// A grant on `owner`'s artifact `artifact` to `user`, by the owner.
+fn grant_on(
+    store: &SqliteStore,
+    owner: &ActorId,
+    artifact: &ArtifactId,
+    user: &ActorId,
+    name: &str,
+) -> Result<AccessReceipt, AccessStoreError> {
+    let request_key = key(name);
+    store.change_access(AccessRequest {
+        request: RequestIdentity {
+            actor: owner,
+            key: &request_key,
+            fingerprint: RequestFingerprint(digest(name)),
+        },
+        artifact,
+        user,
+        change: AccessChange::Grant(Role::Editor),
+        base: AccessVersion(0),
+        now: UnixMillis(1),
+    })
+}
+
+/// A registered owner is listed under their label, and an owner no registry
+/// holds (0036 lets a database name one) under their id.
+#[test]
+fn the_owner_is_listed_by_label_or_by_id() -> TestResult {
+    let fixture = Fixture::new()?;
+    let ana = fixture.register("Ana", 1)?;
+    let ben = fixture.register("Ben", 2)?;
+    let outsider = actor("outsider");
+    let bens = create_demo(&fixture.store, &ben, &key("ben-own"), "Ben's", "<h1>b</h1>")?;
+    let theirs = create_demo(
+        &fixture.store,
+        &outsider,
+        &key("out-own"),
+        "Theirs",
+        "<h1>c</h1>",
+    )?;
+    grant_on(
+        &fixture.store,
+        &ben,
+        &bens.artifact.id,
+        &ana,
+        "ben-grants-ana",
+    )?;
+    grant_on(
+        &fixture.store,
+        &outsider,
+        &theirs.artifact.id,
+        &ana,
+        "out-grants-ana",
+    )?;
+    let mut all = listed(&fixture.store, &ana, None, false)?;
+    all.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        all,
+        [
+            (
+                "Ben's".to_owned(),
+                Access::Member(Role::Editor),
+                "Ben".to_owned()
+            ),
+            (
+                "Theirs".to_owned(),
+                Access::Member(Role::Editor),
+                "outsider".to_owned()
+            ),
+        ]
+    );
+    Ok(())
+}
+
+/// Pages continue across owned and shared artifacts alike: each appears once.
+#[test]
+fn pages_continue_across_owned_and_shared_artifacts() -> TestResult {
+    let fixture = Fixture::new()?;
+    let ana = fixture.register("Ana", 1)?;
+    for name in ["one", "two", "three"] {
+        create_demo(&fixture.store, &ana, &key(name), name, "<h1>a</h1>")?;
+    }
+    fixture.change("grant ana", &ana, AccessChange::Grant(Role::Viewer), 0)?;
+    let mut paged = Vec::new();
+    let mut after: Option<ListPosition> = None;
+    loop {
+        let page = fixture.store.list_artifacts(ArtifactListing {
+            owner: &ana,
+            access: None,
+            search: None,
+            pinned: None,
+            deleted: false,
+            order: ListOrder::Created,
+            after: after.as_ref(),
+            limit: 1,
+        })?;
+        let Some(last) = page.last() else { break };
+        paged.push(last.record.title.as_str().to_owned());
+        after = Some(ListPosition {
+            at: last.record.created_at,
+            id: last.record.id.clone(),
+        });
+    }
+    paged.sort_unstable();
+    assert_eq!(paged, ["Shared", "one", "three", "two"]);
     Ok(())
 }

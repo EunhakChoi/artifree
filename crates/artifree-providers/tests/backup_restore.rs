@@ -878,6 +878,7 @@ fn a_backup_during_writes_restores_a_contiguous_prefix_of_history() -> TestResul
     assert!(side_now.pinned && side_now.deleted_at.is_some());
     let in_trash = restored.list_artifacts(ArtifactListing {
         owner: &owner,
+        access: None,
         search: None,
         pinned: None,
         deleted: true,
@@ -1005,6 +1006,7 @@ fn store_artifact_id(
 ) -> Result<artifree_domain::identity::ArtifactId, StoreError> {
     let page = store.list_artifacts(ArtifactListing {
         owner: &actor("owner"),
+        access: None,
         search: None,
         pinned: None,
         deleted: false,
@@ -1013,7 +1015,7 @@ fn store_artifact_id(
         limit: 10,
     })?;
     page.first()
-        .map(|record| record.id.clone())
+        .map(|record| record.record.id.clone())
         .ok_or(StoreError::NotFound)
 }
 

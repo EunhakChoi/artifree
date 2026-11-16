@@ -30,7 +30,8 @@ export { UsageError };
 
 export const ARTIFACT_HELP = `Usage:
   artifree artifact list [--search <text>] [--sort updated|created]
-      [--pinned | --unpinned] [--deleted] [--limit <n>] [--page-token <token>]
+      [--pinned | --unpinned] [--owned | --shared] [--deleted] [--limit <n>]
+      [--page-token <token>]
   artifree artifact show <id>
   artifree artifact history <id>
   artifree artifact create --title <title> (--dir <dir> | --file <path>...)
@@ -66,7 +67,10 @@ Connection:
 
 list prints every matching artifact, reading page after page, unless
 --limit or --page-token asks for one page; that page carries next_page_token
-when more follow; --deleted lists the trash instead. rename, pin, unpin,
+when more follow; --deleted lists the trash instead. It lists your own
+artifacts and those you are a member of, each with your role and the owner;
+--owned or --shared selects one or the other, and the trash holds only your
+own. show reports your role. rename, pin, unpin,
 delete, and recover change metadata only and need the metadata_revision read
 with show, or with list --deleted for an artifact in the trash
 (--base-metadata); they create no revision. delete moves an artifact to the
@@ -253,6 +257,8 @@ async function list(args: string[]): Promise<void> {
       sort: { type: 'string' },
       pinned: { type: 'boolean' },
       unpinned: { type: 'boolean' },
+      owned: { type: 'boolean' },
+      shared: { type: 'boolean' },
       deleted: { type: 'boolean' },
       limit: { type: 'string' },
       'page-token': { type: 'string' },
@@ -263,6 +269,8 @@ async function list(args: string[]): Promise<void> {
   single(positionals, []);
   if (values.pinned === true && values.unpinned === true)
     throw new UsageError('Use --pinned or --unpinned, not both.');
+  if (values.owned === true && values.shared === true)
+    throw new UsageError('Use --owned or --shared, not both.');
   const { sort } = values;
   if (sort !== undefined && sort !== 'updated' && sort !== 'created')
     throw new UsageError('--sort must be updated or created.');
@@ -271,6 +279,8 @@ async function list(args: string[]): Promise<void> {
     ...(sort === undefined ? {} : { sort }),
     ...(values.pinned === true ? { pinned: true } : {}),
     ...(values.unpinned === true ? { pinned: false } : {}),
+    ...(values.owned === true ? { access: 'owned' } : {}),
+    ...(values.shared === true ? { access: 'shared' } : {}),
     ...(values.deleted === true ? { deleted: true } : {}),
     ...(values.limit === undefined
       ? {}

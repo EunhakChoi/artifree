@@ -4,7 +4,9 @@
 use std::str::FromStr;
 
 use artifree_domain::identity::{InvalidValue, UnixMillis};
-use artifree_ports::artifact_store::{ArtifactRecord, ListOrder, ListPosition};
+use artifree_ports::artifact_store::{
+    ArtifactRecord, ListAccess, ListOrder, ListPosition, ListedArtifact,
+};
 use sha2::{Digest, Sha256};
 
 /// Maximum search text length in Unicode scalar values, as for a title.
@@ -92,6 +94,9 @@ pub struct ListQuery {
     pub pinned: Option<bool>,
     /// List the trash instead of the artifacts outside it.
     pub deleted: bool,
+    /// Only owned, or only shared, artifacts (decision 0060 rule 7); both
+    /// when `None`.
+    pub access: Option<ListAccess>,
     /// The order.
     pub order: ListOrder,
     /// The page size.
@@ -104,6 +109,7 @@ impl Default for ListQuery {
             search: None,
             pinned: None,
             deleted: false,
+            access: None,
             order: ListOrder::Updated,
             limit: PageSize::default(),
         }
@@ -113,8 +119,9 @@ impl Default for ListQuery {
 /// One page of a list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactPage {
-    /// The artifacts, in the query's order.
-    pub artifacts: Vec<ArtifactRecord>,
+    /// The artifacts, in the query's order, each with how the caller stands
+    /// towards it and its owner's label.
+    pub artifacts: Vec<ListedArtifact>,
     /// Continues the list, present only when more artifacts follow.
     pub next_page_token: Option<String>,
 }
@@ -191,6 +198,12 @@ fn filters_digest(query: &ListQuery) -> String {
     // digest across the upgrade that added it.
     if query.deleted {
         hasher.update(b"trash");
+    }
+    // As the trash: only a filtered list's tokens change.
+    match query.access {
+        Some(ListAccess::Owned) => hasher.update(b"owned"),
+        Some(ListAccess::Shared) => hasher.update(b"shared"),
+        None => {}
     }
     let digest = hasher.finalize();
     let mut hex = String::with_capacity(16);
@@ -274,9 +287,28 @@ mod tests {
                 search: Some(parsed("plan")),
                 ..query.clone()
             },
+            ListQuery {
+                access: Some(ListAccess::Owned),
+                ..query.clone()
+            },
+            ListQuery {
+                access: Some(ListAccess::Shared),
+                ..query.clone()
+            },
         ] {
             assert_eq!(position(&token, &other), None, "{other:?}");
         }
+        // Decision 0060 rule 7: an owned list's token does not continue the
+        // shared list.
+        let owned = ListQuery {
+            access: Some(ListAccess::Owned),
+            ..query.clone()
+        };
+        let shared = ListQuery {
+            access: Some(ListAccess::Shared),
+            ..query
+        };
+        assert_eq!(position(&page_token(&owned, &record()), &shared), None);
     }
 
     #[test]

@@ -949,6 +949,7 @@ fn listed(
     Ok(store
         .list_artifacts(ArtifactListing {
             owner,
+            access: None,
             search,
             pinned,
             deleted: false,
@@ -957,7 +958,7 @@ fn listed(
             limit,
         })?
         .into_iter()
-        .map(|record| record.title.as_str().to_owned())
+        .map(|record| record.record.title.as_str().to_owned())
         .collect())
 }
 
@@ -1093,6 +1094,7 @@ fn list_pages_continue_after_the_last_position_through_a_tie() -> TestResult {
     loop {
         let page = store.list_artifacts(ArtifactListing {
             owner: &owner,
+            access: None,
             search: None,
             pinned: None,
             deleted: false,
@@ -1101,10 +1103,10 @@ fn list_pages_continue_after_the_last_position_through_a_tie() -> TestResult {
             limit: 1,
         })?;
         let Some(last) = page.last() else { break };
-        paged.push(last.title.as_str().to_owned());
+        paged.push(last.record.title.as_str().to_owned());
         after = Some(ListPosition {
-            at: last.updated_at,
-            id: last.id.clone(),
+            at: last.record.updated_at,
+            id: last.record.id.clone(),
         });
     }
     assert_eq!(paged, by_update);
@@ -1230,6 +1232,7 @@ fn trash_titles(store: &SqliteStore, owner: &ActorId) -> Result<Vec<String>, Sto
     Ok(store
         .list_artifacts(ArtifactListing {
             owner,
+            access: None,
             search: None,
             pinned: None,
             deleted: true,
@@ -1238,7 +1241,7 @@ fn trash_titles(store: &SqliteStore, owner: &ActorId) -> Result<Vec<String>, Sto
             limit: 10,
         })?
         .into_iter()
-        .map(|record| record.title.as_str().to_owned())
+        .map(|record| record.record.title.as_str().to_owned())
         .collect())
 }
 
