@@ -8,9 +8,10 @@
 
 use std::fmt;
 
+use artifree_domain::access::Role;
 use artifree_domain::artifact_type::ArtifactType;
 use artifree_domain::change::{ChangeSequence, FeedId};
-use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, UnixMillis};
+use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, Title, UnixMillis, UserLabel};
 use artifree_domain::job::JobId;
 use artifree_domain::package::{FileChange, FilePackage, PackageError, PackagePath};
 use artifree_domain::{AppDataVersion, ArtifactKind, MetadataRevision, SourceRevision};
@@ -403,11 +404,26 @@ pub struct ListPosition {
     pub id: ArtifactId,
 }
 
-/// One page of an owner's artifacts.
+/// Which artifacts a list holds by the caller's relation to them (decision
+/// 0060 rule 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListAccess {
+    /// Only the caller's own artifacts.
+    Owned,
+    /// Only artifacts the caller is a member of.
+    Shared,
+}
+
+/// One page of the artifacts a caller reaches: their own and, outside the
+/// trash, those they are a member of (decision 0060 rule 7).
 #[derive(Debug, Clone, Copy)]
 pub struct ArtifactListing<'a> {
-    /// The owner whose artifacts are listed.
-    pub owner: &'a ActorId,
+    /// The caller whose artifacts are listed: their own, and those they are
+    /// a member of.
+    pub caller: &'a ActorId,
+    /// Only owned or only shared artifacts; both when `None`. The trash
+    /// holds only the caller's own, whatever this says.
+    pub access: Option<ListAccess>,
     /// Only titles containing this text, ignoring ASCII case.
     pub search: Option<&'a str>,
     /// Only artifacts with this pin.
@@ -420,6 +436,19 @@ pub struct ArtifactListing<'a> {
     pub after: Option<&'a ListPosition>,
     /// At most this many artifacts.
     pub limit: usize,
+}
+
+/// An artifact as the store lists it for a caller (decision 0060 rule 7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedArtifact {
+    /// The artifact.
+    pub record: ArtifactRecord,
+    /// The caller's member role, or `None` for the caller's own artifact.
+    /// What the caller may do is the core's to decide from it.
+    pub role: Option<Role>,
+    /// The owner's label, or the owner's id for an actor the registry never
+    /// saw (decision 0036 lets a database name one).
+    pub owner_label: UserLabel,
 }
 
 /// What a commit did to its artifact.
@@ -747,9 +776,10 @@ pub trait ArtifactStore {
     /// [`StoreError::Unavailable`].
     fn artifact(&self, id: &ArtifactId) -> Result<Option<ArtifactRecord>, StoreError>;
 
-    /// Up to `listing.limit` of an owner's artifacts that match the listing,
-    /// in its order, after its position: those in the trash or those outside
-    /// it.
+    /// Up to `listing.limit` of the artifacts the caller reaches that match
+    /// the listing, in its order, after its position: in the trash, the
+    /// caller's own; outside it, their own and those they are a member of,
+    /// as `listing.access` selects.
     ///
     /// # Errors
     ///
@@ -757,7 +787,7 @@ pub trait ArtifactStore {
     fn list_artifacts(
         &self,
         listing: ArtifactListing<'_>,
-    ) -> Result<Vec<ArtifactRecord>, StoreError>;
+    ) -> Result<Vec<ListedArtifact>, StoreError>;
 
     /// Revision metadata, newest first.
     ///

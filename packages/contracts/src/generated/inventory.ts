@@ -4,7 +4,7 @@ import type { ServiceDescription } from './schema.js';
 export const scaffoldDescription: ServiceDescription = {
   "name": "Artifree",
   "version": "0.1.0",
-  "contract_version": "0.36.0",
+  "contract_version": "0.37.0",
   "phase": "early-development",
   "server_framework": "axum",
   "async_runtime": "tokio",
@@ -27,7 +27,7 @@ export const scaffoldDescription: ServiceDescription = {
       "language": "TypeScript",
       "path": "apps/cli",
       "status": "implemented",
-      "summary": "Artifact create, list (search, order, pages, trash), show, rename, pin, delete, recover, purge (confirmed, for good), save, edit, restore, duplicate, cat (whole or a byte range), export, preview (of the files or the build), and build status over HTTP; content cleanup (dry run or apply); job enqueue, show, list, and cancel; application data get, set, update, and delete; the caller's id (me) and an artifact's access list, grant, and revoke; build inventory."
+      "summary": "Artifact create, list (search, order, pages, trash, owned or shared, with the caller's role and the owner), show (with the caller's role), rename, pin, delete, recover, purge (confirmed, for good), save, edit, restore, duplicate, cat (whole or a byte range), export, preview (of the files or the build), and build status over HTTP; content cleanup (dry run or apply); job enqueue, show, list, and cancel; application data get, set, update, and delete; the caller's id (me) and an artifact's access list, grant, and revoke; build inventory."
     },
     {
       "id": "runtime",

@@ -5,17 +5,18 @@
 //! error semantics; only the framing differs.
 
 use artifree_contracts::api::{
-    AgentSessionList, AppData, Artifact, ArtifactKind as WireKind, ArtifactList, ArtifactTypeRef,
-    Asset, AssetList, BackgroundStatus, BuildStatus as WireBuildStatus, CancelJobResponse,
-    CommitResponse, ConflictingFile, ContentEncoding, CopiedPart, CreateArtifactRequest,
-    CreateRuntimeViewRequest, DataMembers, DataWriteResponse, DeleteAssetRequest,
-    DeleteAssetResponse, DeleteDataRequest, DiagnosticLocation, DuplicateArtifactRequest,
-    DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest, EnqueueJobResponse, ErrorBody,
-    ErrorCode, ExecutionStatus, ExportRuntime, FileChange as WireChange, FileEdit as WireEdit,
-    FileUpload, Handoff, HandoffState, HeadBuildStatus, Job as WireJob, JobBuild, JobDiagnostic,
-    JobFailure as WireFailure, JobKind as WireJobKind, JobList, JobMismatch, JobProblem, JobResult,
-    JobState as WireJobState, JobVerdict, JsonValue, ListArtifactsQuery, ListJobsQuery, ListSort,
-    Preview, PurgeArtifactRequest, PurgeArtifactResponse, ReadDataMembersQuery,
+    AccessUser, AgentSessionList, AppData, Artifact, ArtifactKind as WireKind, ArtifactList,
+    ArtifactTypeRef, Asset, AssetList, BackgroundStatus, BuildStatus as WireBuildStatus,
+    CallerRole, CancelJobResponse, CommitResponse, ConflictingFile, ContentEncoding, CopiedPart,
+    CreateArtifactRequest, CreateRuntimeViewRequest, DataMembers, DataWriteResponse,
+    DeleteAssetRequest, DeleteAssetResponse, DeleteDataRequest, DiagnosticLocation,
+    DuplicateArtifactRequest, DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest,
+    EnqueueJobResponse, ErrorBody, ErrorCode, ExecutionStatus, ExportRuntime,
+    FileChange as WireChange, FileEdit as WireEdit, FileUpload, Handoff, HandoffState,
+    HeadBuildStatus, Job as WireJob, JobBuild, JobDiagnostic, JobFailure as WireFailure,
+    JobKind as WireJobKind, JobList, JobMismatch, JobProblem, JobResult, JobState as WireJobState,
+    JobVerdict, JsonValue, ListAccess as WireListAccess, ListArtifactsQuery, ListJobsQuery,
+    ListSort, Preview, PurgeArtifactRequest, PurgeArtifactResponse, ReadDataMembersQuery,
     RemoveUnreferencedContentRequest, RemoveUnreferencedContentResponse, RestoreRevisionRequest,
     Revision, RevisionFile, RevisionList, RuntimeConnection, RuntimeGrant, RuntimeMetadata,
     RuntimeView, SaveRevisionRequest, SetDataRequest, SetRuntimeGrantRequest, SourceExportFormat,
@@ -32,12 +33,12 @@ use artifree_core::build_reads::HeadBuild;
 use artifree_core::catalog::Release;
 use artifree_core::data::DataMutation;
 use artifree_core::jobs::{JobPageSize, NewBuild};
-use artifree_core::listing::{ListQuery, PageSize, SearchText};
+use artifree_core::listing::{ListQuery, PageArtifact, PageSize, SearchText};
 use artifree_core::members::{MAX_TOKEN_BYTES, MemberLimit, MemberQuery, MemberToken};
 use artifree_core::parts::{Boundary, ByteRange, FilePart, RangeError};
 use artifree_core::room::TabKey;
 use artifree_domain::AppDataVersion;
-use artifree_domain::access::{AccessGeneration, Need};
+use artifree_domain::access::{Access, AccessGeneration, Need, Role};
 use artifree_domain::artifact_type::{ArtifactType, TypeId, TypeRelease};
 use artifree_domain::assets::{
     AssetId, AssetMediaType, AssetMetadata, AssetRejection, AssetVersion, MAX_ASSET_BYTES,
@@ -54,7 +55,7 @@ use artifree_domain::package::{
 use artifree_domain::{ArtifactKind, MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
     ArtifactRecord, CommitReceipt, ContentSetDigest, Delivery, FileEdit, FileExpectation,
-    FileMismatch, ListOrder, RevisionRecord, UnreferencedContent, parse_sha256,
+    FileMismatch, ListAccess, ListOrder, RevisionRecord, UnreferencedContent, parse_sha256,
 };
 use artifree_ports::asset_store::{AssetContent, AssetStoreError};
 use artifree_ports::data_store::OutboxFence;
@@ -371,6 +372,7 @@ pub(crate) async fn list(
         sort,
         pinned,
         deleted,
+        access,
         limit,
         page_token,
     } = query;
@@ -387,6 +389,10 @@ pub(crate) async fn list(
         search,
         pinned,
         deleted: deleted.unwrap_or(false),
+        access: access.map(|access| match access {
+            WireListAccess::Owned => ListAccess::Owned,
+            WireListAccess::Shared => ListAccess::Shared,
+        }),
         order: match sort.unwrap_or(ListSort::Updated) {
             ListSort::Updated => ListOrder::Updated,
             ListSort::Created => ListOrder::Created,
@@ -397,17 +403,20 @@ pub(crate) async fn list(
         .run(move |artifacts| artifacts.list(&actor, &query, page_token.as_deref()))
         .await?;
     Ok(ArtifactList {
-        artifacts: page.artifacts.iter().map(artifact_dto).collect(),
+        artifacts: page.artifacts.iter().map(listed_dto).collect(),
         next_page_token: page.next_page_token,
     })
 }
 
 pub(crate) async fn show(state: &AppState, actor: ActorId, id: &str) -> Result<Artifact, ApiError> {
     let id = artifact_id(id)?;
-    let record = state
-        .run(move |artifacts| artifacts.artifact(&actor, &id))
+    let (record, access) = state
+        .run(move |artifacts| artifacts.artifact_with_access(&actor, &id))
         .await?;
-    Ok(artifact_dto(&record))
+    Ok(Artifact {
+        role: Some(caller_role(access)),
+        ..artifact_dto(&record)
+    })
 }
 
 pub(crate) async fn create(
@@ -2560,6 +2569,30 @@ fn artifact_dto(record: &ArtifactRecord) -> Artifact {
         deleted_at_ms: record.deleted_at.map(|time| time.0),
         created_at_ms: record.created_at.0,
         updated_at_ms: record.updated_at.0,
+        role: None,
+        owner: None,
+    }
+}
+
+/// The wire form of how a caller stands towards an artifact.
+fn caller_role(access: Access) -> CallerRole {
+    match access {
+        Access::Owner => CallerRole::Owner,
+        Access::Member(Role::Editor) => CallerRole::Editor,
+        Access::Member(Role::Viewer) => CallerRole::Viewer,
+    }
+}
+
+/// An artifact as a list shows it: with the caller's role and the owner
+/// (decision 0060 rule 7).
+fn listed_dto(listed: &PageArtifact) -> Artifact {
+    Artifact {
+        role: Some(caller_role(listed.access)),
+        owner: Some(AccessUser {
+            id: listed.record.owner.to_string(),
+            label: listed.owner_label.as_str().to_owned(),
+        }),
+        ..artifact_dto(&listed.record)
     }
 }
 

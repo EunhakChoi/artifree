@@ -300,7 +300,8 @@ fn a_purge_deletes_files_and_titles_and_keeps_only_headers() -> TestResult {
     assert_eq!(fixture.bytes(id, 1)?, None);
     let listing = |deleted| {
         fixture.store.list_artifacts(ArtifactListing {
-            owner: &fixture.owner,
+            caller: &fixture.owner,
+            access: None,
             search: None,
             pinned: None,
             deleted,

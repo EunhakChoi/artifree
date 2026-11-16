@@ -725,19 +725,22 @@ pub fn tools() -> Vec<ToolDefinition> {
         tool::<ListArtifactsQuery, ArtifactList>(
             "list_artifacts",
             "List artifacts",
-            "List the artifacts you own, most recently updated first unless sort is created. \
-             q keeps titles containing the text; pinned keeps pinned or unpinned artifacts; \
-             deleted true lists the trash instead of the artifacts outside it. A call returns \
-             at most limit artifacts (default and maximum 500); when next_page_token is \
-             present, pass it as page_token with the same q, sort, pinned, and deleted for the \
-             next page."
+            "List the artifacts you own and those you are a member of, most recently updated \
+             first unless sort is created; each names your role (owner, editor or viewer) and \
+             its owner. access owned or shared keeps one or the other. q keeps titles \
+             containing the text; pinned keeps pinned or unpinned artifacts; deleted true lists \
+             the trash instead of the artifacts outside it, and the trash holds only your own. \
+             A call returns at most limit artifacts (default and maximum 500); when \
+             next_page_token is present, pass it as page_token with the same q, sort, pinned, \
+             deleted, and access for the next page."
                 .into(),
             ToolEffect::Read,
         ),
         tool::<ArtifactArguments, Artifact>(
             "get_artifact",
             "Get artifact",
-            "Read an artifact's metadata. Its current_revision is the base_revision for the next \
+            "Read an artifact's metadata, with your role on it: owner, editor or viewer; a \
+             viewer can read it but not change it. Its current_revision is the base_revision for the next \
              save, and its metadata_revision the base_metadata_revision for the next update. \
              type is the type and release it was made from, or null; read that release with \
              get_type before changing its files."

@@ -37,10 +37,10 @@ use artifree_ports::artifact_store::{
 use sha2::{Digest, Sha256};
 
 use crate::catalog::{Catalog, Release};
-use crate::listing::{self, ArtifactPage, ListQuery};
+use crate::listing::{self, ArtifactPage, ListQuery, PageArtifact};
 use crate::parts::{self, Boundary, ByteRange, FilePart, RangeError};
 use crate::policy;
-use artifree_domain::access::{AccessGeneration, AccessVersion, Need, Role};
+use artifree_domain::access::{Access, AccessGeneration, AccessVersion, Need, Role};
 
 /// An artifact's access list as one caller may see it (decision 0060 rules 6
 /// and 8).
@@ -1051,6 +1051,21 @@ impl<S: ArtifactStore + AccessStore> ArtifactService<S> {
         self.authorized(actor, id)
     }
 
+    /// As [`Self::artifact`], with how `actor` stands towards it: owner, or
+    /// member with a role (decision 0060 rule 6, which has read tools report
+    /// the caller's role). Access is checked as every read checks it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::artifact`].
+    pub fn artifact_with_access(
+        &self,
+        actor: &ActorId,
+        id: &ArtifactId,
+    ) -> Result<(ArtifactRecord, Access), ArtifactError> {
+        self.reachable_with_access(actor, id, Need::Read)
+    }
+
     /// Grants `user` a role on the actor's artifact, changes it, or revokes
     /// it (decision 0060 rule 6), if the artifact is at `base`. Only the
     /// owner may: a member is refused for their role, and anyone else, or
@@ -1187,8 +1202,11 @@ impl<S: ArtifactStore + AccessStore> ArtifactService<S> {
         Ok(self.store.access_generation(id, actor)?)
     }
 
-    /// One page of the artifacts the actor owns that match `query`, after
-    /// the position `page_token` names, if any.
+    /// One page of the artifacts the actor reaches that match `query`, after
+    /// the position `page_token` names, if any: their own and, outside the
+    /// trash, those they are a member of, each with the actor's access and
+    /// the owner's label (decision 0060 rule 7). The trash lists only the
+    /// actor's own.
     ///
     /// A list follows its order as artifacts change: one updated while a
     /// caller pages through the list by update time can appear twice or
@@ -1208,23 +1226,42 @@ impl<S: ArtifactStore + AccessStore> ArtifactService<S> {
             .transpose()?;
         let limit = query.limit.get();
         // One more than a page tells whether another page follows.
-        let mut artifacts = self.store.list_artifacts(ArtifactListing {
-            owner: actor,
+        let mut listed = self.store.list_artifacts(ArtifactListing {
+            caller: actor,
             search: query.search.as_ref().map(listing::SearchText::as_str),
             pinned: query.pinned,
             deleted: query.deleted,
+            access: query.access,
             order: query.order,
             after: after.as_ref(),
             limit: limit + 1,
         })?;
-        let next_page_token = if artifacts.len() > limit {
-            artifacts.truncate(limit);
-            artifacts
+        let next_page_token = if listed.len() > limit {
+            listed.truncate(limit);
+            listed
                 .last()
-                .map(|last| listing::page_token(query, last))
+                .map(|last| listing::page_token(query, &last.record))
         } else {
             None
         };
+        // The access each row grants is the policy's, as for every read; a
+        // row the store lists without a role the caller holds is refused.
+        let artifacts = listed
+            .into_iter()
+            .map(|listed| {
+                let access =
+                    policy::access_of(actor, &listed.record, listed.role).ok_or_else(|| {
+                        ArtifactError::Unavailable(
+                            "the store listed an unreachable artifact".into(),
+                        )
+                    })?;
+                Ok(PageArtifact {
+                    record: listed.record,
+                    access,
+                    owner_label: listed.owner_label,
+                })
+            })
+            .collect::<Result<_, ArtifactError>>()?;
         Ok(ArtifactPage {
             artifacts,
             next_page_token,
@@ -1446,11 +1483,22 @@ impl<S: ArtifactStore + AccessStore> ArtifactService<S> {
         id: &ArtifactId,
         need: Need,
     ) -> Result<ArtifactRecord, ArtifactError> {
-        let record = self.owned(actor, id, need)?;
+        self.reachable_with_access(actor, id, need)
+            .map(|(record, _)| record)
+    }
+
+    /// As [`Self::reachable`], with how `actor` stands towards the artifact.
+    fn reachable_with_access(
+        &self,
+        actor: &ActorId,
+        id: &ArtifactId,
+        need: Need,
+    ) -> Result<(ArtifactRecord, Access), ArtifactError> {
+        let (record, access) = self.owned_with_access(actor, id, need)?;
         if record.deleted_at.is_some() {
             return Err(ArtifactError::NotFound(Missing::Artifact));
         }
-        Ok(record)
+        Ok((record, access))
     }
 
     /// An artifact the actor may change, also in the trash: a write there
@@ -1462,12 +1510,23 @@ impl<S: ArtifactStore + AccessStore> ArtifactService<S> {
         id: &ArtifactId,
         need: Need,
     ) -> Result<ArtifactRecord, ArtifactError> {
+        self.owned_with_access(actor, id, need)
+            .map(|(record, _)| record)
+    }
+
+    /// As [`Self::owned`], with how `actor` stands towards the artifact.
+    fn owned_with_access(
+        &self,
+        actor: &ActorId,
+        id: &ArtifactId,
+        need: Need,
+    ) -> Result<(ArtifactRecord, Access), ArtifactError> {
         let record = self
             .store
             .artifact(id)?
             .ok_or(ArtifactError::NotFound(Missing::Artifact))?;
-        self.admit(actor, &record, need)?;
-        Ok(record)
+        let access = self.admit(actor, &record, need)?;
+        Ok((record, access))
     }
 
     /// Whether `actor` may do what an operation `need`s on `record`. The owner
@@ -1480,7 +1539,7 @@ impl<S: ArtifactStore + AccessStore> ArtifactService<S> {
         actor: &ActorId,
         record: &ArtifactRecord,
         need: Need,
-    ) -> Result<(), ArtifactError> {
+    ) -> Result<Access, ArtifactError> {
         // No member reaches the artifact in the trash (the store holds no
         // role for anyone there), so its role is not looked up.
         let role = if record.owner == *actor || record.deleted_at.is_some() {
@@ -1493,7 +1552,7 @@ impl<S: ArtifactStore + AccessStore> ArtifactService<S> {
         if !access.permits(need) {
             return Err(ArtifactError::Forbidden);
         }
-        Ok(())
+        Ok(access)
     }
 }
 
@@ -1691,6 +1750,7 @@ mod tests {
     use artifree_ports::access_store::{
         AccessList, AccessReceipt, AccessRequest, AccessStoreError,
     };
+    use artifree_ports::artifact_store::ListedArtifact;
 
     fn digest(fields: &[&[u8]]) -> RequestFingerprint {
         let mut fingerprint = Fingerprint::new("test");
@@ -1771,7 +1831,7 @@ mod tests {
         fn list_artifacts(
             &self,
             _: ArtifactListing<'_>,
-        ) -> Result<Vec<ArtifactRecord>, StoreError> {
+        ) -> Result<Vec<ListedArtifact>, StoreError> {
             Ok(Vec::new())
         }
         fn revisions(&self, _: &ArtifactId) -> Result<Vec<RevisionRecord>, StoreError> {

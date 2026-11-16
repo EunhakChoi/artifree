@@ -877,7 +877,8 @@ fn a_backup_during_writes_restores_a_contiguous_prefix_of_history() -> TestResul
     assert_eq!(side_now.title.as_str(), "Side renamed");
     assert!(side_now.pinned && side_now.deleted_at.is_some());
     let in_trash = restored.list_artifacts(ArtifactListing {
-        owner: &owner,
+        caller: &owner,
+        access: None,
         search: None,
         pinned: None,
         deleted: true,
@@ -1004,7 +1005,8 @@ fn store_artifact_id(
     store: &SqliteStore,
 ) -> Result<artifree_domain::identity::ArtifactId, StoreError> {
     let page = store.list_artifacts(ArtifactListing {
-        owner: &actor("owner"),
+        caller: &actor("owner"),
+        access: None,
         search: None,
         pinned: None,
         deleted: false,
@@ -1013,7 +1015,7 @@ fn store_artifact_id(
         limit: 10,
     })?;
     page.first()
-        .map(|record| record.id.clone())
+        .map(|record| record.record.id.clone())
         .ok_or(StoreError::NotFound)
 }
 

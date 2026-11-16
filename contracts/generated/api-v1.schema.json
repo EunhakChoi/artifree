@@ -213,9 +213,31 @@
           "minimum": 0,
           "type": "integer"
         },
+        "owner": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccessUser"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The owner's id and label (decision 0060 rule 7). Present in a list;\nabsent elsewhere."
+        },
         "pinned": {
           "description": "Whether the owner pinned the artifact.",
           "type": "boolean"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CallerRole"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How the caller stands towards the artifact (decision 0060 rules 6 and\n7). Present in a list and when one artifact is read; absent from the\nanswers of writes."
         },
         "title": {
           "description": "Display title.",
@@ -458,7 +480,7 @@
       "description": "Response of `GET /v1/artifacts`.",
       "properties": {
         "artifacts": {
-          "description": "Accessible artifacts that match the query, in its order.",
+          "description": "Accessible artifacts that match the query, in its order: the caller's\nown and, outside the trash, those they are a member of, each with\n`role` and `owner`.",
           "items": {
             "$ref": "#/$defs/Artifact"
           },
@@ -681,6 +703,26 @@
         "status"
       ],
       "type": "object"
+    },
+    "CallerRole": {
+      "description": "How a caller stands towards an artifact: its owner, or a member with a\nrole (decision 0060 rule 3).",
+      "oneOf": [
+        {
+          "const": "owner",
+          "description": "The user who created it.",
+          "type": "string"
+        },
+        {
+          "const": "editor",
+          "description": "A member who reads, commits source and metadata, and enqueues jobs.",
+          "type": "string"
+        },
+        {
+          "const": "viewer",
+          "description": "A member who reads, and uses its own data and asset space.",
+          "type": "string"
+        }
+      ]
     },
     "CancelJobRequest": {
       "additionalProperties": false,
@@ -2345,12 +2387,38 @@
       ],
       "description": "Any JSON value. Objects have unique member names, and every number has a magnitude of at most 2^53 - 1 and is finite, in whatever spelling (1e16 is refused like 10000000000000000). Whole numbers such as 1.0 and 1e2 are stored as integers, and a number too small for a double (0.1e-400) is stored as 0; 1e999 is refused as not finite."
     },
+    "ListAccess": {
+      "description": "Which artifacts a list holds by the caller's relation to them (decision\n0060 rule 7).",
+      "oneOf": [
+        {
+          "const": "owned",
+          "description": "Only the caller's own artifacts.",
+          "type": "string"
+        },
+        {
+          "const": "shared",
+          "description": "Only artifacts the caller is a member of. The trash holds none.",
+          "type": "string"
+        }
+      ]
+    },
     "ListArtifactsQuery": {
       "additionalProperties": false,
       "description": "Query parameters of `GET /v1/artifacts`, all optional. Without any, the\nresponse lists up to 500 artifacts, most recently updated first.",
       "properties": {
+        "access": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ListAccess"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Only owned or only shared artifacts; both when absent (decision 0060\nrule 7)."
+        },
         "deleted": {
-          "description": "`true` lists the trash instead of the artifacts outside it.",
+          "description": "`true` lists the trash instead of the artifacts outside it. The trash\nholds only the caller's own artifacts.",
           "type": [
             "boolean",
             "null"
@@ -2366,7 +2434,7 @@
           ]
         },
         "page_token": {
-          "description": "`next_page_token` of the previous page, with the same `q`, `sort`,\n`pinned`, and `deleted`.",
+          "description": "`next_page_token` of the previous page, with the same `q`, `sort`,\n`pinned`, `deleted`, and `access`.",
           "type": [
             "string",
             "null"

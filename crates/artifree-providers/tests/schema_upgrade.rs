@@ -84,11 +84,11 @@ fn every_released_version_upgrades_to_the_fresh_schema_and_keeps_its_data() -> T
 
         assert_jobs_work_beside_old_keys(&store, version)?;
         assert_data_works_beside_old_keys(&store, version)?;
-
         assert_feed_head_and_data_change(&store, version)?;
 
         let trash = store.list_artifacts(ArtifactListing {
-            owner: &owner,
+            caller: &owner,
+            access: None,
             search: None,
             pinned: None,
             deleted: true,
@@ -96,15 +96,12 @@ fn every_released_version_upgrades_to_the_fresh_schema_and_keeps_its_data() -> T
             after: None,
             limit: 10,
         })?;
-        let trashed: Vec<_> = trash.iter().map(|item| item.title.as_str()).collect();
-        assert_eq!(
-            trashed,
-            if version >= 5 {
-                vec!["Trashed"]
-            } else {
-                vec![]
-            }
-        );
+        let trashed: Vec<_> = trash
+            .iter()
+            .map(|item| item.record.title.as_str())
+            .collect();
+        // The trash came with version 5.
+        assert_eq!(trashed, vec!["Trashed"; usize::from(version >= 5)]);
         let found = store.unreferenced_content()?;
         assert_eq!(
             (found.blobs, found.bytes),

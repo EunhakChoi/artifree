@@ -287,6 +287,39 @@ pub struct Artifact {
     /// Time of the latest source revision in Unix milliseconds; metadata
     /// updates do not change it.
     pub updated_at_ms: i64,
+    /// How the caller stands towards the artifact (decision 0060 rules 6 and
+    /// 7). Present in a list and when one artifact is read; absent from the
+    /// answers of writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<CallerRole>,
+    /// The owner's id and label (decision 0060 rule 7). Present in a list;
+    /// absent elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<AccessUser>,
+}
+
+/// How a caller stands towards an artifact: its owner, or a member with a
+/// role (decision 0060 rule 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CallerRole {
+    /// The user who created it.
+    Owner,
+    /// A member who reads, commits source and metadata, and enqueues jobs.
+    Editor,
+    /// A member who reads, and uses its own data and asset space.
+    Viewer,
+}
+
+/// Which artifacts a list holds by the caller's relation to them (decision
+/// 0060 rule 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ListAccess {
+    /// Only the caller's own artifacts.
+    Owned,
+    /// Only artifacts the caller is a member of. The trash holds none.
+    Shared,
 }
 
 /// A file in a revision manifest.
@@ -514,14 +547,19 @@ pub struct ListArtifactsQuery {
     /// Only pinned (`true`) or only unpinned (`false`) artifacts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned: Option<bool>,
-    /// `true` lists the trash instead of the artifacts outside it.
+    /// `true` lists the trash instead of the artifacts outside it. The trash
+    /// holds only the caller's own artifacts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deleted: Option<bool>,
+    /// Only owned or only shared artifacts; both when absent (decision 0060
+    /// rule 7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<ListAccess>,
     /// Page size, 1-500; 500 when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u64>,
     /// `next_page_token` of the previous page, with the same `q`, `sort`,
-    /// `pinned`, and `deleted`.
+    /// `pinned`, `deleted`, and `access`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_token: Option<String>,
 }
@@ -530,7 +568,9 @@ pub struct ListArtifactsQuery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactList {
-    /// Accessible artifacts that match the query, in its order.
+    /// Accessible artifacts that match the query, in its order: the caller's
+    /// own and, outside the trash, those they are a member of, each with
+    /// `role` and `owner`.
     pub artifacts: Vec<Artifact>,
     /// Pass as `page_token` to read the next page; absent on the last page.
     /// Artifacts updated while a caller pages by update time can appear

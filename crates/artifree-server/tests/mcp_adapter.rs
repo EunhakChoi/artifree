@@ -2207,3 +2207,88 @@ async fn agents_create_from_a_type_with_the_http_semantics() -> TestResult {
     );
     Ok(())
 }
+
+/// Decision 0060 rules 6 and 7: the read tools report the caller's role, and
+/// a list names the owner, for the owner and for a member alike.
+#[tokio::test]
+async fn read_tools_report_the_callers_role_and_the_owner() -> TestResult {
+    let harness = Harness::new();
+    let (status, body) = harness
+        .owner_request("POST", "/v1/users", Some(json!({ "label": "Ana" })))
+        .await?;
+    assert_eq!(status, StatusCode::CREATED);
+    let ana: Value = serde_json::from_slice(&body)?;
+    let (status, body) = harness
+        .owner_request(
+            "POST",
+            "/v1/tokens",
+            Some(json!({ "name": "Ana", "user_id": ana["id"] })),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::CREATED);
+    let ana_token = serde_json::from_slice::<Value>(&body)?["secret"]
+        .as_str()
+        .ok_or("secret")?
+        .to_owned();
+    let created = harness
+        .call(
+            "create_artifact",
+            json!({
+                "title": "Shared", "idempotency_key": "role-create-1",
+                "files": [{ "path": "index.html", "encoding": "utf8", "content": "<p>x</p>" }]
+            }),
+        )
+        .await?;
+    let id = created["structuredContent"]["artifact"]["id"]
+        .as_str()
+        .ok_or("artifact id")?
+        .to_owned();
+    // A write's answer names no role.
+    assert_eq!(created["structuredContent"]["artifact"].get("role"), None);
+    let grant = Request::builder()
+        .method("PUT")
+        .uri(format!(
+            "/v1/artifacts/{id}/access/{}",
+            ana["id"].as_str().ok_or("id")?
+        ))
+        .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("idempotency-key", "role-grant-1")
+        .body(Body::from(
+            json!({ "role": "editor", "base_access_version": 0 }).to_string(),
+        ))?;
+    let (status, body) = harness.post(grant).await?;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+    let own_list = harness.call("list_artifacts", json!({})).await?;
+    let mine = &own_list["structuredContent"]["artifacts"][0];
+    assert_eq!(mine["role"], "owner", "{own_list}");
+    let owner = mine["owner"].clone();
+    assert!(
+        owner["id"].is_string() && owner["label"].is_string(),
+        "{own_list}"
+    );
+
+    let listed = harness
+        .call_as(&ana_token, "list_artifacts", json!({ "access": "shared" }))
+        .await?;
+    let theirs = &listed["structuredContent"]["artifacts"];
+    assert_eq!(theirs.as_array().map(Vec::len), Some(1), "{listed}");
+    assert_eq!(theirs[0]["id"], id.as_str());
+    assert_eq!(theirs[0]["role"], "editor");
+    assert_eq!(theirs[0]["owner"], owner);
+    let none = harness
+        .call_as(&ana_token, "list_artifacts", json!({ "access": "owned" }))
+        .await?;
+    assert_eq!(none["structuredContent"]["artifacts"], json!([]), "{none}");
+
+    let read = harness
+        .call_as(&ana_token, "get_artifact", json!({ "artifact_id": id }))
+        .await?;
+    assert_eq!(read["structuredContent"]["role"], "editor", "{read}");
+    let read = harness
+        .call("get_artifact", json!({ "artifact_id": id }))
+        .await?;
+    assert_eq!(read["structuredContent"]["role"], "owner", "{read}");
+    Ok(())
+}

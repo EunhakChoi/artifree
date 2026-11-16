@@ -789,8 +789,10 @@ test('An agent creates, reads, edits, lists history, reads pinned bytes, and pre
     assert.deepEqual([...new Uint8Array(await logo.arrayBuffer())], png);
 
     // HTTP sees the same state, so both adapters share one service.
+    // A read also names the caller's role, which a write's answer leaves
+    // out (decision 0060 rule 6).
     const viaHttp = await api(`/v1/artifacts/${id}`);
-    assert.deepEqual(viaHttp.body, saved.artifact);
+    assert.deepEqual(viaHttp.body, { ...saved.artifact, role: 'owner' });
   });
 });
 

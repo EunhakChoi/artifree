@@ -148,7 +148,10 @@ fn a_create_without_files_gets_the_starter_and_records_the_release() -> TestResu
     let listed = artifacts.list(&owner, &listing_query(), None)?;
     assert_eq!(listed.artifacts.len(), 1);
     assert_eq!(
-        listed.artifacts.first().map(|record| &record.artifact_type),
+        listed
+            .artifacts
+            .first()
+            .map(|listed| &listed.record.artifact_type),
         Some(&receipt.artifact.artifact_type)
     );
     // An untyped create is unchanged: no type.

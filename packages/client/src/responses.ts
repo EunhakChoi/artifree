@@ -1,4 +1,5 @@
 import type {
+  AccessUser,
   AgentSession,
   AppData,
   Artifact,
@@ -7,6 +8,7 @@ import type {
   ArtifactTypeRef,
   BackgroundStatus,
   BuildStatus,
+  CallerRole,
   ChangeKind,
   CommitResponse,
   CopiedPart,
@@ -206,10 +208,41 @@ function artifactType(value: unknown): ArtifactTypeRef | null | undefined {
     : undefined;
 }
 
+const CALLER_ROLES: readonly CallerRole[] = ['owner', 'editor', 'viewer'];
+
+/**
+ * The caller's role and the owner as an artifact carries them (decision 0060
+ * rules 6 and 7): each absent (or `null`, which the contract allows), or well
+ * formed. `false` when either is malformed.
+ */
+function standing(
+  value: Record<string, unknown>,
+): Pick<Artifact, 'role' | 'owner'> | false {
+  const { role, owner } = value;
+  const parsedRole = CALLER_ROLES.find((each) => each === role);
+  if (role !== undefined && role !== null && parsedRole === undefined)
+    return false;
+  let parsedOwner: AccessUser | undefined;
+  if (owner !== undefined && owner !== null) {
+    if (
+      !isRecord(owner) ||
+      typeof owner.id !== 'string' ||
+      typeof owner.label !== 'string'
+    )
+      return false;
+    parsedOwner = { id: owner.id, label: owner.label };
+  }
+  return {
+    ...(parsedRole === undefined ? {} : { role: parsedRole }),
+    ...(parsedOwner === undefined ? {} : { owner: parsedOwner }),
+  };
+}
+
 function artifact(value: unknown): Artifact | undefined {
   if (!isRecord(value)) return undefined;
   const kind = artifactKind(value.kind);
   const type = artifactType(value.type);
+  const caller = standing(value);
   const {
     id,
     title,
@@ -231,7 +264,8 @@ function artifact(value: unknown): Artifact | undefined {
     // Present on every artifact: `null` outside the trash.
     (deleted_at_ms !== null && !isTime(deleted_at_ms)) ||
     !isTime(created_at_ms) ||
-    !isTime(updated_at_ms)
+    !isTime(updated_at_ms) ||
+    caller === false
   )
     return undefined;
   return {
@@ -245,6 +279,7 @@ function artifact(value: unknown): Artifact | undefined {
     deleted_at_ms,
     created_at_ms,
     updated_at_ms,
+    ...caller,
   };
 }
 

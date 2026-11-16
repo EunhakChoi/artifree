@@ -19,9 +19,9 @@ use artifree_ports::access_store::{
 };
 use artifree_ports::artifact_store::{
     ArtifactListing, ArtifactRecord, ArtifactStore, ChangePage, CleanupReceipt, CleanupRequest,
-    CommitReceipt, ConditionalCommit, Delivery, FileEdit, FileExpectation, MetadataReceipt,
-    MetadataUpdate, NewArtifact, PurgeReceipt, PurgeRequest, RequestIdentity, RevisionCommit,
-    RevisionRecord, StoreError, UnreferencedContent,
+    CommitReceipt, ConditionalCommit, Delivery, FileEdit, FileExpectation, ListedArtifact,
+    MetadataReceipt, MetadataUpdate, NewArtifact, PurgeReceipt, PurgeRequest, RequestIdentity,
+    RevisionCommit, RevisionRecord, StoreError, UnreferencedContent,
 };
 use artifree_providers::storage::SqliteStore;
 
@@ -138,7 +138,7 @@ impl ArtifactStore for Misreporting {
     fn list_artifacts(
         &self,
         listing: ArtifactListing<'_>,
-    ) -> Result<Vec<ArtifactRecord>, StoreError> {
+    ) -> Result<Vec<ListedArtifact>, StoreError> {
         self.inner.list_artifacts(listing)
     }
     fn revisions(&self, id: &ArtifactId) -> Result<Vec<RevisionRecord>, StoreError> {

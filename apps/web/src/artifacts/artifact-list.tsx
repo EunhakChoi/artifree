@@ -46,6 +46,10 @@ export async function readArtifacts(
         sort: query.sort,
         pinned: query.pinned ?? null,
         deleted: query.deleted,
+        // The workspace offers an owner's actions on every row, so it lists
+        // the caller's own artifacts until it shows roles (decision 0060,
+        // S02h).
+        access: 'owned',
         limit: Math.min(REQUEST_LIMIT, count - artifacts.length),
         page_token: token ?? null,
       },
