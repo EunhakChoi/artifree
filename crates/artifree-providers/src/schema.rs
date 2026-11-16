@@ -820,10 +820,11 @@ ALTER TABLE changes_v20 RENAME TO changes;
 /// shared asset space. Its rows are the rows of `assets` and `asset_spaces`
 /// held by the reserved holder `*shared`, which no actor id can spell;
 /// `charged_to` names the user a shared upload is charged to, and is null for
-/// an actor's own asset. The change kind `shared_assets_changed` carries no
+/// an actor's own asset, which a check enforces. The change kind `shared_assets_changed` carries no
 /// version.
 const SHARED_ASSET_SCHEMA: &str = "
-ALTER TABLE assets ADD COLUMN charged_to TEXT;
+ALTER TABLE assets ADD COLUMN charged_to TEXT
+    CHECK ((charged_to IS NULL) = (actor <> '*shared'));
 CREATE INDEX assets_by_charge ON assets (charged_to) WHERE charged_to IS NOT NULL;
 CREATE TABLE changes_v21 (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,

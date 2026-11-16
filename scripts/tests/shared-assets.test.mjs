@@ -73,3 +73,50 @@ test('the CLI sends --shared as the space of an asset read and write', async () 
     server.close();
   }
 });
+
+test('a retry hint for a shared write names --shared', async () => {
+  const server = createServer((request, response) => {
+    response.statusCode = 503;
+    response.setHeader('content-type', 'application/json');
+    response.end(
+      JSON.stringify({ error: { code: 'unavailable', message: 'down' } }),
+    );
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const address = server.address();
+    assert.ok(address !== null && typeof address === 'object');
+    const env = {
+      ...process.env,
+      ARTIFREE_URL: `http://127.0.0.1:${address.port}`,
+      ARTIFREE_TOKEN: 'f'.repeat(64),
+    };
+    delete env.ARTIFREE_TOKEN_FILE;
+    const failed = await promisify(execFile)(
+      process.execPath,
+      [
+        'apps/cli/dist/main.js',
+        'asset',
+        'delete',
+        artifact,
+        asset,
+        '--base-asset-version',
+        '1',
+        '--idempotency-key',
+        'cli-shared-retry',
+        '--shared',
+      ],
+      { cwd: root, env, timeout: 10_000 },
+    ).then(
+      () => assert.fail('the delete succeeded'),
+      (error) => error,
+    );
+    assert.match(
+      failed.stderr,
+      /the same --shared, artifact, asset ID and --base-asset-version/,
+    );
+  } finally {
+    server.close();
+  }
+});

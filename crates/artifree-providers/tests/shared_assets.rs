@@ -174,6 +174,30 @@ impl Fixture {
             .collect())
     }
 
+    /// Grants, or with `None` revokes, `user`'s role on `artifact`.
+    fn access(
+        &self,
+        artifact: &ArtifactId,
+        user: &ActorId,
+        change: Option<Role>,
+        base: u64,
+    ) -> TestResult {
+        let name = format!("access-{artifact}-{user}-{base}");
+        self.store.change_access(AccessRequest {
+            request: RequestIdentity {
+                actor: &self.owner,
+                key: &key(&name),
+                fingerprint: RequestFingerprint(digest(&name)),
+            },
+            artifact,
+            user,
+            change: change.map_or(AccessChange::Revoke, AccessChange::Grant),
+            base: AccessVersion(base),
+            now: UnixMillis(2),
+        })?;
+        Ok(())
+    }
+
     fn sql(&self) -> rusqlite::Result<Connection> {
         Connection::open(database_in(self.dir.path()))
     }
@@ -192,7 +216,10 @@ impl Fixture {
             "INSERT OR IGNORE INTO blobs (digest, content) VALUES (?1, x'00')",
             [blob.as_slice()],
         )?;
-        for n in 0..count {
+        // Ids follow the ones already reserved, so a later fill adds new ones.
+        let reserved: i64 =
+            sql.query_row("SELECT count(*) FROM asset_ids", [], |row| row.get(0))?;
+        for n in reserved..reserved + i64::try_from(count)? {
             let id = format!("{n:064x}");
             sql.execute("INSERT OR IGNORE INTO asset_ids (id) VALUES (?1)", [&id])?;
             sql.execute(
@@ -310,8 +337,10 @@ fn a_shared_upload_is_charged_to_its_uploader() -> TestResult {
     let f = Fixture::new()?;
     f.head(1, Some(EDITORS))?;
     let other = create_demo(&f.store, &f.owner, &key("other"), "Other", "v1")?;
-    // Shared uploads elsewhere already charge the editor one short of its
-    // limit; they are not in this artifact's shared space.
+    f.access(&other.artifact.id, &f.editor, Some(Role::Editor), 0)?;
+    // Shared uploads to another artifact the editor is a member of already
+    // charge it one short of its limit; they are not in this artifact's
+    // shared space.
     f.fill(
         (&other.artifact.id, SHARED),
         Some(&f.editor),
@@ -331,6 +360,34 @@ fn a_shared_upload_is_charged_to_its_uploader() -> TestResult {
     );
     // Nothing of it is charged to the owner, who uploads to the same space.
     f.upload(&f.owner, "owner-fits", Space::Shared, 1)?;
+    // Revoked from the other artifact, the editor can no longer delete what
+    // it uploaded there, and those uploads stop counting against it.
+    f.access(&other.artifact.id, &f.editor, None, 1)?;
+    f.upload(&f.editor, "own-after-revoke", Space::Own, 0)?;
+    Ok(())
+}
+
+#[test]
+fn the_owner_is_charged_for_its_shared_uploads_and_the_schema_ties_charge_to_holder() -> TestResult
+{
+    let f = Fixture::new()?;
+    let other = create_demo(&f.store, &f.owner, &key("other"), "Other", "v1")?;
+    f.fill(
+        (&other.artifact.id, SHARED),
+        Some(&f.owner),
+        MAX_ACTOR_ASSETS,
+    )?;
+    assert_eq!(
+        f.upload(&f.owner, "owner-full", Space::Own, 0).map(|_| ()),
+        Err(AssetStoreError::Rejected(AssetRejection::LimitExceeded))
+    );
+    // A shared row names who it is charged to, and an own row names no one.
+    for (holder, charged_to) in [(SHARED, None), (f.editor.as_str(), Some(&f.editor))] {
+        assert!(
+            f.fill((&other.artifact.id, holder), charged_to, 1).is_err(),
+            "{holder} {charged_to:?}"
+        );
+    }
     Ok(())
 }
 

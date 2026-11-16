@@ -636,3 +636,34 @@ async fn a_shared_upload_is_located_in_the_shared_space() -> TestResult {
         .await?;
     Ok(())
 }
+
+/// An own-space asset tool keeps its order: a malformed key is refused before
+/// a malformed artifact id, as before the shared space existed.
+#[tokio::test]
+async fn an_own_asset_tool_reads_its_key_before_its_artifact() -> TestResult {
+    let harness = Harness::new()?;
+    let ana = harness.person("Ana").await?;
+    for (name, arguments) in [
+        (
+            "upload_asset",
+            json!({
+                "artifact_id": "bad", "base_asset_version": 0, "content_type": "text/plain",
+                "content_base64": HI, "idempotency_key": "x"
+            }),
+        ),
+        (
+            "delete_asset",
+            json!({
+                "artifact_id": "bad", "asset_id": "0".repeat(64), "base_asset_version": 0,
+                "idempotency_key": "x"
+            }),
+        ),
+    ] {
+        let refused = harness.tool(&ana.secret, name, arguments).await?;
+        assert_eq!(
+            refused["structuredContent"]["error"]["code"], "invalid_request",
+            "{name}: {refused}"
+        );
+    }
+    Ok(())
+}

@@ -802,8 +802,12 @@ async fn writable_asset_space(
     space: Option<DataSpaceName>,
 ) -> Result<Space, ApiError> {
     let space = operations::data_space(space);
-    operations::admit_asset_space(state, actor, &operations::artifact_id(artifact_id)?, space)
-        .await?;
+    // A write to the caller's own space keeps its order: its key is read
+    // before its artifact id.
+    if space == Space::Shared {
+        let artifact = operations::artifact_id(artifact_id)?;
+        operations::admit_asset_space(state, actor, &artifact, space).await?;
+    }
     Ok(space)
 }
 

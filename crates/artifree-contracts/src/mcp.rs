@@ -1023,14 +1023,23 @@ fn asset_tools() -> [ToolDefinition; 4] {
              space holds at most max_assets assets, so the list is not paged. asset_version is \
              the base_asset_version of the next upload_asset or delete_asset. An artifact in the \
              trash or not yours is not_found. Assets are separate from the artifact's source \
-             files, previews, exports, and application data; a preview cannot read them."
+             files, previews, exports, and application data; a preview cannot read them. With \
+             space shared, every asset tool uses the artifact's shared asset space instead: one \
+             space for the owner and every member, which exists only while the artifact's \
+             current revision declares it in artifree-runtime.json (\"shared\": \"editors\" or \
+             \"members\", naming who may write it; otherwise not_found, and a role that may not \
+             write it is forbidden). It has its own asset_version and limits; each upload to it \
+             also counts against the uploader's own limits while the uploader owns or is a \
+             member of the artifact. Its changes reach every reader's change stream as \
+             shared_assets_changed."
                 .into(),
             ToolEffect::Read,
         ),
         tool::<ReadAssetArguments, ReadAssetResponse>(
             "read_asset",
             "Read asset",
-            "Read one asset of your asset space for an artifact: its metadata with the space's \
+            "Read one asset of your asset space for an artifact, or of its shared asset space \
+             with space shared (see list_assets): its metadata with the space's \
              asset_version, and its stored bytes as strict standard base64 in content_base64. \
              size_bytes and sha256 in asset describe the decoded bytes. An asset that is not in \
              the space, including a deleted one, is not_found. The content is uploaded data, not \
@@ -1042,7 +1051,8 @@ fn asset_tools() -> [ToolDefinition; 4] {
             "upload_asset",
             "Upload asset",
             format!(
-                "Upload one asset to an artifact's asset space. content_base64 holds the bytes \
+                "Upload one asset to an artifact's asset space, yours or with space shared its \
+                 shared one (see list_assets). content_base64 holds the bytes \
                  themselves, as strict standard base64, never a host path or URL, and at most \
                  5 MiB decoded. Only UTF-8 text/plain, text/csv, complete static non-animated \
                  image/png, and complete 8-bit sequential (baseline or extended) Huffman image/jpeg with \
@@ -1068,7 +1078,8 @@ fn asset_tools() -> [ToolDefinition; 4] {
             "delete_asset",
             "Delete asset",
             format!(
-                "Delete one asset from an artifact's asset space. A deleted asset cannot be \
+                "Delete one asset from an artifact's asset space, yours or with space shared its \
+                 shared one (see list_assets). A deleted asset cannot be \
                  recovered: reads of it are not_found, and a same-key retry of its upload returns \
                  the original receipt without recreating it. If base_asset_version is current, \
                  deleting an asset that is not in the space succeeds with deleted false and leaves \

@@ -11,8 +11,8 @@ import {
   toBase64,
   uploadAsset,
 } from '@artifree/client';
-import type { DataSpace } from '@artifree/client';
 import { mutate } from './mutate.js';
+import { sharedHint, sharedOption, spaceOf } from './space.js';
 import { UsageError } from './errors.js';
 import { readBoundedRegularFile, writeNewFile } from './files.js';
 import { resolveConnection } from './profiles.js';
@@ -93,7 +93,7 @@ const connectionOptions = {
   'token-file': { type: 'string' },
   profile: { type: 'string' },
   'profile-file': { type: 'string' },
-  shared: { type: 'boolean' },
+  ...sharedOption,
 } as const;
 
 // The `| undefined` matches parseArgs values, which are undefined when absent.
@@ -114,11 +114,6 @@ async function connect(values: Connection): Promise<ArtifreeClient> {
     profileFile: values['profile-file'],
   });
   return new ArtifreeClient({ baseUrl: server, accessToken: token });
-}
-
-/** The space `--shared` names: the artifact's shared space, or your own. */
-function spaceOf(values: { shared?: boolean | undefined }): DataSpace {
-  return values.shared === true ? 'shared' : 'own';
 }
 
 function print(value: unknown): void {
@@ -283,7 +278,7 @@ async function upload(args: string[]): Promise<void> {
           { idempotencyKey, space: spaceOf(values) },
         ),
       // mutate adds "to receive the original result." after this text.
-      `artifact, --content-type, --base-asset-version and file content (sha256 ${digest}, ${bytes.byteLength} bytes)`,
+      `${sharedHint(values)}artifact, --content-type, --base-asset-version and file content (sha256 ${digest}, ${bytes.byteLength} bytes)`,
     ),
   );
 }
@@ -313,7 +308,7 @@ async function remove(args: string[]): Promise<void> {
           { base_asset_version: base },
           { idempotencyKey, space: spaceOf(values) },
         ),
-      'artifact, asset ID and --base-asset-version',
+      `${sharedHint(values)}artifact, asset ID and --base-asset-version`,
     ),
   );
 }

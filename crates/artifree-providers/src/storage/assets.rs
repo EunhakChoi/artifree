@@ -210,12 +210,17 @@ fn space_usage(
     ))
 }
 /// The count and bytes charged to `actor` across every artifact, trash
-/// included: its own associations and the shared uploads charged to it. A
+/// included: its own associations, and the shared uploads charged to it on
+/// artifacts it still owns or is a member of. A revoked member can no longer
+/// delete what it uploaded, so those uploads stop counting against it. A
 /// shared row is held by [`SHARED_HOLDER`], so no row is counted twice.
 fn actor_usage(connection: &Connection, actor: &ActorId) -> Result<(u64, u64), StoreError> {
     totals(connection.query_row(
-        "SELECT count(*), coalesce(sum(size),0) FROM assets
-         WHERE actor = ?1 OR charged_to = ?1",
+        "SELECT count(*), coalesce(sum(a.size),0) FROM assets a
+         WHERE a.actor = ?1 OR (a.charged_to = ?1 AND (
+             EXISTS (SELECT 1 FROM artifacts o WHERE o.id = a.artifact_id AND o.owner = ?1)
+             OR EXISTS (SELECT 1 FROM artifact_members m WHERE m.artifact_id = a.artifact_id
+                 AND m.user_id = ?1 AND m.role IS NOT NULL)))",
         [actor.as_str()],
         |row| Ok((row.get(0)?, row.get(1)?)),
     ))

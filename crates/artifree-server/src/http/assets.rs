@@ -70,11 +70,12 @@ pub(super) async fn upload(
     uri: Uri,
     body: Result<Json<UploadAssetRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    let key = super::key_unless_shared(matches!(asset_space(&uri), Ok(Space::Shared)), key)?;
+    let space = asset_space(&uri);
+    let key = super::key_unless_shared(matches!(space, Ok(Space::Shared)), key)?;
     let Path(id) = path?;
     // An unknown artifact is reported before a malformed body.
     let artifact = operations::artifact_id(&id)?;
-    let space = asset_space(&uri)?;
+    let space = space?;
     operations::admit_asset_space(&state, &actor, &artifact, space).await?;
     let IdempotencyKey(key) = key?;
     let Json(request) = body.map_err(|error| body_error(&error))?;
@@ -145,12 +146,13 @@ pub(super) async fn delete(
     uri: Uri,
     body: Result<Json<DeleteAssetRequest>, JsonRejection>,
 ) -> Result<Json<DeleteAssetResponse>, ApiError> {
-    let key = super::key_unless_shared(matches!(asset_space(&uri), Ok(Space::Shared)), key)?;
+    let space = asset_space(&uri);
+    let key = super::key_unless_shared(matches!(space, Ok(Space::Shared)), key)?;
     let Path((artifact, id)) = path?;
     // An unknown artifact or asset is reported before a malformed body.
     let parsed = operations::artifact_id(&artifact)?;
     operations::asset_id(&id)?;
-    let space = asset_space(&uri)?;
+    let space = space?;
     operations::admit_asset_space(&state, &actor, &parsed, space).await?;
     let IdempotencyKey(key) = key?;
     let Json(request) = body.map_err(|error| body_error(&error))?;
