@@ -168,7 +168,7 @@ export async function revokeAccess(
   client: ArtifreeClient,
   artifactId: string,
   userId: string,
-  baseAccessVersion: number,
+  { baseAccessVersion }: { baseAccessVersion: number },
   options: MutationOptions,
 ): Promise<AccessChangeResponse> {
   return client.json(

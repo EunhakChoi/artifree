@@ -174,7 +174,13 @@ async function change(
             { role, baseAccessVersion: base },
             { idempotencyKey },
           )
-        : revokeAccess(client, id, user, base, { idempotencyKey }),
+        : revokeAccess(
+            client,
+            id,
+            user,
+            { baseAccessVersion: base },
+            { idempotencyKey },
+          ),
     'user, role and --base',
   );
   console.log(JSON.stringify(result, null, 2));

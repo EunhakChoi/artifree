@@ -52,9 +52,15 @@ test('the client sends a grant and a revocation with their keys and bases', asyn
     changed(1),
   );
   assert.deepEqual(
-    await revokeAccess(client, artifactId, bob, 1, {
-      idempotencyKey: 'revoke-key-1',
-    }),
+    await revokeAccess(
+      client,
+      artifactId,
+      bob,
+      { baseAccessVersion: 1 },
+      {
+        idempotencyKey: 'revoke-key-1',
+      },
+    ),
     changed(2),
   );
   const path = `/v1/artifacts/${artifactId}/access/${bob}`;
@@ -73,7 +79,13 @@ test('the client refuses an answer for another change and reads a conflict', asy
   ]) {
     const client = clientFor(async () => Response.json(body));
     await assert.rejects(
-      revokeAccess(client, artifactId, bob, 0, { idempotencyKey: 'key-0001' }),
+      revokeAccess(
+        client,
+        artifactId,
+        bob,
+        { baseAccessVersion: 0 },
+        { idempotencyKey: 'key-0001' },
+      ),
       JSON.stringify(body),
     );
   }

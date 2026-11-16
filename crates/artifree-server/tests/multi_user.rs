@@ -949,6 +949,14 @@ fn http_cases() -> Vec<Case> {
             Some(r#"{"role":"viewer","base_access_version":0}"#),
             Shares,
         ),
+        // The holder's stale base is a conflict; the same three answers.
+        case(
+            "revoke access",
+            "DELETE",
+            "/v1/artifacts/{artifact}/access/{user}",
+            Some(r#"{"base_access_version":999}"#),
+            Shares,
+        ),
         case(
             "agent sessions",
             "GET",

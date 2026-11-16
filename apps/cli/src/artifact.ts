@@ -27,8 +27,6 @@ import { mutate } from './mutate.js';
 import { resolveConnection } from './profiles.js';
 
 export { UsageError };
-// The other command modules import it from here.
-export { mutate };
 
 export const ARTIFACT_HELP = `Usage:
   artifree artifact list [--search <text>] [--sort updated|created]

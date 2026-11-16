@@ -178,6 +178,12 @@ async fn admitted<T>(
 /// artifact for a revocation, the capabilities a viewer is not offered for a
 /// grant of `viewer`. A replay removes nothing: what it would remove was
 /// removed when it committed, and anything held since was granted after it.
+/// A change to the role the user already has commits nothing new and removes
+/// nothing either.
+///
+/// The handler runs in the request's own task (`admit` in `http.rs`), so a
+/// client that disconnects while the change commits does not stop the
+/// removal that follows it.
 pub(crate) async fn change(
     state: &AppState,
     actor: ActorId,
@@ -194,7 +200,7 @@ pub(crate) async fn change(
             artifacts.change_access(&actor, &key, &artifact, &member, change, base, now)
         })
         .await?;
-    if receipt.delivery == Delivery::Committed {
+    if receipt.delivery == Delivery::Committed && receipt.version != base {
         match change {
             AccessChange::Revoke => state.revoke_members(std::slice::from_ref(&user), &id),
             AccessChange::Grant(Role::Viewer) => {
