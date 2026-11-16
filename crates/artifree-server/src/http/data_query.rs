@@ -35,7 +35,7 @@ pub(super) fn parse<T: DeserializeOwned>(uri: &Uri) -> Result<T, ApiError> {
     }
     Query::<T>::try_from_uri(uri)
         .map(|Query(value)| value)
-        .map_err(|_| ApiError::invalid("query does not match the data request"))
+        .map_err(|_| ApiError::invalid("query does not match the request"))
 }
 
 fn hex(byte: u8) -> Option<u8> {

@@ -1,8 +1,8 @@
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { ArtifreeClient, JsonText, newIdempotencyKey } from '@artifree/client';
-import type { DataSpace } from '@artifree/client';
 import { mutate } from './mutate.js';
+import { sharedOption, spaceOf } from './space.js';
 import { UsageError } from './errors.js';
 import { resolveConnection } from './profiles.js';
 
@@ -73,13 +73,8 @@ const connectionOptions = {
   'token-file': { type: 'string' },
   profile: { type: 'string' },
   'profile-file': { type: 'string' },
-  shared: { type: 'boolean' },
+  ...sharedOption,
 } as const;
-
-/** The space `--shared` names: the artifact's shared space, or your own. */
-function spaceOf(values: { shared?: boolean | undefined }): DataSpace {
-  return values.shared === true ? 'shared' : 'own';
-}
 
 type Connection = {
   server?: string | undefined;

@@ -1,5 +1,6 @@
 //! Real HTTP asset envelopes, exact reads, conditional replay and authority.
 
+use artifree_domain::access::Space;
 use artifree_providers::storage::SqliteStore;
 use artifree_providers::tokens::SqliteTokenStore;
 use artifree_server::auth::AccessToken;
@@ -396,6 +397,7 @@ fn policy_retirement_replay_skips_validator_and_validation_holds_no_database_loc
     let media: AssetMediaType = "text/plain".parse()?;
     let key: RequestKey = "upload-service".parse()?;
     let upload = AssetUpload {
+        space: Space::Own,
         base: AssetVersion(0),
         content_type: &media,
         bytes: b"a",
@@ -443,6 +445,7 @@ fn policy_retirement_replay_skips_validator_and_validation_holds_no_database_loc
             &key,
             &worker_artifact,
             AssetUpload {
+                space: Space::Own,
                 base: AssetVersion(1),
                 content_type: &media,
                 bytes: b"b",
@@ -519,6 +522,7 @@ fn competing_upload(held_bytes: &'static [u8]) -> Result<RaceResult, Box<dyn std
             &worker_key,
             &worker_artifact,
             AssetUpload {
+                space: Space::Own,
                 base: AssetVersion(0),
                 content_type: &media,
                 bytes: held_bytes,
@@ -541,6 +545,7 @@ fn competing_upload(held_bytes: &'static [u8]) -> Result<RaceResult, Box<dyn std
         &key,
         &artifact,
         AssetUpload {
+            space: Space::Own,
             base: AssetVersion(0),
             content_type: &media,
             bytes: b"a",
@@ -550,7 +555,7 @@ fn competing_upload(held_bytes: &'static [u8]) -> Result<RaceResult, Box<dyn std
     resume_tx.send(())?;
     let loser = worker.join().map_err(|_| "worker failed")?;
     let winner = winner?;
-    let snapshot = service.assets(&actor, &artifact)?;
+    let snapshot = service.assets(&actor, &artifact, Space::Own)?;
     assert_eq!(
         (snapshot.version, snapshot.assets.len(), snapshot.bytes),
         (AssetVersion(1), 1, 1)
@@ -835,6 +840,7 @@ async fn historical_png_receipts_replay_before_current_policy_without_recreating
         &key,
         &id,
         AssetUpload {
+            space: Space::Own,
             base: AssetVersion(0),
             content_type: &media,
             bytes: &bytes,

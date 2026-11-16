@@ -3,13 +3,14 @@
 use super::{AppState, Authenticated, IdempotencyKey};
 use crate::operations::{self, ApiError};
 use artifree_contracts::api::{
-    AssetList, AssetResponse, DeleteAssetRequest, DeleteAssetResponse, ErrorCode,
+    AssetList, AssetQuery, AssetResponse, DeleteAssetRequest, DeleteAssetResponse, ErrorCode,
     UploadAssetRequest,
 };
+use artifree_domain::access::Space;
 use axum::Json;
 use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{Path, State};
-use axum::http::{StatusCode, header};
+use axum::http::{StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 
 pub(super) fn routes() -> axum::Router<AppState> {
@@ -43,27 +44,48 @@ fn body_error(error: &JsonRejection) -> ApiError {
         ApiError::invalid(error.body_text())
     }
 }
+/// The asset space a request names in its query (decision 0060 rule 10):
+/// the caller's own unless `space=shared`. Another parameter is refused.
+fn asset_space(uri: &Uri) -> Result<Space, ApiError> {
+    let AssetQuery { space } = super::data_query::parse(uri)?;
+    Ok(operations::data_space(space))
+}
 pub(super) async fn list(
     State(state): State<AppState>,
     Authenticated(actor): Authenticated,
     path: Result<Path<String>, PathRejection>,
+    uri: Uri,
 ) -> Result<Json<AssetList>, ApiError> {
     let Path(id) = path?;
-    Ok(Json(operations::list_assets(&state, actor, &id).await?))
+    let space = asset_space(&uri)?;
+    Ok(Json(
+        operations::list_assets(&state, actor, &id, space).await?,
+    ))
 }
 pub(super) async fn upload(
     State(state): State<AppState>,
     Authenticated(actor): Authenticated,
-    IdempotencyKey(key): IdempotencyKey,
+    key: Result<IdempotencyKey, ApiError>,
     path: Result<Path<String>, PathRejection>,
+    uri: Uri,
     body: Result<Json<UploadAssetRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    let space = asset_space(&uri);
+    let key = super::key_unless_shared(matches!(space, Ok(Space::Shared)), key)?;
     let Path(id) = path?;
     // An unknown artifact is reported before a malformed body.
-    operations::artifact_id(&id)?;
+    let artifact = operations::artifact_id(&id)?;
+    let space = space?;
+    operations::admit_asset_space(&state, &actor, &artifact, space).await?;
+    let IdempotencyKey(key) = key?;
     let Json(request) = body.map_err(|error| body_error(&error))?;
-    let receipt = operations::upload_asset(&state, actor, key, &id, request).await?;
-    let location = format!("/v1/artifacts/{id}/assets/{}", receipt.asset.id);
+    let receipt = operations::upload_asset(&state, actor, key, (&id, space), request).await?;
+    let shared = if space == Space::Shared {
+        "?space=shared"
+    } else {
+        ""
+    };
+    let location = format!("/v1/artifacts/{id}/assets/{}{shared}", receipt.asset.id);
     Ok((
         StatusCode::CREATED,
         [(header::LOCATION, location)],
@@ -75,9 +97,11 @@ pub(super) async fn metadata(
     State(state): State<AppState>,
     Authenticated(actor): Authenticated,
     path: Result<Path<(String, String)>, PathRejection>,
+    uri: Uri,
 ) -> Result<Json<AssetResponse>, ApiError> {
     let Path((artifact, id)) = path?;
-    let content = operations::asset_content(&state, actor, &artifact, &id).await?;
+    let space = asset_space(&uri)?;
+    let content = operations::asset_content(&state, actor, (&artifact, space), &id).await?;
     Ok(Json(AssetResponse {
         asset_version: content.version.0,
         asset: operations::asset_dto(&content.metadata),
@@ -87,9 +111,11 @@ pub(super) async fn content(
     State(state): State<AppState>,
     Authenticated(actor): Authenticated,
     path: Result<Path<(String, String)>, PathRejection>,
+    uri: Uri,
 ) -> Result<Response, ApiError> {
     let Path((artifact, id)) = path?;
-    let content = operations::asset_content(&state, actor, &artifact, &id).await?;
+    let space = asset_space(&uri)?;
+    let content = operations::asset_content(&state, actor, (&artifact, space), &id).await?;
     Ok((
         [
             (
@@ -115,15 +141,22 @@ pub(super) async fn content(
 pub(super) async fn delete(
     State(state): State<AppState>,
     Authenticated(actor): Authenticated,
-    IdempotencyKey(key): IdempotencyKey,
+    key: Result<IdempotencyKey, ApiError>,
     path: Result<Path<(String, String)>, PathRejection>,
+    uri: Uri,
     body: Result<Json<DeleteAssetRequest>, JsonRejection>,
 ) -> Result<Json<DeleteAssetResponse>, ApiError> {
+    let space = asset_space(&uri);
+    let key = super::key_unless_shared(matches!(space, Ok(Space::Shared)), key)?;
     let Path((artifact, id)) = path?;
     // An unknown artifact or asset is reported before a malformed body.
-    operations::artifact_id(&artifact)?;
+    let parsed = operations::artifact_id(&artifact)?;
     operations::asset_id(&id)?;
+    let space = space?;
+    operations::admit_asset_space(&state, &actor, &parsed, space).await?;
+    let IdempotencyKey(key) = key?;
     let Json(request) = body.map_err(|error| body_error(&error))?;
-    let receipt = operations::delete_asset(&state, actor, key, &artifact, &id, request).await?;
+    let receipt =
+        operations::delete_asset(&state, actor, key, (&artifact, space), &id, request).await?;
     Ok(Json(receipt))
 }

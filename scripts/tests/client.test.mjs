@@ -3202,6 +3202,7 @@ for (const kind of [
   'deleted',
   'recovered',
   'purged',
+  'shared_assets_changed',
 ]) {
   test(`A ${kind} change with a data version is invalid`, async () => {
     const broken = await failure(
@@ -3210,6 +3211,15 @@ for (const kind of [
     assert.deepEqual([broken.status, broken.code], [200, 'invalid_response']);
   });
 }
+
+// Decision 0060 rule 10: a change to the shared asset space is a kind this
+// client knows, and it carries no version.
+test('A shared asset change is delivered by its kind', async () => {
+  assert.deepEqual(
+    await eventsOf(stream([changeWith('shared_assets_changed', {})])),
+    [changeEvent(3, 'shared_assets_changed')],
+  );
+});
 
 test('A kind this client does not know is delivered as unknown, whatever else it carries', async () => {
   assert.deepEqual(

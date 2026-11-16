@@ -1429,6 +1429,30 @@ fn record_shared_data_change(
     Ok(())
 }
 
+/// Appends `shared_assets_changed` for an asset upload to, or deletion from,
+/// the shared asset space of `id` (decision 0060 rules 10 and 13): to the
+/// owner and every current member, with no version. A shared space is written
+/// only outside the trash.
+fn record_shared_assets_change(
+    transaction: &Transaction<'_>,
+    id: &ArtifactId,
+) -> Result<(), StoreError> {
+    let now = commit_time(transaction)?;
+    let position = current_position(transaction, id)?;
+    for reader in readers(transaction, id, false)? {
+        append_change(
+            transaction,
+            &reader,
+            id,
+            ChangeKind::SharedAssetsChanged,
+            ChangeDetail::None,
+            position,
+            now,
+        )?;
+    }
+    Ok(())
+}
+
 /// Appends the change of a job that the caller's transaction created, or whose
 /// state or `cancel_requested` it changed (decision 0055, rule 7). The row goes
 /// to the feed of the job's owner and names the artifact's current revision and

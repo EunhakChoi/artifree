@@ -491,11 +491,16 @@ pub enum ChangeKind {
     /// 0060 rules 10 and 13). The row is in the feed of the owner and of every
     /// member. The artifact's own source and metadata did not change.
     SharedDataChanged,
+    /// An asset was uploaded to, or deleted from, the artifact's declared
+    /// shared asset space (decision 0060 rules 10 and 13). The row is in the
+    /// feed of the owner and of every member and carries no version: read the
+    /// space again. The artifact's own source and metadata did not change.
+    SharedAssetsChanged,
 }
 
 impl ChangeKind {
     /// Every kind, in declaration order.
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::Created,
         Self::Revised,
         Self::MetadataUpdated,
@@ -508,6 +513,7 @@ impl ChangeKind {
         Self::AccessChanged,
         Self::AccessRevoked,
         Self::SharedDataChanged,
+        Self::SharedAssetsChanged,
     ];
 
     /// The kind's stable snake-case name, the one a store records.
@@ -526,6 +532,7 @@ impl ChangeKind {
             Self::AccessChanged => "access_changed",
             Self::AccessRevoked => "access_revoked",
             Self::SharedDataChanged => "shared_data_changed",
+            Self::SharedAssetsChanged => "shared_assets_changed",
         }
     }
 

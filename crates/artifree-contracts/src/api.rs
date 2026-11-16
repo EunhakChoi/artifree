@@ -1071,6 +1071,20 @@ pub struct DataWriteQuery {
     pub space: Option<DataSpaceName>,
 }
 
+/// Query of every route under `/v1/artifacts/{id}/assets` (decision 0060
+/// rule 10): the list, an upload, an asset's metadata or content, and a
+/// delete. A parameter that is unknown or repeated is refused.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AssetQuery {
+    /// The asset space; the caller's own when absent. `shared` names the
+    /// space the artifact's head revision declares in
+    /// `artifree-runtime.json`; an artifact whose head declares none answers
+    /// `not_found`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<DataSpaceName>,
+}
+
 /// Query of `GET /v1/artifacts/{id}/data`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -2250,6 +2264,11 @@ pub enum ChangeKind {
     /// `data_version`; read it again with `space=shared`. The artifact's
     /// source and metadata did not change.
     SharedDataChanged,
+    /// An asset was uploaded to, or deleted from, the artifact's declared
+    /// shared asset space (decision 0060 rule 10). The owner and every member
+    /// receive it, without a version; list the space again with
+    /// `space=shared`. The artifact's source and metadata did not change.
+    SharedAssetsChanged,
 }
 
 /// Summary information for an access token.

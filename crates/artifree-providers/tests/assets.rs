@@ -2,13 +2,16 @@
 
 mod common;
 
+use artifree_domain::access::Space;
 use artifree_domain::assets::{AssetId, AssetMediaType, AssetRejection, AssetVersion};
 use artifree_domain::identity::{ActorId, ArtifactId, UnixMillis};
 use artifree_domain::{MetadataRevision, SourceRevision};
 use artifree_ports::artifact_store::{
     ArtifactStore, CommitReceipt, Delivery, PurgeRequest, RequestFingerprint, RequestIdentity,
 };
-use artifree_ports::asset_store::{AssetReceipt, AssetStore, AssetStoreError, AssetWrite};
+use artifree_ports::asset_store::{
+    AssetContent, AssetReceipt, AssetStore, AssetStoreError, AssetWrite,
+};
 use artifree_providers::storage::SqliteStore;
 use common::{TempDir, TestResult, actor, create_demo, database_in, digest, key, update_metadata};
 use rusqlite::Connection;
@@ -49,6 +52,10 @@ impl Fixture {
             Ok(()),
         )
     }
+    fn content(&self, id: &AssetId) -> Result<AssetContent, AssetStoreError> {
+        self.store
+            .asset_content(&self.owner, self.id(), Space::Own, id)
+    }
     fn sql(&self) -> rusqlite::Result<Connection> {
         Connection::open(database_in(self.dir.path()))
     }
@@ -59,6 +66,7 @@ impl Fixture {
         let request_key = key(name);
         self.store.delete_asset(
             AssetWrite {
+                space: Space::Own,
                 request: RequestIdentity {
                     actor: &self.owner,
                     key: &request_key,
@@ -91,6 +99,7 @@ fn upload(
     input.extend_from_slice(bytes);
     store.upload_asset(
         AssetWrite {
+            space: Space::Own,
             request: RequestIdentity {
                 actor: owner,
                 key: &request_key,
@@ -117,10 +126,10 @@ fn exact_bytes_survive_reopen_and_equal_uploads_are_distinct() -> TestResult {
         AssetId::from_random(digest("\u{feff}hello\r\n")).as_str()
     );
     let store = SqliteStore::open(&database_in(f.dir.path()))?;
-    let read = store.asset_content(&f.owner, f.id(), &first.id)?;
+    let read = store.asset_content(&f.owner, f.id(), Space::Own, &first.id)?;
     assert_eq!(read.bytes, b"\xef\xbb\xbfhello\r\n");
     assert_eq!(read.version, AssetVersion(2));
-    let list = store.assets(&f.owner, f.id())?;
+    let list = store.assets(&f.owner, f.id(), Space::Own)?;
     assert_eq!((list.assets.len(), list.bytes), (2, 20));
     assert!(list.assets.windows(2).all(|pair| pair[0].id < pair[1].id));
     assert_eq!(
@@ -154,7 +163,8 @@ fn replay_precedes_base_policy_and_deleted_content_is_never_recreated() -> TestR
         (first.id.clone(), AssetVersion(1), Delivery::Replayed)
     );
     assert_eq!(
-        f.store.asset_content(&f.owner, f.id(), &first.id),
+        f.store
+            .asset_content(&f.owner, f.id(), Space::Own, &first.id),
         Err(AssetStoreError::NotFound)
     );
     assert_eq!(
@@ -218,6 +228,7 @@ fn authority_key_and_base_win_over_content_rejection() -> TestResult {
     )?;
     let matching = RequestFingerprint(stored.try_into().map_err(|_| "fingerprint length")?);
     let fenced = AssetWrite {
+        space: Space::Own,
         request: RequestIdentity {
             actor: &f.owner,
             key: &request_key,
@@ -266,10 +277,15 @@ fn empty_oversized_and_quota_rejection_leave_the_key_free() -> TestResult {
         Err(AssetStoreError::Rejected(AssetRejection::LimitExceeded))
     );
     assert_eq!(f.counts()?, (64, 1, 64, 3));
-    let id = f.store.assets(&f.owner, f.id())?.assets[0].id.clone();
+    let id = f.store.assets(&f.owner, f.id(), Space::Own)?.assets[0]
+        .id
+        .clone();
     f.delete("room", 64, &id)?;
     f.upload("quota", 65, b"a")?;
-    assert_eq!(f.store.assets(&f.owner, f.id())?.assets.len(), 64);
+    assert_eq!(
+        f.store.assets(&f.owner, f.id(), Space::Own)?.assets.len(),
+        64
+    );
     Ok(())
 }
 #[test]
@@ -322,6 +338,7 @@ fn concurrent_matching_settlement_replays_even_when_local_validation_rejected() 
     let request_key = key("same");
     let media: AssetMediaType = "text/plain".parse()?;
     let write = AssetWrite {
+        space: Space::Own,
         request: RequestIdentity {
             actor: &f.owner,
             key: &request_key,
@@ -341,6 +358,7 @@ fn concurrent_matching_settlement_replays_even_when_local_validation_rejected() 
     assert_eq!(loser.delivery, Delivery::Replayed);
     assert_eq!(loser.id, winner.id);
     let different = AssetWrite {
+        space: Space::Own,
         request: RequestIdentity {
             fingerprint: RequestFingerprint([18; 32]),
             ..write.request
@@ -390,7 +408,7 @@ fn trash_recover_purge_keep_versions_and_scrub_reserved_receipts() -> TestResult
         Some(true),
     )?;
     assert_eq!(
-        f.store.assets(&f.owner, f.id()),
+        f.store.assets(&f.owner, f.id(), Space::Own),
         Err(AssetStoreError::NotFound)
     );
     assert_eq!(
@@ -406,10 +424,7 @@ fn trash_recover_purge_keep_versions_and_scrub_reserved_receipts() -> TestResult
         None,
         Some(false),
     )?;
-    assert_eq!(
-        f.store.asset_content(&f.owner, f.id(), &first.id)?.version,
-        AssetVersion(1)
-    );
+    assert_eq!(f.content(&first.id)?.version, AssetVersion(1));
     update_metadata(
         &f.store,
         &f.created,
@@ -457,13 +472,11 @@ fn trash_recover_purge_keep_versions_and_scrub_reserved_receipts() -> TestResult
         ),
         Err(artifree_ports::artifact_store::StoreError::RequestKeyReused)
     );
-    assert_eq!(
-        f.store.asset_content(&f.owner, f.id(), &first.id),
-        Err(AssetStoreError::NotFound)
-    );
+    assert_eq!(f.content(&first.id), Err(AssetStoreError::NotFound));
     let reserved = key("upload");
     assert_eq!(
         f.store.preflight_asset(AssetWrite {
+            space: Space::Own,
             request: RequestIdentity {
                 actor: &f.owner,
                 key: &reserved,
@@ -522,7 +535,7 @@ fn source_and_asset_references_both_protect_shared_blob_bytes() -> TestResult {
     })?;
     assert_eq!(
         f.store
-            .asset_content(&f.owner, &other.artifact.id, &preserved.id)?
+            .asset_content(&f.owner, &other.artifact.id, Space::Own, &preserved.id)?
             .bytes,
         b"<h1>source</h1>"
     );
@@ -578,7 +591,9 @@ fn actor_quota_includes_trashed_spaces_and_equal_byte_associations() -> TestResu
         Err(AssetStoreError::Rejected(AssetRejection::LimitExceeded))
     );
     assert_eq!(
-        f.store.assets(&f.owner, &artifacts[4].artifact.id)?.version,
+        f.store
+            .assets(&f.owner, &artifacts[4].artifact.id, Space::Own)?
+            .version,
         AssetVersion(0)
     );
     assert_eq!(f.counts()?.0, 256);
@@ -591,7 +606,10 @@ fn byte_quota_uses_exact_logical_bytes_and_rolls_back_overflow() -> TestResult {
     for n in 0..5 {
         f.upload(&format!("fill-{n}"), n, &bytes)?;
     }
-    assert_eq!(f.store.assets(&f.owner, f.id())?.bytes, 25 * 1024 * 1024);
+    assert_eq!(
+        f.store.assets(&f.owner, f.id(), Space::Own)?.bytes,
+        25 * 1024 * 1024
+    );
     assert_eq!(
         f.upload("overflow", 5, b"a"),
         Err(AssetStoreError::Rejected(AssetRejection::LimitExceeded))
@@ -613,7 +631,9 @@ fn backup_restore_keeps_asset_bytes_versions_receipts_and_independent_future_cha
     restore(&snapshot, &restored_path)?;
     let restored = SqliteStore::open(&database_in(&restored_path))?;
     assert_eq!(
-        restored.asset_content(&f.owner, f.id(), &first.id)?.bytes,
+        restored
+            .asset_content(&f.owner, f.id(), Space::Own, &first.id)?
+            .bytes,
         b"backup bytes"
     );
     assert_eq!(
@@ -630,7 +650,8 @@ fn backup_restore_keeps_asset_bytes_versions_receipts_and_independent_future_cha
         Delivery::Replayed
     );
     assert_eq!(
-        f.store.asset_content(&f.owner, f.id(), &first.id),
+        f.store
+            .asset_content(&f.owner, f.id(), Space::Own, &first.id),
         Err(AssetStoreError::NotFound)
     );
     Ok(())
@@ -644,7 +665,10 @@ fn schema_eleven_upgrade_adds_assets_and_failed_upgrade_is_atomic() -> TestResul
     let sql = "DROP TABLE shared_data; DROP TABLE access_requests; DROP TABLE artifact_members; ALTER TABLE artifacts DROP COLUMN access_version; DROP TABLE asset_requests; DROP TABLE assets; DROP TABLE asset_spaces; DROP TABLE asset_ids; DROP TABLE execution_attempts; DROP TABLE build_files; DROP TABLE builds; DROP TABLE job_diagnostics; DROP TABLE execution_workers; ALTER TABLE artifacts DROP COLUMN type_release; ALTER TABLE artifacts DROP COLUMN type_id; PRAGMA user_version=11;";
     f.sql()?.execute_batch(sql)?;
     let reopened = SqliteStore::open(&database_in(f.dir.path()))?;
-    assert_eq!(reopened.assets(&f.owner, f.id())?.version, AssetVersion(0));
+    assert_eq!(
+        reopened.assets(&f.owner, f.id(), Space::Own)?.version,
+        AssetVersion(0)
+    );
     upload(
         &reopened,
         &f.owner,
@@ -707,7 +731,7 @@ fn an_upload_between_cleanup_dry_run_and_apply_protects_the_new_association() ->
     assert_eq!(
         fixture
             .store
-            .asset_content(&fixture.owner, fixture.id(), &uploaded.id)?
+            .asset_content(&fixture.owner, fixture.id(), Space::Own, &uploaded.id)?
             .bytes,
         bytes
     );
@@ -729,7 +753,7 @@ fn an_upload_between_cleanup_dry_run_and_apply_protects_the_new_association() ->
     assert_eq!(
         fixture
             .store
-            .asset_content(&fixture.owner, fixture.id(), &uploaded.id)?
+            .asset_content(&fixture.owner, fixture.id(), Space::Own, &uploaded.id)?
             .bytes,
         bytes
     );
@@ -760,25 +784,26 @@ fn an_opaque_id_or_digest_does_not_authorize_another_accessible_space() -> TestR
     assert_eq!(
         fixture
             .store
-            .asset_content(&fixture.owner, &other.artifact.id, &first.id),
+            .asset_content(&fixture.owner, &other.artifact.id, Space::Own, &first.id),
         Err(AssetStoreError::NotFound)
     );
     assert_eq!(
         fixture
             .store
-            .asset_content(&fixture.owner, fixture.id(), &second.id),
+            .asset_content(&fixture.owner, fixture.id(), Space::Own, &second.id),
         Err(AssetStoreError::NotFound)
     );
     let digest_id = AssetId::from_random(Sha256::digest(b"equal private bytes").into());
     assert_eq!(
         fixture
             .store
-            .asset_content(&fixture.owner, fixture.id(), &digest_id),
+            .asset_content(&fixture.owner, fixture.id(), Space::Own, &digest_id),
         Err(AssetStoreError::NotFound)
     );
     let noop_key = key("foreign-id-delete");
     let noop = fixture.store.delete_asset(
         AssetWrite {
+            space: Space::Own,
             request: RequestIdentity {
                 actor: &fixture.owner,
                 key: &noop_key,
@@ -796,14 +821,14 @@ fn an_opaque_id_or_digest_does_not_authorize_another_accessible_space() -> TestR
     assert_eq!(
         fixture
             .store
-            .asset_content(&fixture.owner, fixture.id(), &first.id)?
+            .asset_content(&fixture.owner, fixture.id(), Space::Own, &first.id)?
             .bytes,
         b"equal private bytes"
     );
     assert_eq!(
         fixture
             .store
-            .asset_content(&fixture.owner, &other.artifact.id, &second.id)?
+            .asset_content(&fixture.owner, &other.artifact.id, Space::Own, &second.id)?
             .bytes,
         b"equal private bytes"
     );

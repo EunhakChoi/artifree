@@ -34,7 +34,7 @@ export { readAccess, readMe, revokeAccess, setAccess } from './access.js';
 export { getAsset, listAssets, readAsset } from './assets.js';
 export { toBase64 } from './base64.js';
 export { FRAME_ROUTE_TAILS } from './runtime-frame.js';
-export type { AssetBytes } from './assets.js';
+export type { AssetBytes, AssetReadOptions } from './assets.js';
 export {
   deleteAsset,
   isDeclarableMimeType,

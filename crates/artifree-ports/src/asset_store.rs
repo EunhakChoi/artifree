@@ -4,6 +4,7 @@ use std::fmt;
 
 use crate::artifact_store::{Delivery, RequestIdentity, StoreError};
 use artifree_domain::SourceRevision;
+use artifree_domain::access::Space;
 use artifree_domain::assets::{
     AssetId, AssetMediaType, AssetMetadata, AssetRejection, AssetVersion,
 };
@@ -36,6 +37,9 @@ pub struct AssetWrite<'a> {
     pub request: RequestIdentity<'a>,
     /// Live owned artifact.
     pub artifact: &'a ArtifactId,
+    /// The space written: the actor's own, or the artifact's declared shared
+    /// space (decision 0060 rule 10).
+    pub space: Space,
     /// Observed independent asset version.
     pub base: AssetVersion,
     /// Optional runtime-only source fence, checked before replay.
@@ -61,8 +65,12 @@ pub struct AssetReceipt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AssetStoreError {
-    /// Missing, foreign, trashed or purged artifact or association.
+    /// Missing, foreign, trashed or purged artifact or association, or a
+    /// shared space the head revision does not declare.
     NotFound,
+    /// A member whose role the shared space's declaration does not let write
+    /// it (decision 0060 rules 4 and 10).
+    Forbidden,
     /// The actor-wide key belongs to another request.
     RequestKeyReused,
     /// The independent state changed.
@@ -84,6 +92,7 @@ impl fmt::Display for AssetStoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotFound => formatter.write_str("asset or artifact not found"),
+            Self::Forbidden => formatter.write_str("the role does not allow this write"),
             Self::RequestKeyReused => {
                 formatter.write_str("request key was already used for another request")
             }
@@ -107,6 +116,7 @@ impl From<StoreError> for AssetStoreError {
     fn from(error: StoreError) -> Self {
         match error {
             StoreError::NotFound => Self::NotFound,
+            StoreError::Forbidden => Self::Forbidden,
             StoreError::RequestKeyReused => Self::RequestKeyReused,
             StoreError::AssetLimitExceeded => Self::Rejected(AssetRejection::LimitExceeded),
             other => Self::Unavailable(other.to_string()),
@@ -114,6 +124,12 @@ impl From<StoreError> for AssetStoreError {
     }
 }
 /// Synchronous asset persistence. Every method checks live ownership in its snapshot.
+///
+/// A space is the actor's own, or the artifact's shared space (decision 0060
+/// rule 10), which every reader of the artifact reads while its head revision
+/// declares it, and which the roles the declaration names write. A shared
+/// upload is charged to the actor's own limits as well as to the shared
+/// space's.
 pub trait AssetStore {
     /// Lists bounded metadata and usage in one snapshot.
     /// # Errors
@@ -122,6 +138,7 @@ pub trait AssetStore {
         &self,
         actor: &ActorId,
         artifact: &ArtifactId,
+        space: Space,
     ) -> Result<AssetSnapshot, AssetStoreError>;
     /// Reads exact bytes under current scoped authority.
     /// # Errors
@@ -130,8 +147,22 @@ pub trait AssetStore {
         &self,
         actor: &ActorId,
         artifact: &ArtifactId,
+        space: Space,
         id: &AssetId,
     ) -> Result<AssetContent, AssetStoreError>;
+    /// Whether `actor` may write `space` of the artifact as of now: access,
+    /// and for the shared space the head's declaration and the role it names
+    /// (decision 0060 rules 4 and 10). A caller checks this before it reads a
+    /// request's key and content; the write checks again where it commits.
+    /// # Errors
+    /// [`AssetStoreError::NotFound`], [`AssetStoreError::Forbidden`] or
+    /// [`AssetStoreError::Unavailable`].
+    fn admit_asset_write(
+        &self,
+        actor: &ActorId,
+        artifact: &ArtifactId,
+        space: Space,
+    ) -> Result<(), AssetStoreError>;
     /// Checks authority, optional source fence, key, and base in a short read snapshot.
     /// # Errors
     /// Authority, key, base or storage rejection.

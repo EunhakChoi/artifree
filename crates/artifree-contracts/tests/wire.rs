@@ -710,10 +710,12 @@ fn a_change_event_reads_a_data_version_only_for_a_data_change() -> Result<(), se
         &serde_json::json!({ "data_version": 9_007_199_254_740_991_u64 }),
     )?;
     assert_eq!(largest.data_version, Some(9_007_199_254_740_991));
-    assert_eq!(
-        change_with("revised", &serde_json::json!({}))?.data_version,
-        None
-    );
+    for kind in ["revised", "shared_assets_changed"] {
+        assert_eq!(
+            change_with(kind, &serde_json::json!({}))?.data_version,
+            None
+        );
+    }
 
     for refused in [
         change_with("data_changed", &serde_json::json!({})),
@@ -730,6 +732,11 @@ fn a_change_event_reads_a_data_version_only_for_a_data_change() -> Result<(), se
         ),
         change_with("revised", &serde_json::json!({ "data_version": 1 })),
         change_with("purged", &serde_json::json!({ "data_version": 1 })),
+        // A change to the shared asset space carries no version.
+        change_with(
+            "shared_assets_changed",
+            &serde_json::json!({ "data_version": 1 }),
+        ),
         change_with("revised", &serde_json::json!({ "data_version": null })),
     ] {
         assert!(refused.is_err(), "a change breaking the rule was read");

@@ -331,6 +331,8 @@ fn the_upgrade_to_schema_20_keeps_every_change_and_takes_shared_rows() -> TestRe
         UPDATE actor_feeds SET head = head + 1
             WHERE actor = (SELECT actor FROM changes ORDER BY sequence DESC LIMIT 1);
         DROP TABLE shared_data;
+        DROP INDEX assets_by_charge;
+        ALTER TABLE assets DROP COLUMN charged_to;
         PRAGMA user_version = 19;",
     )?;
     // The row above names a job that is gone, as an older file's rows may:
@@ -341,7 +343,10 @@ fn the_upgrade_to_schema_20_keeps_every_change_and_takes_shared_rows() -> TestRe
         store: SqliteStore::open(&path)?,
         ..f
     };
-    assert_eq!(common::user_version(&path)?, 20);
+    assert_eq!(
+        common::user_version(&path)?,
+        artifree_providers::storage::SCHEMA_VERSION
+    );
     assert_eq!(upgraded.feed(&upgraded.owner)?, before);
     upgraded.write(&upgraded.editor, "shared", Space::Shared, 0, "1")?;
     assert_eq!(

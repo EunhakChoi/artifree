@@ -607,6 +607,24 @@
       ],
       "type": "object"
     },
+    "AssetQuery": {
+      "additionalProperties": false,
+      "description": "Query of every route under `/v1/artifacts/{id}/assets` (decision 0060\nrule 10): the list, an upload, an asset's metadata or content, and a\ndelete. A parameter that is unknown or repeated is refused.",
+      "properties": {
+        "space": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DataSpaceName"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The asset space; the caller's own when absent. `shared` names the\nspace the artifact's head revision declares in\n`artifree-runtime.json`; an artifact whose head declares none answers\n`not_found`."
+        }
+      },
+      "type": "object"
+    },
     "AssetResponse": {
       "additionalProperties": false,
       "description": "Current immutable metadata and space version.",
@@ -812,6 +830,11 @@
         {
           "const": "shared_data_changed",
           "description": "A write changed the artifact's declared shared space (decision 0060\nrule 10). The owner and every member receive it, with the space's new\n`data_version`; read it again with `space=shared`. The artifact's\nsource and metadata did not change.",
+          "type": "string"
+        },
+        {
+          "const": "shared_assets_changed",
+          "description": "An asset was uploaded to, or deleted from, the artifact's declared\nshared asset space (decision 0060 rule 10). The owner and every member\nreceive it, without a version; list the space again with\n`space=shared`. The artifact's source and metadata did not change.",
           "type": "string"
         }
       ]

@@ -57,7 +57,7 @@ use artifree_ports::artifact_store::{
     ArtifactRecord, CommitReceipt, ContentSetDigest, Delivery, FileEdit, FileExpectation,
     FileMismatch, ListAccess, ListOrder, RevisionRecord, UnreferencedContent, parse_sha256,
 };
-use artifree_ports::asset_store::{AssetContent, AssetStoreError};
+use artifree_ports::asset_store::{AssetContent, AssetReceipt, AssetStoreError};
 use artifree_ports::data_store::OutboxFence;
 use artifree_ports::job_store::JobRecord;
 use artifree_providers::archive::{self, ArchiveEntry};
@@ -314,6 +314,8 @@ impl From<AssetStoreError> for ApiError {
             AssetStoreError::NotFound => {
                 Self::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, message)
             }
+            // One body for every refusal by role (decision 0060 rule 4).
+            AssetStoreError::Forbidden => Self::from(ArtifactError::Forbidden),
             AssetStoreError::RequestKeyReused => Self::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 ErrorCode::RequestKeyReused,
@@ -2321,10 +2323,11 @@ pub(crate) async fn list_assets(
     state: &AppState,
     actor: ActorId,
     id: &str,
+    space: Space,
 ) -> Result<AssetList, ApiError> {
     let artifact = artifact_id(id)?;
     let snapshot = state
-        .run_assets(move |service| service.assets(&actor, &artifact))
+        .run_assets(move |service| service.assets(&actor, &artifact, space))
         .await?;
     Ok(AssetList {
         asset_version: snapshot.version.0,
@@ -2343,7 +2346,7 @@ pub(crate) async fn upload_asset(
     state: &AppState,
     actor: ActorId,
     key: RequestKey,
-    id: &str,
+    (id, space): (&str, Space),
     request: UploadAssetRequest,
 ) -> Result<UploadAssetResponse, ApiError> {
     let artifact = artifact_id(id)?;
@@ -2376,6 +2379,7 @@ pub(crate) async fn upload_asset(
                 &key,
                 &artifact,
                 AssetUpload {
+                    space,
                     base,
                     content_type: &media,
                     bytes: &bytes,
@@ -2384,6 +2388,7 @@ pub(crate) async fn upload_asset(
             )
         })
         .await?;
+    wake_for_shared_assets(state, space, &receipt, true);
     let metadata = receipt
         .uploaded
         .ok_or_else(|| ApiError::unavailable("upload receipt has no metadata"))?;
@@ -2399,13 +2404,13 @@ pub(crate) async fn upload_asset(
 pub(crate) async fn asset_content(
     state: &AppState,
     actor: ActorId,
-    id: &str,
+    (id, space): (&str, Space),
     asset: &str,
 ) -> Result<AssetContent, ApiError> {
     let artifact = artifact_id(id)?;
     let asset = asset_id(asset)?;
     Ok(state
-        .run_assets(move |service| service.asset_content(&actor, &artifact, &asset))
+        .run_assets(move |service| service.asset_content(&actor, &artifact, space, &asset))
         .await?)
 }
 
@@ -2416,7 +2421,7 @@ pub(crate) async fn delete_asset(
     state: &AppState,
     actor: ActorId,
     key: RequestKey,
-    id: &str,
+    (id, space): (&str, Space),
     asset: &str,
     request: DeleteAssetRequest,
 ) -> Result<DeleteAssetResponse, ApiError> {
@@ -2425,14 +2430,46 @@ pub(crate) async fn delete_asset(
     let base = asset_base(request.base_asset_version)?;
     let now = state.clock().now();
     let receipt = state
-        .run_assets(move |service| service.delete_asset(&actor, &key, &artifact, base, &asset, now))
+        .run_assets(move |service| {
+            service.delete_asset(&actor, &key, (&artifact, space), base, &asset, now)
+        })
         .await?;
+    wake_for_shared_assets(state, space, &receipt, receipt.deleted);
     Ok(DeleteAssetResponse {
         asset_id: receipt.id.as_str().to_owned(),
         asset_version: receipt.version.0,
         deleted: receipt.deleted,
         replayed: receipt.delivery == Delivery::Replayed,
     })
+}
+
+/// Wakes the change streams after a write that `changed` the shared asset
+/// space committed: it appended a `shared_assets_changed` row to every
+/// reader's feed (decision 0060 rule 13). An own write, a replay, and a delete
+/// of an asset already gone recorded no row.
+fn wake_for_shared_assets(state: &AppState, space: Space, receipt: &AssetReceipt, changed: bool) {
+    if space == Space::Shared && receipt.delivery == Delivery::Committed && changed {
+        state.feed().committed();
+    }
+}
+
+/// Checks the shared asset space's access, declaration and writer role
+/// before a write's key and body are read (decision 0060 rule 4), as
+/// [`admit_space`] does for data. The caller's own space keeps its order.
+pub(crate) async fn admit_asset_space(
+    state: &AppState,
+    actor: &ActorId,
+    artifact: &ArtifactId,
+    space: Space,
+) -> Result<(), ApiError> {
+    if space == Space::Own {
+        return Ok(());
+    }
+    let (actor, artifact) = (actor.clone(), artifact.clone());
+    state
+        .run_assets(move |service| service.admit_asset_write(&actor, &artifact, space))
+        .await?;
+    Ok(())
 }
 
 /// The wire form of an asset's metadata.

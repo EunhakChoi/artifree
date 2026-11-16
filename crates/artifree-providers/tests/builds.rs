@@ -4,6 +4,7 @@
 
 mod common;
 
+use artifree_domain::access::Space;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -416,6 +417,7 @@ fn deleting_an_asset_keeps_the_content_a_build_shares() -> TestResult {
     let media: AssetMediaType = parsed("text/plain");
     let (upload_key, delete_key) = (key("upload"), key("delete"));
     let write = |request_key, base| AssetWrite {
+        space: Space::Own,
         request: RequestIdentity {
             actor: &fixture.owner,
             key: request_key,

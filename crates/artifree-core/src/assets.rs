@@ -2,6 +2,7 @@
 
 use crate::artifacts::{ArtifactService, Fingerprint};
 use artifree_domain::SourceRevision;
+use artifree_domain::access::Space;
 use artifree_domain::assets::{AssetId, AssetMediaType, AssetRejection, AssetVersion};
 use artifree_domain::identity::{ActorId, ArtifactId, RequestKey, UnixMillis};
 use artifree_ports::access_store::AccessStore;
@@ -13,6 +14,9 @@ use artifree_ports::asset_store::{
 /// A frozen bounded upload. MIME syntax and decoded size belong to the stable envelope.
 #[derive(Debug, Clone, Copy)]
 pub struct AssetUpload<'a> {
+    /// The space written: the actor's own, or the artifact's declared shared
+    /// space (decision 0060 rule 10).
+    pub space: Space,
     /// Independent base, unrelated to source revisions.
     pub base: AssetVersion,
     /// Original declared MIME spelling.
@@ -27,6 +31,8 @@ pub struct AssetUpload<'a> {
 /// base and server time.
 #[derive(Debug, Clone, Copy)]
 pub struct AssetDeletion<'a> {
+    /// The space the association is deleted from.
+    pub space: Space,
     /// Independent base, unrelated to source revisions.
     pub base: AssetVersion,
     /// Association to delete from the artifact.
@@ -43,8 +49,23 @@ impl<S: ArtifactStore + AccessStore + AssetStore> ArtifactService<S> {
         &self,
         actor: &ActorId,
         artifact: &ArtifactId,
+        space: Space,
     ) -> Result<AssetSnapshot, AssetStoreError> {
-        self.store.assets(actor, artifact)
+        self.store.assets(actor, artifact, space)
+    }
+    /// Checks, before a write's key and content are read, that `actor` may
+    /// write `space` of the artifact (decision 0060 rule 4): access, then for
+    /// the shared space its declaration and the role it names. The write
+    /// checks again where it commits (rule 5).
+    /// # Errors
+    /// `NotFound`, `Forbidden` or `Unavailable`.
+    pub fn admit_asset_write(
+        &self,
+        actor: &ActorId,
+        artifact: &ArtifactId,
+        space: Space,
+    ) -> Result<(), AssetStoreError> {
+        self.store.admit_asset_write(actor, artifact, space)
     }
     /// Reads exact immutable content under current authority.
     /// # Errors
@@ -53,9 +74,10 @@ impl<S: ArtifactStore + AccessStore + AssetStore> ArtifactService<S> {
         &self,
         actor: &ActorId,
         artifact: &ArtifactId,
+        space: Space,
         id: &AssetId,
     ) -> Result<AssetContent, AssetStoreError> {
-        self.store.asset_content(actor, artifact, id)
+        self.store.asset_content(actor, artifact, space, id)
     }
     /// Uploads with replay preceding the current content validator.
     /// # Errors
@@ -131,6 +153,7 @@ impl<S: ArtifactStore + AccessStore + AssetStore> ArtifactService<S> {
         }
         let mut fingerprint = Fingerprint::new("upload_asset");
         fingerprint.field(artifact.as_str().as_bytes());
+        shared_field(&mut fingerprint, upload.space);
         fingerprint.field(&upload.base.0.to_be_bytes());
         fingerprint.field(upload.content_type.as_str().as_bytes());
         fingerprint.field(upload.bytes);
@@ -141,6 +164,7 @@ impl<S: ArtifactStore + AccessStore + AssetStore> ArtifactService<S> {
                 fingerprint: fingerprint.finish(),
             },
             artifact,
+            space: upload.space,
             base: upload.base,
             expected_source,
             now: upload.now,
@@ -159,12 +183,23 @@ impl<S: ArtifactStore + AccessStore + AssetStore> ArtifactService<S> {
         &self,
         actor: &ActorId,
         key: &RequestKey,
-        artifact: &ArtifactId,
+        (artifact, space): (&ArtifactId, Space),
         base: AssetVersion,
         id: &AssetId,
         now: UnixMillis,
     ) -> Result<AssetReceipt, AssetStoreError> {
-        self.delete_fenced(actor, key, artifact, AssetDeletion { base, id, now }, None)
+        self.delete_fenced(
+            actor,
+            key,
+            artifact,
+            AssetDeletion {
+                space,
+                base,
+                id,
+                now,
+            },
+            None,
+        )
     }
     /// Deletes one runtime frame's asset association, fenced to the source
     /// revision its binding pinned. The store checks that head before key
@@ -192,9 +227,15 @@ impl<S: ArtifactStore + AccessStore + AssetStore> ArtifactService<S> {
         deletion: AssetDeletion<'_>,
         expected_source: Option<SourceRevision>,
     ) -> Result<AssetReceipt, AssetStoreError> {
-        let AssetDeletion { base, id, now } = deletion;
+        let AssetDeletion {
+            space,
+            base,
+            id,
+            now,
+        } = deletion;
         let mut fingerprint = Fingerprint::new("delete_asset");
         fingerprint.field(artifact.as_str().as_bytes());
+        shared_field(&mut fingerprint, space);
         fingerprint.field(&base.0.to_be_bytes());
         fingerprint.field(id.as_str().as_bytes());
         self.store.delete_asset(
@@ -205,11 +246,21 @@ impl<S: ArtifactStore + AccessStore + AssetStore> ArtifactService<S> {
                     fingerprint: fingerprint.finish(),
                 },
                 artifact,
+                space,
                 base,
                 expected_source,
                 now,
             },
             id,
         )
+    }
+}
+
+/// Names the shared space in a request's fingerprint, so a key sent to one
+/// space never replays a write of the other; an own write hashes as before the
+/// shared space existed (decision 0060 rule 10).
+fn shared_field(fingerprint: &mut Fingerprint, space: Space) {
+    if space == Space::Shared {
+        fingerprint.field(space.as_str().as_bytes());
     }
 }

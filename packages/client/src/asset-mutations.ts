@@ -4,9 +4,14 @@ import type {
   UploadAssetRequest,
   UploadAssetResponse,
 } from '@artifree/contracts';
-import type { ArtifreeClient, MutationOptions, ReadOptions } from './client.js';
+import type {
+  ArtifreeClient,
+  DataSpace,
+  MutationOptions,
+  ReadOptions,
+} from './client.js';
 import { ArtifreeApiError } from './errors.js';
-import { pathOf, sha256Hex } from './assets.js';
+import { assetSpaceQuery, pathOf, sha256Hex } from './assets.js';
 import { ASSET_ID, MAX_ASSET_BYTES } from './runtime-limits.js';
 import { isCount, isRecord } from './responses.js';
 
@@ -24,8 +29,15 @@ export function isDeclarableMimeType(value: string): boolean {
 }
 const REQUEST_KEY = /^[A-Za-z0-9._:-]{8,128}$/;
 
-/** Options of an asset mutation: the caller's key, and cancellation. */
-export interface AssetMutationOptions extends MutationOptions, ReadOptions {}
+/**
+ * Options of an asset mutation: the caller's key, cancellation, and the space
+ * written, the caller's own when absent. `shared` names the space the
+ * artifact's head revision declares (decision 0060 rule 10); a key replays
+ * only a write to the space it was sent to.
+ */
+export interface AssetMutationOptions extends MutationOptions, ReadOptions {
+  readonly space?: DataSpace;
+}
 
 function refused(message: string): ArtifreeApiError {
   return new ArtifreeApiError(message, { status: 0, code: 'invalid_request' });
@@ -223,13 +235,14 @@ export async function uploadAsset(
   const encoded = fields.content_base64;
   const key = requestKey(settings.idempotencyKey);
   const signal = requestSignal(settings.signal);
+  const space = assetSpaceQuery(settings.space);
   if (typeof declared !== 'string' || !isDeclarableMimeType(declared))
     throw refused(
       'content_type must be a lowercase MIME type without parameters.',
     );
   if (typeof encoded !== 'string')
     throw refused('content_base64 must be a string.');
-  const path = pathOf(artifactId);
+  const path = `${pathOf(artifactId)}${space}`;
   const bytes = decodeUpload(encoded);
   const body = {
     base_asset_version: base,
@@ -308,7 +321,7 @@ export async function deleteAsset(
   const base = requestBase(fields.base_asset_version);
   const key = requestKey(settings.idempotencyKey);
   const signal = requestSignal(settings.signal);
-  const path = pathOf(artifactId, assetId);
+  const path = `${pathOf(artifactId, assetId)}${assetSpaceQuery(settings.space)}`;
   refuseIfAborted(signal);
   return client.json(
     'DELETE',

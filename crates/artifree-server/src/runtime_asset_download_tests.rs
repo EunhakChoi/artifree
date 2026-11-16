@@ -9,6 +9,7 @@
 //! with source downloads. These tests hold each call at the blocking task it
 //! waits for, so that the change lands where the test wants it.
 
+use artifree_domain::access::Space;
 use std::error::Error;
 use std::future::{Future, poll_fn};
 use std::path::PathBuf;
@@ -162,7 +163,7 @@ async fn owner_upload(
         state,
         actor.clone(),
         "asset-download-owner".parse()?,
-        artifact,
+        (artifact, Space::Own),
         UploadAssetRequest {
             base_asset_version: 0,
             content_type: "image/png".into(),

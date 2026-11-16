@@ -33,6 +33,7 @@ fn bodies_without_a_job() -> Vec<(&'static str, Value)> {
         "deleted",
         "recovered",
         "purged",
+        "shared_assets_changed",
     ]
     .into_iter()
     .map(|kind| (kind, change_with(kind, &[])))

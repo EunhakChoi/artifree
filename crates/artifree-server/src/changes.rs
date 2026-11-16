@@ -371,6 +371,7 @@ impl Producer {
                 ChangeKind::AccessChanged => WireKind::AccessChanged,
                 ChangeKind::AccessRevoked => WireKind::AccessRevoked,
                 ChangeKind::SharedDataChanged => WireKind::SharedDataChanged,
+                ChangeKind::SharedAssetsChanged => WireKind::SharedAssetsChanged,
                 // A kind added later is a revision to clients of this
                 // contract: they read the artifact again.
                 _ => WireKind::Revised,

@@ -1816,11 +1816,20 @@ fn shared_key_later(
     uri: &Uri,
     key: Result<IdempotencyKey, ApiError>,
 ) -> Result<Result<IdempotencyKey, ApiError>, ApiError> {
-    if matches!(write_space(uri), Ok(artifree_domain::access::Space::Shared)) {
-        Ok(key)
-    } else {
-        key.map(Ok)
-    }
+    key_unless_shared(
+        matches!(write_space(uri), Ok(artifree_domain::access::Space::Shared)),
+        key,
+    )
+}
+
+/// The idempotency key of a write, refused at once for a write to the
+/// caller's own space and kept for a shared write, which is authorized before
+/// its key is read (decision 0060 rule 4).
+fn key_unless_shared(
+    shared: bool,
+    key: Result<IdempotencyKey, ApiError>,
+) -> Result<Result<IdempotencyKey, ApiError>, ApiError> {
+    if shared { Ok(key) } else { key.map(Ok) }
 }
 
 /// The space a data write names in its query (decision 0060 rule 10): the

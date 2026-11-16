@@ -12,18 +12,19 @@ import {
   uploadAsset,
 } from '@artifree/client';
 import { mutate } from './mutate.js';
+import { sharedHint, sharedOption, spaceOf } from './space.js';
 import { UsageError } from './errors.js';
 import { readBoundedRegularFile, writeNewFile } from './files.js';
 import { resolveConnection } from './profiles.js';
 
 /** Usage and behavior notes for `artifree asset`, printed by `--help`. */
 export const ASSET_HELP = `Usage:
-  artifree asset list <artifact-id>
+  artifree asset list <artifact-id> [--shared]
   artifree asset upload <artifact-id> --file <path> --content-type <mime>
-      --base-asset-version <n> [--idempotency-key <key>]
-  artifree asset read <artifact-id> <asset-id> --output <file>
+      --base-asset-version <n> [--idempotency-key <key>] [--shared]
+  artifree asset read <artifact-id> <asset-id> --output <file> [--shared]
   artifree asset delete <artifact-id> <asset-id> --base-asset-version <n>
-      [--idempotency-key <key>]
+      [--idempotency-key <key>] [--shared]
 
 Connection:
   --server <url>         API URL [env ARTIFREE_SERVER, ARTIFREE_URL, default http://127.0.0.1:7410]
@@ -74,6 +75,15 @@ delete is permanent: a deleted asset cannot be recovered, and reading it fails
 with not_found. Deleting an asset ID that is not in the space succeeds with
 deleted: false and leaves asset_version unchanged, when the base is current.
 
+--shared lists, reads, uploads to or deletes from the artifact's shared asset
+space instead of your own: one space for the owner and every member, which
+exists only while the artifact's current revision declares it in
+artifree-runtime.json with "shared": "editors" or "shared": "members", naming
+who may write it (otherwise not_found; a role that may not write it is
+forbidden). It has its own asset_version and limits, each upload also counts
+against the uploader's own asset limits, and a key replays only the space it
+was sent to.
+
 Results are JSON on stdout; errors and retry hints go to stderr.
 `;
 
@@ -83,6 +93,7 @@ const connectionOptions = {
   'token-file': { type: 'string' },
   profile: { type: 'string' },
   'profile-file': { type: 'string' },
+  ...sharedOption,
 } as const;
 
 // The `| undefined` matches parseArgs values, which are undefined when absent.
@@ -200,7 +211,7 @@ async function list(args: string[]): Promise<void> {
   });
   const artifactId = artifactOperand(positionals);
   const client = await connect(values);
-  print(await listAssets(client, artifactId));
+  print(await listAssets(client, artifactId, { space: spaceOf(values) }));
 }
 
 async function read(args: string[]): Promise<void> {
@@ -217,7 +228,9 @@ async function read(args: string[]): Promise<void> {
   const client = await connect(values);
   // readAsset checks the MIME type, size and SHA-256 before it resolves, so a
   // response that fails verification never reaches writeNewFile.
-  const result = await readAsset(client, artifactId, assetId);
+  const result = await readAsset(client, artifactId, assetId, {
+    space: spaceOf(values),
+  });
   // Downloaded asset content is private user data: owner-only, whatever the umask.
   await writeNewFile(output, result.bytes, 0o600);
   print({
@@ -262,10 +275,10 @@ async function upload(args: string[]): Promise<void> {
             content_type: contentType,
             content_base64: contentBase64,
           },
-          { idempotencyKey },
+          { idempotencyKey, space: spaceOf(values) },
         ),
       // mutate adds "to receive the original result." after this text.
-      `artifact, --content-type, --base-asset-version and file content (sha256 ${digest}, ${bytes.byteLength} bytes)`,
+      `${sharedHint(values)}artifact, --content-type, --base-asset-version and file content (sha256 ${digest}, ${bytes.byteLength} bytes)`,
     ),
   );
 }
@@ -293,9 +306,9 @@ async function remove(args: string[]): Promise<void> {
           artifactId,
           assetId,
           { base_asset_version: base },
-          { idempotencyKey },
+          { idempotencyKey, space: spaceOf(values) },
         ),
-      'artifact, asset ID and --base-asset-version',
+      `${sharedHint(values)}artifact, asset ID and --base-asset-version`,
     ),
   );
 }
