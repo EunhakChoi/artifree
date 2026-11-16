@@ -181,9 +181,6 @@ struct Located {
     session: Arc<RuntimeSession>,
     tab: TabKey,
     artifact: ArtifactId,
-    /// The access generation read before the access check, when it ran
-    /// (decision 0060 rule 16).
-    seen: Option<AccessGeneration>,
 }
 
 impl Located {
@@ -224,24 +221,16 @@ async fn locate(
         .runtime_sessions()
         .get(actor, session_id)
         .map_err(session_error)?;
-    let seen = if live {
+    if live {
         let (owner, id) = (actor.clone(), artifact.clone());
-        let seen = state
-            .run(move |artifacts| {
-                let seen = artifacts.access_generation(&owner, &id)?;
-                artifacts.artifact(&owner, &id)?;
-                Ok(seen)
-            })
+        state
+            .run(move |artifacts| artifacts.artifact(&owner, &id))
             .await?;
-        Some(seen)
-    } else {
-        None
-    };
+    }
     Ok(Located {
         session,
         tab: TabKey::new(session_id),
         artifact,
-        seen,
     })
 }
 
@@ -290,7 +279,18 @@ pub(crate) async fn join(
     artifact: &str,
     body: Result<RoomJoinRequest, ApiError>,
 ) -> Result<RoomSnapshot, ApiError> {
-    let located = locate(state, actor, session_id, artifact, true).await?;
+    let located = locate(state, actor, session_id, artifact, false).await?;
+    // The participant outlives the request, so the access generation is read
+    // before the access check and confirmed after the join (decision 0060
+    // rule 16).
+    let (owner, id) = (actor.clone(), located.artifact.clone());
+    let seen: AccessGeneration = state
+        .run(move |artifacts| {
+            let seen = artifacts.access_generation(&owner, &id)?;
+            artifacts.artifact(&owner, &id)?;
+            Ok(seen)
+        })
+        .await?;
     let request = body?;
     let slot: Slot = text("slot", &request.slot)?;
     let presence = state_of(request.state.as_deref())?;
@@ -299,10 +299,7 @@ pub(crate) async fn join(
             rooms.join(now, caller, slot, presence)
         })
         .map(snapshot)?;
-    // The participant outlives the request (decision 0060 rule 16).
-    if let Some(seen) = located.seen {
-        state.confirm_access(actor, &located.artifact, seen).await?;
-    }
+    state.confirm_access(actor, &located.artifact, seen).await?;
     Ok(joined)
 }
 

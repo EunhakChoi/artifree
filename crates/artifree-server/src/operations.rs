@@ -71,7 +71,7 @@ use crate::http::AppState;
 use crate::preview::{
     self, PreviewTarget, RuntimeAuthority, RuntimeIssueError, RuntimeTicketRequest, ViewKey,
 };
-use crate::runtime_policy::{Capability, MANIFEST_PATH, RuntimePolicy, SDK_PIN};
+use crate::runtime_policy::{Capability, CapabilitySet, MANIFEST_PATH, RuntimePolicy, SDK_PIN};
 use crate::runtime_sessions::{GrantScope, SessionError};
 
 /// A failed operation: the HTTP status and the contract error body. MCP
@@ -1373,9 +1373,12 @@ pub(crate) async fn set_runtime_grant(
     let version = session
         .set_grant(scope, capabilities, request.expected_version)
         .map_err(session_error)?;
-    // The grant outlives the request, so it is confirmed against the access
-    // the request saw (decision 0060 rule 16).
-    state.confirm_access(&actor, &id, seen).await?;
+    // A grant that holds a capability outlives the request, so it is
+    // confirmed against the access the request saw (decision 0060 rule 16).
+    // A withdrawal grants nothing to confirm and takes effect at once.
+    if capabilities != CapabilitySet::default() {
+        state.confirm_access(&actor, &id, seen).await?;
+    }
     Ok(RuntimeGrant { version })
 }
 

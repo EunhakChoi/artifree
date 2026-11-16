@@ -511,7 +511,8 @@ impl AppState {
     /// between, a revocation, a role change or a move to or out of the trash,
     /// is answered as a revocation: what `actor` holds of the artifact is
     /// closed, the late registration with it, and the request gets the `404`
-    /// of an unknown artifact. A client that still has access asks again.
+    /// of an unknown artifact. A client that still has access asks again. A
+    /// read that fails closes the same way and answers with its error.
     pub(crate) async fn confirm_access(
         &self,
         actor: &ActorId,
@@ -523,10 +524,14 @@ impl AppState {
             gate.snapshot.notify_one();
             gate.resume.notified().await;
         }
-        if self.access_seen(actor, artifact).await? == seen {
+        // A read that fails confirms nothing, so it closes as a mismatch
+        // does, and the request gets the read's error.
+        let current = self.access_seen(actor, artifact).await;
+        if matches!(current, Ok(current) if current == seen) {
             return Ok(());
         }
         self.revoke_members(std::slice::from_ref(actor), artifact);
+        current?;
         Err(ArtifactError::NotFound(Missing::Artifact).into())
     }
 

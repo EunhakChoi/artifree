@@ -3089,6 +3089,27 @@ impl Race {
         Ok(answer.err().map_or(StatusCode::OK, |error| error.status))
     }
 
+    /// Runs `request` and makes the database unreadable once it registered,
+    /// so that its confirmation cannot read; returns its status.
+    async fn unreadable_meanwhile<T>(
+        &self,
+        request: impl Future<Output = Result<T, ApiError>>,
+    ) -> Result<StatusCode, Box<dyn Error>> {
+        let database = self.directory.0.join("runtime.sqlite3");
+        let hide = async {
+            tokio::time::timeout(Duration::from_secs(5), self.gate.snapshot.notified())
+                .await
+                .map_err(|_| "the request confirmed nothing")?;
+            let hidden = std::fs::rename(&database, self.directory.0.join("hidden.sqlite3"))
+                .and_then(|()| std::fs::create_dir(&database));
+            self.gate.resume.notify_one();
+            hidden.map_err(Box::<dyn Error>::from)
+        };
+        let (answer, hidden) = tokio::join!(request, hide);
+        hidden?;
+        Ok(answer.err().map_or(StatusCode::OK, |error| error.status))
+    }
+
     fn block_on<F: Future<Output = Result<(), Box<dyn Error>>>>(
         case: impl FnOnce(Self) -> F,
     ) -> Result<(), Box<dyn Error>> {
@@ -3247,6 +3268,33 @@ fn a_handoff_staged_across_a_revocation_is_forgotten() -> Result<(), Box<dyn Err
             .await?;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(race.state.handoffs().items_of(&race.ana), 0);
+        Ok(())
+    })
+}
+
+/// A confirmation that cannot read the access generation confirms nothing,
+/// so the registration is closed as on a mismatch (decision 0060 rule 16).
+#[test]
+fn a_preview_link_whose_confirmation_cannot_read_is_closed() -> Result<(), Box<dyn Error>> {
+    Race::block_on(|race| async move {
+        let status = race
+            .unreadable_meanwhile(operations::preview(
+                &race.state,
+                race.ana.clone(),
+                None,
+                StateGeneration::FIRST,
+                race.shared.as_str(),
+                1,
+                PreviewTarget::Source,
+            ))
+            .await?;
+        assert_ne!(status, StatusCode::OK);
+        assert_eq!(
+            race.state
+                .previews()
+                .live_tickets_of(&race.ana, &race.shared),
+            0
+        );
         Ok(())
     })
 }

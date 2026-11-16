@@ -463,18 +463,23 @@ a role (S02e).
 
 **S02d3 (implemented).** Each registration that a request makes for an
 artifact and that outlives it is confirmed against the access generation
-(rule 16): a preview or build preview link, a runtime view, a runtime grant,
-a room join and a staged handoff. The request reads the caller's generation
-on the artifact before its access check, registers, and then reads it again;
-any change in between, a revocation, a role change or a move to or out of
-the trash, is answered as a revocation. What the caller holds of the artifact
-is closed (the closure of S02d2, for that user) and the request gets the
-`404` of an unknown artifact; a caller that still has access asks again. The
-generation is read through `ArtifactService::access_generation`, which
-returns only the caller's own. A change that commits after the second read
-is cleaned up by its own closure, which runs after its commit. Behavioural
-tests (`runtime_tests.rs`, one per registration, `*_across_a_revocation_*`)
-revoke the viewer in the store between the registration and the
-confirmation and fail when each guard is broken. Not in S02d3: runtime
-capabilities offered by role and rule 18's mark (S02d4), and the routes that
-change access (S02e).
+(rule 16): a preview or build preview link, a runtime view, a runtime grant
+that holds a capability, a room join and a staged handoff. The request
+reads the caller's generation on the artifact before its access check,
+registers, and then reads it again. Any change in between (a revocation, a
+role change, or a move to or out of the trash) is answered as a revocation:
+what the caller holds of the artifact is closed (the closure of S02d2, for
+that user), and the request gets the `404` of an unknown artifact. A read
+that fails confirms nothing, so it closes the same way and answers with its
+error. A caller that still has access asks again. A grant that withdraws
+every capability grants nothing, so it takes effect at once and is not
+confirmed. The generation is read through
+`ArtifactService::access_generation`, which returns only the caller's own.
+A change that commits after the second read is cleaned up by its own
+closure, which runs after its commit. Behavioural tests in
+`runtime_tests.rs`, one per registration (`*_across_a_revocation_*`) plus
+`a_preview_link_whose_confirmation_cannot_read_is_closed`, revoke the
+viewer in the store, or make the database unreadable, between the
+registration and the confirmation. They fail when each guard is broken. Not
+in S02d3: runtime capabilities offered by role and rule 18's mark (S02d4),
+and the routes that change access (S02e).
