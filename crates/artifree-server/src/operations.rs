@@ -37,7 +37,7 @@ use artifree_core::members::{MAX_TOKEN_BYTES, MemberLimit, MemberQuery, MemberTo
 use artifree_core::parts::{Boundary, ByteRange, FilePart, RangeError};
 use artifree_core::room::TabKey;
 use artifree_domain::AppDataVersion;
-use artifree_domain::access::AccessGeneration;
+use artifree_domain::access::{AccessGeneration, Need};
 use artifree_domain::artifact_type::{ArtifactType, TypeId, TypeRelease};
 use artifree_domain::assets::{
     AssetId, AssetMediaType, AssetMetadata, AssetRejection, AssetVersion, MAX_ASSET_BYTES,
@@ -1303,12 +1303,25 @@ pub(crate) fn close_runtime_session(
     Ok(())
 }
 
+/// What a runtime request reads of the revision and of the caller's access.
+struct RuntimeSource {
+    record: ArtifactRecord,
+    /// Whether the entry opts in to the runtime.
+    enabled: bool,
+    policy: RuntimePolicy,
+    /// The access generation read before the access check (decision 0060
+    /// rule 16).
+    seen: AccessGeneration,
+    /// The capabilities the caller's role offers (decision 0060 rule 3).
+    offered: CapabilitySet,
+}
+
 async fn runtime_source(
     state: &AppState,
     actor: &ActorId,
     id: &ArtifactId,
     revision: SourceRevision,
-) -> Result<(ArtifactRecord, bool, RuntimePolicy, AccessGeneration), ApiError> {
+) -> Result<RuntimeSource, ApiError> {
     let actor = actor.clone();
     let id = id.clone();
     let manifest_path: PackagePath = MANIFEST_PATH.parse().map_err(|_| {
@@ -1318,11 +1331,12 @@ async fn runtime_source(
             "invalid runtime manifest path",
         )
     })?;
-    let (record, enabled, manifest, seen) = state
+    let (record, enabled, manifest, seen, may_change) = state
         .run(move |artifacts| {
             // Read before the access check (decision 0060 rule 16).
             let seen = artifacts.access_generation(&actor, &id)?;
             let record = artifacts.artifact(&actor, &id)?;
+            let may_change = artifacts.allows(&actor, &id, Need::Change)?;
             if revision > record.current_revision {
                 return Err(ArtifactError::NotFound(Missing::Revision));
             }
@@ -1337,12 +1351,18 @@ async fn runtime_source(
             } else {
                 None
             };
-            Ok((record, enabled, manifest, seen))
+            Ok((record, enabled, manifest, seen, may_change))
         })
         .await?;
     let policy = RuntimePolicy::from_source(enabled, manifest.as_deref())
         .map_err(ApiError::unprocessable)?;
-    Ok((record, enabled, policy, seen))
+    Ok(RuntimeSource {
+        record,
+        enabled,
+        policy,
+        seen,
+        offered: CapabilitySet::offered(may_change),
+    })
 }
 
 pub(crate) async fn set_runtime_grant(
@@ -1360,11 +1380,17 @@ pub(crate) async fn set_runtime_grant(
         .map_err(session_error)?;
     let id = artifact_id(id)?;
     let revision = revision_number(revision)?;
-    let (record, _, policy, seen) = runtime_source(state, &actor, &id, revision).await?;
+    let RuntimeSource {
+        record,
+        policy,
+        seen,
+        offered,
+        ..
+    } = runtime_source(state, &actor, &id, revision).await?;
     if record.current_revision.0 != request.head_revision {
         return Err(session_error(SessionError::Conflict));
     }
-    let Some(capabilities) = policy.grant_of(&request.capabilities) else {
+    let Some(capabilities) = policy.grant_for(&request.capabilities, offered) else {
         return Err(ApiError::unprocessable(
             "grant must be a supported, declared subset",
         ));
@@ -1406,6 +1432,24 @@ fn runtime_issue_error(error: RuntimeIssueError) -> ApiError {
     }
 }
 
+/// [`runtime_source`] for a runtime view. Reading a revision answers 422 when
+/// its manifest is unusable (another SDK pin, a malformed field); an adoption
+/// of such a revision is refused, not malformed (decision 0054, rule 16).
+async fn view_source(
+    state: &AppState,
+    actor: &ActorId,
+    id: &ArtifactId,
+    revision: SourceRevision,
+    adopting: bool,
+) -> Result<RuntimeSource, ApiError> {
+    match runtime_source(state, actor, id, revision).await {
+        Err(error) if adopting && error.status == StatusCode::UNPROCESSABLE_ENTITY => {
+            Err(not_adoptable())
+        }
+        other => other,
+    }
+}
+
 pub(crate) async fn create_runtime_view(
     state: &AppState,
     actor: ActorId,
@@ -1436,17 +1480,14 @@ pub(crate) async fn create_runtime_view(
                 "runtime views are temporarily unavailable",
             )
         })?;
-    let (record, enabled, policy, seen) = match runtime_source(state, &actor, &id, revision).await {
-        // Reading a revision answers 422 when its manifest is unusable (another
-        // SDK pin, a malformed field). An adoption of such a revision is refused,
-        // not malformed (decision 0054, rule 16).
-        Err(error)
-            if request.adopt.is_some() && error.status == StatusCode::UNPROCESSABLE_ENTITY =>
-        {
-            return Err(not_adoptable());
-        }
-        other => other?,
-    };
+    let source = view_source(state, &actor, &id, revision, request.adopt.is_some()).await?;
+    let RuntimeSource {
+        record,
+        enabled,
+        policy,
+        seen,
+        offered,
+    } = source;
     let scope = GrantScope::new(id.clone(), revision, record.current_revision);
     let owner = actor.clone();
     let lifecycle = policy.lifecycle();
@@ -1507,7 +1548,7 @@ pub(crate) async fn create_runtime_view(
         sdk: enabled.then(|| SDK_PIN.to_owned()),
         declared: policy.declared(),
         supported: if enabled {
-            RuntimePolicy::supported()
+            RuntimePolicy::supported_for(offered)
         } else {
             Vec::new()
         },

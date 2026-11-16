@@ -1466,7 +1466,8 @@ pub struct RuntimeView {
     pub lifecycle: RuntimeLifecycle,
     /// Capabilities declared by this pinned revision.
     pub declared: Vec<String>,
-    /// Capabilities supported by this server for the entry's SDK pin.
+    /// Capabilities supported by this server for the entry's SDK pin and
+    /// offered to the caller's role; a viewer is not offered `source.write`.
     pub supported: Vec<String>,
     /// Capabilities granted for this connection and source binding.
     pub granted: Vec<String>,

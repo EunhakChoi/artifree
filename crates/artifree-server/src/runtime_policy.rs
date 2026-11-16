@@ -110,6 +110,19 @@ impl Capability {
 pub(crate) struct CapabilitySet(u16);
 
 impl CapabilitySet {
+    /// What a caller's role offers (decision 0060 rule 3): every capability,
+    /// except `source.write` for a caller who may not change the artifact.
+    pub(crate) fn offered(may_change: bool) -> Self {
+        let all = Capability::ALL
+            .iter()
+            .fold(0, |bits, capability| bits | capability.bit());
+        if may_change {
+            Self(all)
+        } else {
+            Self(all & !Capability::SourceWrite.bit())
+        }
+    }
+
     pub(crate) fn contains(self, capability: Capability) -> bool {
         self.0 & capability.bit() != 0
     }
@@ -225,14 +238,29 @@ impl RuntimePolicy {
         self.lifecycle
     }
 
+    /// The capabilities the server supports for a caller whose role offers
+    /// `offered`; the others are shown as not available (decision 0060 rule
+    /// 3).
+    pub(crate) fn supported_for(offered: CapabilitySet) -> Vec<String> {
+        offered.names()
+    }
+
+    /// Every capability the server supports, as an owner is offered them.
+    #[cfg(test)]
     pub(crate) fn supported() -> Vec<String> {
-        CapabilitySet(Capability::ALL.iter().fold(0, |bits, c| bits | c.bit())).names()
+        Self::supported_for(CapabilitySet::offered(true))
     }
 
     /// The set a user may grant, or `None` when `requested` names a
     /// capability that is undeclared, unsupported or repeated. An empty
-    /// request is the empty set, which clears the grant.
-    pub(crate) fn grant_of(&self, requested: &[String]) -> Option<CapabilitySet> {
+    /// request is the empty set, which clears the grant. A capability the
+    /// caller's role does not offer is left out: asking for it is not an
+    /// error, and it is never granted (decision 0060 rule 3).
+    pub(crate) fn grant_for(
+        &self,
+        requested: &[String],
+        offered: CapabilitySet,
+    ) -> Option<CapabilitySet> {
         let mut set = CapabilitySet::default();
         for name in requested {
             let capability = Capability::parse(name).filter(|_| self.declared.contains(name))?;
@@ -241,7 +269,13 @@ impl RuntimePolicy {
             }
             set.0 |= capability.bit();
         }
-        Some(set)
+        Some(CapabilitySet(set.0 & offered.0))
+    }
+
+    /// [`Self::grant_for`] as an owner is offered capabilities.
+    #[cfg(test)]
+    pub(crate) fn grant_of(&self, requested: &[String]) -> Option<CapabilitySet> {
+        self.grant_for(requested, CapabilitySet::offered(true))
     }
 }
 
@@ -264,6 +298,17 @@ mod tests {
         ASSETS_DOWNLOAD, ASSETS_READ, ASSETS_WRITE, Capability, CapabilitySet, DATA_READ,
         DATA_WRITE, METADATA_READ, RuntimePolicy, SOURCE_DOWNLOAD, SOURCE_READ, SOURCE_WRITE,
     };
+
+    #[test]
+    fn a_caller_who_may_not_change_is_offered_all_but_source_write() {
+        let viewer = CapabilitySet::offered(false);
+        assert!(!viewer.contains(Capability::SourceWrite));
+        assert_eq!(
+            RuntimePolicy::supported_for(viewer).len() + 1,
+            RuntimePolicy::supported().len()
+        );
+        assert!(CapabilitySet::offered(true).contains(Capability::SourceWrite));
+    }
 
     #[test]
     fn snapshot_omission_subset_and_clear_are_distinct_from_legacy_opt_in()

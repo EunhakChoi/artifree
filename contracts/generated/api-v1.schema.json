@@ -3692,7 +3692,7 @@
           "type": "string"
         },
         "supported": {
-          "description": "Capabilities supported by this server for the entry's SDK pin.",
+          "description": "Capabilities supported by this server for the entry's SDK pin and\noffered to the caller's role; a viewer is not offered `source.write`.",
           "items": {
             "type": "string"
           },

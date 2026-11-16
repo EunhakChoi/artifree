@@ -1028,7 +1028,8 @@ export interface RuntimeView {
    */
   session_id: string;
   /**
-   * Capabilities supported by this server for the entry's SDK pin.
+   * Capabilities supported by this server for the entry's SDK pin and
+   * offered to the caller's role; a viewer is not offered `source.write`.
    */
   supported: string[];
   /**

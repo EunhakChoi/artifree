@@ -3298,3 +3298,109 @@ fn a_preview_link_whose_confirmation_cannot_read_is_closed() -> Result<(), Box<d
         Ok(())
     })
 }
+
+/// A runtime artifact of `owner` whose manifest declares `metadata.read` and
+/// `source.write`.
+async fn create_writing_artifact(
+    state: &AppState,
+    owner: &ActorId,
+) -> Result<ArtifactId, Box<dyn Error>> {
+    let created = operations::create(
+        state,
+        owner.clone(),
+        "create-writing".parse()?,
+        CreateArtifactRequest {
+            title: "Writing".into(),
+            artifact_type: None,
+            files: Some(vec![
+                FileUpload {
+                    path: "index.html".into(),
+                    encoding: ContentEncoding::Utf8,
+                    content: "<!doctype html><html><head><!-- artifree-runtime --></head><body>test</body></html>".into(),
+                },
+                FileUpload {
+                    path: "artifree-runtime.json".into(),
+                    encoding: ContentEncoding::Utf8,
+                    content: r#"{"sdk":"artifree.app.v1","capabilities":["metadata.read","source.write"]}"#.into(),
+                },
+            ]),
+        },
+    )
+    .await
+    .map_err(|error| error.body.message)?;
+    Ok(created.artifact.id.parse()?)
+}
+
+/// What `actor`'s runtime view of `artifact` reports as supported, and what
+/// a grant of every declared capability leaves granted.
+async fn offered_to(
+    state: &AppState,
+    actor: &ActorId,
+    artifact: &ArtifactId,
+) -> Result<(Vec<String>, Vec<String>), Box<dyn Error>> {
+    let session = operations::open_runtime_session(state, actor, None)
+        .map_err(|error| error.body.message)?
+        .session_id;
+    let view = operations::create_runtime_view(
+        state,
+        actor.clone(),
+        None,
+        StateGeneration::FIRST,
+        artifact.as_str(),
+        1,
+        CreateRuntimeViewRequest {
+            session_id: session.clone(),
+            view_id: "a".repeat(32),
+            generation: 1,
+            adopt: None,
+        },
+    )
+    .await
+    .map_err(|error| error.body.message)?;
+    operations::set_runtime_grant(
+        state,
+        actor.clone(),
+        &session,
+        artifact.as_str(),
+        1,
+        SetRuntimeGrantRequest {
+            head_revision: 1,
+            expected_version: view.grant_version,
+            capabilities: vec!["metadata.read".into(), "source.write".into()],
+        },
+    )
+    .await
+    .map_err(|error| error.body.message)?;
+    let granted = state
+        .runtime_sessions()
+        .get(actor, &session)
+        .map_err(|error| format!("{error:?}"))?
+        .with_grant(&Holder::scope(artifact), |_, granted| granted.names())
+        .map_err(|error| format!("{error:?}"))?;
+    Ok((view.supported, granted))
+}
+
+/// Decision 0060 rule 3: `source.write` is offered to the owner and editors
+/// only. A viewer's view shows it as not available, and a viewer who asks
+/// for it is not refused but is never granted it.
+#[test]
+fn a_viewer_is_offered_every_capability_but_source_write() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new()?;
+    let state = test_state(&directory)?;
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            let (owner, ana) = (registered_user(&state, 1)?, registered_user(&state, 2)?);
+            let writing = create_writing_artifact(&state, &owner).await?;
+            grant_viewer(&directory, &owner, &writing, &ana)?;
+            let (supported, granted) = offered_to(&state, &owner, &writing).await?;
+            assert!(supported.contains(&"source.write".to_owned()));
+            assert_eq!(granted, ["metadata.read", "source.write"]);
+            let (supported, granted) = offered_to(&state, &ana, &writing).await?;
+            assert!(!supported.contains(&"source.write".to_owned()));
+            assert!(supported.contains(&"metadata.read".to_owned()));
+            assert_eq!(granted, ["metadata.read"]);
+            Ok(())
+        })
+}

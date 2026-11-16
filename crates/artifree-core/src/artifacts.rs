@@ -986,6 +986,26 @@ impl<S: ArtifactStore + AccessStore> ArtifactService<S> {
         self.authorized(actor, id)
     }
 
+    /// Whether `actor`, who may read an artifact, may also make the change
+    /// `need` names on it, without making one: what a runtime surface offers
+    /// by role (decision 0060 rule 3).
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactError::NotFound`] or [`ArtifactError::Unavailable`].
+    pub fn allows(
+        &self,
+        actor: &ActorId,
+        id: &ArtifactId,
+        need: Need,
+    ) -> Result<bool, ArtifactError> {
+        match self.reachable(actor, id, need) {
+            Ok(_) => Ok(true),
+            Err(ArtifactError::Forbidden) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     /// The access generation `actor` holds on an artifact (decision 0060
     /// rule 16): [`AccessGeneration::NEVER`] for an actor who was never a
     /// member, as the owner. A request reads it before its access check, so
