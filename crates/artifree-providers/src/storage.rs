@@ -1403,6 +1403,32 @@ fn record_data_change(
     )
 }
 
+/// Appends a change of the artifact's shared space (decision 0060 rules 10 and
+/// 13) to every reader of it ([`readers`]): the owner and every current
+/// member, each in their own feed, at the artifact's current position and
+/// with the version the write left the space at. A shared space is written
+/// only outside the trash.
+fn record_shared_data_change(
+    transaction: &Transaction<'_>,
+    id: &ArtifactId,
+    version: AppDataVersion,
+) -> Result<(), StoreError> {
+    let now = commit_time(transaction)?;
+    let position = current_position(transaction, id)?;
+    for reader in readers(transaction, id, false)? {
+        append_change(
+            transaction,
+            &reader,
+            id,
+            ChangeKind::SharedDataChanged,
+            ChangeDetail::Data(version),
+            position,
+            now,
+        )?;
+    }
+    Ok(())
+}
+
 /// Appends the change of a job that the caller's transaction created, or whose
 /// state or `cancel_requested` it changed (decision 0055, rule 7). The row goes
 /// to the feed of the job's owner and names the artifact's current revision and

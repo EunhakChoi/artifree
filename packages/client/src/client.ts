@@ -138,8 +138,31 @@ export interface ReadOptions {
   readonly signal?: AbortSignal;
 }
 
+/**
+ * The data space a request names (decision 0060 rule 10): `'own'`, the
+ * default, is the caller's own; `'shared'` is the space the artifact's head
+ * revision declares, which answers `not_found` while none is declared.
+ */
+export type DataSpace = 'own' | 'shared';
+
+/** Options for reading application data. */
+export interface DataReadOptions extends ReadOptions {
+  readonly space?: DataSpace;
+}
+
+/** Options for writing application data. */
+export interface DataMutationOptions extends MutationOptions {
+  readonly space?: DataSpace;
+}
+
+/** The query that names `space`, empty for the caller's own. */
+function spaceQuery(space: DataSpace | undefined): string {
+  return space === 'shared' ? '?space=shared' : '';
+}
+
 /** Options for listing one page of application-data member names. */
 export interface DataMembersOptions extends ReadOptions {
+  readonly space?: DataSpace;
   readonly path?: string;
   readonly limit?: number;
   readonly pageToken?: string;
@@ -903,20 +926,22 @@ export class ArtifreeClient {
    * an error: the answer has `exists: false`. Rejects with `invalid_request`
    * for a path that breaks the grammar, and with `not_found` for an artifact
    * that is missing, in the trash, purged, or someone else's. Previews and
-   * runtime frames cannot read this data.
+   * runtime frames cannot read this data. With `space: 'shared'` it reads
+   * the artifact's declared shared space instead (decision 0060 rule 10).
    */
   async getData(
     artifactId: string,
     path: string | undefined = undefined,
-    options: ReadOptions = {},
+    options: DataReadOptions = {},
   ): Promise<AppData> {
-    const query =
+    const space = spaceQuery(options.space);
+    const suffix =
       path === undefined || path === ''
-        ? ''
-        : `?path=${encodeURIComponent(queryDataPath(path))}`;
+        ? space
+        : `${space === '' ? '?' : `${space}&`}path=${encodeURIComponent(queryDataPath(path))}`;
     return this.json(
       'GET',
-      `/v1/artifacts/${encodeURIComponent(artifactId)}/data${query}`,
+      `/v1/artifacts/${encodeURIComponent(artifactId)}/data${suffix}`,
       parseAppData,
       { signal: options.signal },
     );
@@ -930,6 +955,7 @@ export class ArtifreeClient {
     const { signal } = options;
     signal?.throwIfAborted();
     const query = new URLSearchParams();
+    if (options.space === 'shared') query.set('space', 'shared');
     if (options.path !== undefined)
       query.set('path', queryDataPath(options.path));
     if (options.limit !== undefined) query.set('limit', String(options.limit));
@@ -1096,12 +1122,15 @@ export class ArtifreeClient {
    * a rule of the value), and `request_key_reused`. Writing what is already
    * there changes nothing and keeps the version (`changed: false`). A retry
    * with the same key and request resolves with the original answer and
-   * `replayed: true`. Nothing keeps the value that is replaced.
+   * `replayed: true`. Nothing keeps the value that is replaced. With
+   * `space: 'shared'` it writes the artifact's declared shared space
+   * (decision 0060 rule 10); a role the declaration does not let write it
+   * rejects with `forbidden`, and a key replays only the space it was sent to.
    */
   async setData(
     artifactId: string,
     request: SetDataInput,
-    options: MutationOptions,
+    options: DataMutationOptions,
   ): Promise<DataWriteResponse> {
     return this.dataWrite(
       'PUT',
@@ -1120,7 +1149,7 @@ export class ArtifreeClient {
   async updateData(
     artifactId: string,
     request: UpdateDataInput,
-    options: MutationOptions,
+    options: DataMutationOptions,
   ): Promise<DataWriteResponse> {
     return this.dataWrite(
       'PATCH',
@@ -1138,7 +1167,7 @@ export class ArtifreeClient {
   async deleteData(
     artifactId: string,
     request: DeleteDataRequest,
-    options: MutationOptions,
+    options: DataMutationOptions,
   ): Promise<DataWriteResponse> {
     checkBase(request.base_data_version);
     return this.dataWrite(
@@ -1153,11 +1182,11 @@ export class ArtifreeClient {
     method: string,
     artifactId: string,
     text: string,
-    options: MutationOptions,
+    options: DataMutationOptions,
   ): Promise<DataWriteResponse> {
     return this.json(
       method,
-      `/v1/artifacts/${encodeURIComponent(artifactId)}/data`,
+      `/v1/artifacts/${encodeURIComponent(artifactId)}/data${spaceQuery(options.space)}`,
       parseDataWrite,
       {
         mutation: {

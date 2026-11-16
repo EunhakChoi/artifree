@@ -1,18 +1,19 @@
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { ArtifreeClient, JsonText, newIdempotencyKey } from '@artifree/client';
+import type { DataSpace } from '@artifree/client';
 import { mutate } from './mutate.js';
 import { UsageError } from './errors.js';
 import { resolveConnection } from './profiles.js';
 
 export const DATA_HELP = `Usage:
-  artifree data get <artifact-id> [--path <path>]
+  artifree data get <artifact-id> [--path <path>] [--shared]
   artifree data set <artifact-id> --path <path> --base-data-version <n>
-      (--value <json> | --value-file <file>) [--idempotency-key <key>]
+      (--value <json> | --value-file <file>) [--idempotency-key <key>] [--shared]
   artifree data update <artifact-id> --path <path> --base-data-version <n>
-      (--patch <json> | --patch-file <file>) [--idempotency-key <key>]
+      (--patch <json> | --patch-file <file>) [--idempotency-key <key>] [--shared]
   artifree data delete <artifact-id> --path <path> --base-data-version <n>
-      [--idempotency-key <key>]
+      [--idempotency-key <key>] [--shared]
 
 Connection:
   --server <url>         API URL [env ARTIFREE_SERVER, ARTIFREE_URL, default http://127.0.0.1:7410]
@@ -58,6 +59,12 @@ set, update, and delete accept --idempotency-key <key>; without it a new key
 is generated and reported on stderr if the outcome is unknown, and a retry
 with that key returns the original result with replayed: true. Results are
 JSON on stdout.
+--shared reads or writes the artifact's shared space instead of your own: one
+object for the owner and every member, which exists only while the artifact's
+current revision declares it in artifree-runtime.json with "shared":
+"editors" or "shared": "members", naming who may write it (otherwise
+not_found; a role that may not write it is forbidden). It has its own
+data_version, and a key replays only the space it was sent to.
 `;
 
 const connectionOptions = {
@@ -66,7 +73,13 @@ const connectionOptions = {
   'token-file': { type: 'string' },
   profile: { type: 'string' },
   'profile-file': { type: 'string' },
+  shared: { type: 'boolean' },
 } as const;
+
+/** The space `--shared` names: the artifact's shared space, or your own. */
+function spaceOf(values: { shared?: boolean | undefined }): DataSpace {
+  return values.shared === true ? 'shared' : 'own';
+}
 
 type Connection = {
   server?: string | undefined;
@@ -171,7 +184,11 @@ async function get(args: string[]): Promise<void> {
     strict: true,
   });
   const id = one(positionals);
-  print(await (await connect(values)).getData(id, values.path));
+  print(
+    await (
+      await connect(values)
+    ).getData(id, values.path, { space: spaceOf(values) }),
+  );
 }
 
 async function set(args: string[]): Promise<void> {
@@ -200,7 +217,7 @@ async function set(args: string[]): Promise<void> {
         client.setData(
           id,
           { path, base_data_version: base, value },
-          { idempotencyKey },
+          { idempotencyKey, space: spaceOf(values) },
         ),
     ),
   );
@@ -232,7 +249,7 @@ async function update(args: string[]): Promise<void> {
         client.updateData(
           id,
           { path, base_data_version: base, patch },
-          { idempotencyKey },
+          { idempotencyKey, space: spaceOf(values) },
         ),
     ),
   );
@@ -261,7 +278,7 @@ async function remove(args: string[]): Promise<void> {
         client.deleteData(
           id,
           { path, base_data_version: base },
-          { idempotencyKey },
+          { idempotencyKey, space: spaceOf(values) },
         ),
     ),
   );

@@ -11,13 +11,23 @@
 //! A write that changed the space also appends a `data_changed` row to the feed
 //! of the actor whose space it is, last in the same transaction (decision 0040).
 //!
+//! An artifact's declared shared space (decision 0060 rule 10) is one row of
+//! `shared_data`. It is reached only while the head revision's runtime
+//! manifest declares it, read in the transaction that reads or writes it; a
+//! write needs the role the declaration names, and a change appends a
+//! `shared_data_changed` row to the feed of the owner and every member. Its
+//! keys are in `data_requests`, in the key space of the writer, and its
+//! fingerprint names the space, so a key cannot replay across spaces.
+//!
 //! Neither table holds a content digest or a blob. A purge deletes the rows of
 //! the artifact's spaces and blanks the fingerprints of its keys, both inside
 //! the purge transaction and with `secure_delete` on.
 
 use artifree_domain::AppDataVersion;
 use artifree_domain::SourceRevision;
-use artifree_domain::access::Need;
+use artifree_domain::access::{
+    MAX_RUNTIME_MANIFEST_BYTES, Need, RUNTIME_MANIFEST_PATH, SharedWriters, Space,
+};
 use artifree_domain::data::DataSpace;
 use artifree_domain::identity::{ActorId, ArtifactId, StateGeneration};
 use artifree_ports::artifact_store::{Delivery, RequestIdentity, StoreError};
@@ -27,22 +37,86 @@ use artifree_ports::data_store::{
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use super::jobs::artifact_in_place;
-use super::{SqliteStore, corrupt, key_used_elsewhere, record_data_change, unavailable};
+use super::{
+    SqliteStore, corrupt, key_used_elsewhere, record_data_change, record_shared_data_change,
+    unavailable,
+};
 
-/// The space of `actor` as stored, or the empty space at version 0.
+/// The shared space the artifact's head revision declares, read in the
+/// caller's transaction (decision 0060 rule 10). A head with no manifest, or
+/// with one whose declaration cannot be read, declares none; a manifest over
+/// [`MAX_RUNTIME_MANIFEST_BYTES`] is not copied out to be refused.
+fn head_declaration(
+    connection: &Connection,
+    artifact: &ArtifactId,
+) -> Result<Option<SharedWriters>, StoreError> {
+    let manifest: Option<Vec<u8>> = connection
+        .query_row(
+            "SELECT b.content FROM artifacts a
+             JOIN revision_files f ON f.artifact_id = a.id AND f.revision = a.current_revision
+             JOIN blobs b ON b.digest = f.digest
+             WHERE a.id = ?1 AND f.path = ?2 AND length(b.content) <= ?3",
+            params![
+                artifact.as_str(),
+                RUNTIME_MANIFEST_PATH,
+                i64::try_from(MAX_RUNTIME_MANIFEST_BYTES).unwrap_or(i64::MAX)
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(unavailable)?;
+    Ok(manifest.and_then(|bytes| SharedWriters::declared_in(&bytes).ok().flatten()))
+}
+
+/// Checks, in the caller's transaction, that the actor may reach `space` of
+/// the artifact (decision 0060 rules 5, 9, 10 and 17). A write to its own
+/// space needs read access. The shared space needs a head that declares it ([`StoreError::NotFound`]
+/// without one) and read access; a write needs the role the declaration
+/// names as well ([`StoreError::Forbidden`]).
+fn reach(
+    connection: &Connection,
+    artifact: &ArtifactId,
+    actor: &ActorId,
+    space: Space,
+    writing: bool,
+) -> Result<(), StoreError> {
+    let need = match space {
+        // An own read is the caller's own data, whose access the core checks
+        // as before the shared space; the store reads it unchanged.
+        Space::Own if !writing => return Ok(()),
+        Space::Own => Need::Read,
+        Space::Shared => {
+            let Some(writers) = head_declaration(connection, artifact)? else {
+                return Err(StoreError::NotFound);
+            };
+            if writing { writers.need() } else { Need::Read }
+        }
+    };
+    super::access::admit(connection, artifact, actor, need)
+}
+
+/// The space of `actor`, or the artifact's shared space, as stored, or the
+/// empty space at version 0.
 fn read_space(
     connection: &Connection,
     artifact: &ArtifactId,
     actor: &ActorId,
+    space: Space,
 ) -> Result<DataSnapshot, StoreError> {
-    let stored: Option<(i64, String)> = connection
-        .query_row(
+    let stored: Option<(i64, String)> = match space {
+        Space::Own => connection.query_row(
             "SELECT data_version, document FROM app_data WHERE artifact_id = ?1 AND actor = ?2",
             params![artifact.as_str(), actor.as_str()],
             |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(unavailable)?;
+        ),
+        Space::Shared => connection.query_row(
+            "SELECT data_version, document FROM shared_data WHERE artifact_id = ?1",
+            [artifact.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ),
+    }
+    .optional()
+    .map_err(unavailable)?;
     let Some((version, document)) = stored else {
         return Ok(DataSnapshot {
             version: AppDataVersion::EMPTY,
@@ -130,6 +204,40 @@ fn source_head(
     Ok(SourceRevision(u64::try_from(head).map_err(corrupt)?))
 }
 
+/// Stores the space a write left at `version`: the actor's own row, or the
+/// artifact's shared row.
+fn store_space(
+    transaction: &Transaction<'_>,
+    request: &DataWrite<'_>,
+    version: AppDataVersion,
+    space: &DataSpace,
+) -> Result<(), StoreError> {
+    let stored = i64::try_from(version.0).map_err(corrupt)?;
+    match request.space {
+        Space::Own => transaction.execute(
+            "INSERT INTO app_data (artifact_id, actor, data_version, document)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (artifact_id, actor) DO UPDATE
+                 SET data_version = excluded.data_version, document = excluded.document",
+            params![
+                request.artifact.as_str(),
+                request.request.actor.as_str(),
+                stored,
+                space.to_canonical()
+            ],
+        ),
+        Space::Shared => transaction.execute(
+            "INSERT INTO shared_data (artifact_id, data_version, document)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT (artifact_id) DO UPDATE
+                 SET data_version = excluded.data_version, document = excluded.document",
+            params![request.artifact.as_str(), stored, space.to_canonical()],
+        ),
+    }
+    .map_err(unavailable)?;
+    Ok(())
+}
+
 fn write(
     transaction: &Transaction<'_>,
     request: DataWrite<'_>,
@@ -141,12 +249,16 @@ fn write(
         return Err(DataStoreError::NotFound);
     }
     // A member writes its own space while it is a member, read again here
-    // (decision 0060 rules 5 and 9); a read is all a role needs for that.
-    super::access::admit(
+    // (decision 0060 rules 5 and 9); a read is all a role needs for that. The
+    // shared space is written only while the head declares it, and only by a
+    // role the declaration names, read here before the key (decision 0060
+    // rules 10 and 17).
+    reach(
         transaction,
         request.artifact,
         request.request.actor,
-        Need::Read,
+        request.space,
+        true,
     )?;
     // A runtime frame's write is fenced to its view's head before the key is
     // looked at, so a retry after the head moved is refused, not replayed
@@ -174,7 +286,12 @@ fn write(
         Key::Reused => return Err(DataStoreError::RequestKeyReused),
         Key::Unused => {}
     }
-    let current = read_space(transaction, request.artifact, request.request.actor)?;
+    let current = read_space(
+        transaction,
+        request.artifact,
+        request.request.actor,
+        request.space,
+    )?;
     if current.version != request.base {
         return Err(DataStoreError::VersionConflict {
             current: current.version,
@@ -190,21 +307,9 @@ fn write(
             .0
             .checked_add(1)
             .ok_or_else(|| corrupt("the data version is out of range"))?;
-        transaction
-            .execute(
-                "INSERT INTO app_data (artifact_id, actor, data_version, document)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT (artifact_id, actor) DO UPDATE
-                     SET data_version = excluded.data_version, document = excluded.document",
-                params![
-                    request.artifact.as_str(),
-                    request.request.actor.as_str(),
-                    i64::try_from(next).map_err(corrupt)?,
-                    applied.space.to_canonical()
-                ],
-            )
-            .map_err(unavailable)?;
-        AppDataVersion(next)
+        let version = AppDataVersion(next);
+        store_space(transaction, &request, version, &applied.space)?;
+        version
     } else {
         current.version
     };
@@ -226,14 +331,19 @@ fn write(
         .map_err(unavailable)?;
     // Last: after the data row and the key, in the same transaction, so a
     // failure here undoes both (decision 0040). The actor is the one whose
-    // space changed, named here and not looked up from the artifact.
+    // space changed, named here and not looked up from the artifact; the
+    // shared space reaches every reader of the artifact (decision 0060 rule
+    // 13).
     if applied.changed {
-        record_data_change(
-            transaction,
-            request.request.actor,
-            request.artifact,
-            version,
-        )?;
+        match request.space {
+            Space::Own => record_data_change(
+                transaction,
+                request.request.actor,
+                request.artifact,
+                version,
+            )?,
+            Space::Shared => record_shared_data_change(transaction, request.artifact, version)?,
+        }
     }
     Ok(DataReceipt {
         version,
@@ -272,12 +382,14 @@ pub(super) fn erase_for_purge(
     transaction: &Transaction<'_>,
     artifact: &ArtifactId,
 ) -> Result<(), StoreError> {
-    transaction
-        .execute(
-            "DELETE FROM app_data WHERE artifact_id = ?1",
-            [artifact.as_str()],
-        )
-        .map_err(unavailable)?;
+    for table in [
+        "DELETE FROM app_data WHERE artifact_id = ?1",
+        "DELETE FROM shared_data WHERE artifact_id = ?1",
+    ] {
+        transaction
+            .execute(table, [artifact.as_str()])
+            .map_err(unavailable)?;
+    }
     transaction
         .execute(
             "UPDATE data_requests SET fingerprint = zeroblob(32) WHERE artifact_id = ?1",
@@ -302,18 +414,37 @@ impl DataStore for SqliteStore {
         Ok(current)
     }
 
-    fn read_data(
+    fn admit_write(
         &self,
         artifact: &ArtifactId,
         actor: &ActorId,
-    ) -> Result<DataSnapshot, DataStoreError> {
+        space: Space,
+    ) -> Result<(), DataStoreError> {
         let mut connection = self.connect()?;
-        // One snapshot: the artifact check and the space agree.
         let snapshot = connection.transaction().map_err(unavailable)?;
         if !artifact_in_place(&snapshot, artifact)? {
             return Err(DataStoreError::NotFound);
         }
-        Ok(read_space(&snapshot, artifact, actor)?)
+        Ok(reach(&snapshot, artifact, actor, space, true)?)
+    }
+
+    fn read_data(
+        &self,
+        artifact: &ArtifactId,
+        actor: &ActorId,
+        space: Space,
+    ) -> Result<DataSnapshot, DataStoreError> {
+        let mut connection = self.connect()?;
+        // One snapshot: the artifact check, for the shared space the caller's
+        // access and the head's declaration, and the space agree, so a shared
+        // read that a revocation or a new head overtakes answers as of one
+        // moment.
+        let snapshot = connection.transaction().map_err(unavailable)?;
+        if !artifact_in_place(&snapshot, artifact)? {
+            return Err(DataStoreError::NotFound);
+        }
+        reach(&snapshot, artifact, actor, space, false)?;
+        Ok(read_space(&snapshot, artifact, actor, space)?)
     }
 
     fn write_data(&self, request: DataWrite<'_>) -> Result<DataReceipt, DataStoreError> {

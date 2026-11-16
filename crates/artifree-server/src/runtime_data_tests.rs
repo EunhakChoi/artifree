@@ -156,6 +156,7 @@ async fn granted_view(state: &AppState, actor: &ActorId) -> Result<Fixture, Box<
         actor.clone(),
         "data-race-write".parse()?,
         &artifact,
+        artifree_domain::access::Space::Own,
         SetDataRequest {
             path: PROFILE_PATH.into(),
             base_data_version: 0,

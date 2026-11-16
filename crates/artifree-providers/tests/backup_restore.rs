@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use artifree_domain::access::Space;
 use artifree_domain::change::ChangeSequence;
 use artifree_domain::data::{DataChange, DataValue};
 use artifree_domain::identity::{ActorId, TokenId, UnixMillis};
@@ -375,6 +376,7 @@ fn an_older_backup_keeps_its_version_and_a_restore_upgrades_it() -> TestResult {
                 value: DataValue::parse("1")?,
             };
             store.write_data(DataWrite {
+                space: Space::Own,
                 fence: None,
                 request: RequestIdentity {
                     actor: &owner,
@@ -641,6 +643,7 @@ fn application_data_and_its_keys_survive_a_restore() -> TestResult {
         };
         target
             .write_data(DataWrite {
+                space: Space::Own,
                 fence: None,
                 request: RequestIdentity {
                     actor: &owner,
@@ -662,7 +665,7 @@ fn application_data_and_its_keys_survive_a_restore() -> TestResult {
     restore(&layout.output(), &layout.target())?;
     let restored = SqliteStore::open(&database_in(&layout.target()))?;
 
-    let snapshot = restored.read_data(&created.artifact.id, &owner)?;
+    let snapshot = restored.read_data(&created.artifact.id, &owner, Space::Own)?;
     assert_eq!(snapshot.version, AppDataVersion(2));
     assert_eq!(snapshot.space.to_canonical(), "{\"note\":\"two\"}");
     // The original request replays with the version it produced.
@@ -695,6 +698,7 @@ fn a_backup_made_before_a_purge_still_holds_the_purged_data() -> TestResult {
         value: DataValue::parse("\"still here\"")?,
     };
     store.write_data(DataWrite {
+        space: Space::Own,
         fence: None,
         request: RequestIdentity {
             actor: &owner,
@@ -717,12 +721,16 @@ fn a_backup_made_before_a_purge_still_holds_the_purged_data() -> TestResult {
         artifact: &created.artifact.id,
         base: MetadataRevision(2),
     })?;
-    assert!(store.read_data(&created.artifact.id, &owner).is_err());
+    assert!(
+        store
+            .read_data(&created.artifact.id, &owner, Space::Own)
+            .is_err()
+    );
 
     restore(&layout.output(), &layout.target())?;
     let restored = SqliteStore::open(&database_in(&layout.target()))?;
 
-    let snapshot = restored.read_data(&created.artifact.id, &owner)?;
+    let snapshot = restored.read_data(&created.artifact.id, &owner, Space::Own)?;
     assert_eq!(snapshot.space.to_canonical(), "{\"secret\":\"still here\"}");
     Ok(())
 }
@@ -1112,6 +1120,7 @@ fn outbox_restore_fences_historical_replay_with_the_renewed_feed_identity() -> T
     };
     let write = |store: &SqliteStore, fence: &OutboxFence| {
         store.write_data(DataWrite {
+            space: Space::Own,
             request: RequestIdentity {
                 actor: &owner,
                 key: &key("outbox-write"),

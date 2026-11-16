@@ -3,9 +3,10 @@
 use std::collections::BTreeSet;
 
 use artifree_contracts::api::RuntimeLifecycle;
+use artifree_domain::access::{MAX_RUNTIME_MANIFEST_BYTES, SharedWriters};
 use serde::Deserialize;
 
-pub(crate) const MANIFEST_PATH: &str = "artifree-runtime.json";
+pub(crate) use artifree_domain::access::RUNTIME_MANIFEST_PATH as MANIFEST_PATH;
 pub(crate) const SDK_PIN: &str = "artifree.app.v1";
 pub(crate) const ASSETS_DOWNLOAD: &str = "assets.download";
 pub(crate) const ASSETS_READ: &str = "assets.read";
@@ -16,7 +17,6 @@ pub(crate) const METADATA_READ: &str = "metadata.read";
 pub(crate) const SOURCE_READ: &str = "source.read";
 pub(crate) const SOURCE_DOWNLOAD: &str = "source.download";
 pub(crate) const SOURCE_WRITE: &str = "source.write";
-const MAX_MANIFEST_BYTES: usize = 16 * 1024;
 const MAX_CAPABILITIES: usize = 32;
 const MAX_CAPABILITY_BYTES: usize = 64;
 
@@ -186,6 +186,19 @@ struct Manifest {
     capabilities: Vec<String>,
     #[serde(default)]
     lifecycle: Lifecycle,
+    /// The shared space (decision 0060 rule 10). Its value is checked by
+    /// [`SharedWriters::declared_in`], the one reading the store also uses.
+    /// Any value given, `null` too, is `Some`.
+    #[serde(default, deserialize_with = "given")]
+    shared: Option<serde_json::Value>,
+}
+
+/// A member that is present, whatever its value: serde reads `null` as
+/// absent for an `Option` unless told otherwise.
+fn given<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    serde::Deserialize::deserialize(deserializer).map(Some)
 }
 
 /// A complete, validated declaration for one source revision.
@@ -210,11 +223,18 @@ impl RuntimePolicy {
                 lifecycle: Lifecycle::Restart,
             });
         };
-        if bytes.len() > MAX_MANIFEST_BYTES {
+        if bytes.len() > MAX_RUNTIME_MANIFEST_BYTES {
             return Err("runtime declaration is too large");
         }
         let manifest: Manifest =
             serde_json::from_slice(bytes).map_err(|_| "invalid runtime declaration")?;
+        // Any `shared` value but the two names makes the manifest malformed
+        // (decision 0060 rule 10). The store reads `shared` with the same
+        // function and finds no space where it is malformed; the manifest's
+        // other members govern runtime frames, not the data routes.
+        if manifest.shared.is_some() && SharedWriters::declared_in(bytes).is_err() {
+            return Err("invalid shared space declaration");
+        }
         if manifest.sdk != SDK_PIN {
             return Err("unsupported runtime SDK pin");
         }
@@ -877,6 +897,30 @@ mod tests {
             "assets.downloads is not a capability and must not be grantable"
         );
         Ok(())
+    }
+
+    /// Decision 0060 rule 10: `shared` names who writes the shared space, and
+    /// any other value makes the manifest malformed.
+    #[test]
+    fn a_shared_space_is_declared_by_one_of_two_names() {
+        for source in [
+            br#"{"sdk":"artifree.app.v1","shared":"editors"}"#.as_slice(),
+            br#"{"sdk":"artifree.app.v1","shared":"members"}"#,
+        ] {
+            assert!(RuntimePolicy::from_source(true, Some(source)).is_ok());
+        }
+        for source in [
+            br#"{"sdk":"artifree.app.v1","shared":"viewers"}"#.as_slice(),
+            br#"{"sdk":"artifree.app.v1","shared":true}"#,
+            br#"{"sdk":"artifree.app.v1","shared":null}"#,
+        ] {
+            assert_eq!(
+                RuntimePolicy::from_source(true, Some(source)),
+                Err("invalid shared space declaration"),
+                "declaration {} must be refused",
+                String::from_utf8_lossy(source)
+            );
+        }
     }
 
     #[test]

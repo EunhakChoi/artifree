@@ -6,6 +6,7 @@
 mod common;
 
 use artifree_domain::access::Role;
+use artifree_domain::access::Space;
 
 use artifree_domain::change::ChangeSequence;
 use artifree_domain::data::{DataChange, DataError, DataLimit, DataPath, DataValue};
@@ -72,6 +73,7 @@ impl Fixture {
     ) -> Result<DataReceipt, DataStoreError> {
         let request_key = key(name);
         self.store.write_data(DataWrite {
+            space: Space::Own,
             fence: None,
             request: RequestIdentity {
                 actor: who,
@@ -342,7 +344,7 @@ fn a_failing_change_insert_fails_the_whole_write_and_leaves_space_and_key() -> T
         "{refused:?}"
     );
 
-    let snapshot = fixture.store.read_data(fixture.id(), &owner)?;
+    let snapshot = fixture.store.read_data(fixture.id(), &owner, Space::Own)?;
     assert_eq!(
         (snapshot.version, snapshot.space.is_empty()),
         (AppDataVersion(0), true),
@@ -474,7 +476,9 @@ fn a_copy_of_data_records_only_created_and_a_purge_only_purged() -> TestResult {
     let after_write = fixture.head(&owner)?;
 
     let copy = new_copy(&fixture, "copy", true)?;
-    let copied = fixture.store.read_data(&copy.artifact.id, &owner)?;
+    let copied = fixture
+        .store
+        .read_data(&copy.artifact.id, &owner, Space::Own)?;
     assert_eq!(copied.version, AppDataVersion(1), "the data was copied");
     let feed = fixture.feed(&owner)?;
     let added: Vec<_> = feed

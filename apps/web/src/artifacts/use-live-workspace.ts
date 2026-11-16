@@ -186,8 +186,10 @@ export function learnFrom(state: Knowledge, learned: Learned): Knowledge {
       // A write to an app's data changed no source and no metadata, and the
       // workspace shows neither the data nor its version. It is not news for
       // any artifact, listed, open, or not yet listed, and it is not a revision
-      // (decisions 0007 and 0040).
-      if (change === 'data_changed') return state;
+      // (decisions 0007 and 0040). A write to its shared space is no more
+      // (decision 0060 rule 10).
+      if (change === 'data_changed' || change === 'shared_data_changed')
+        return state;
       // A job's change names a job and changes no source and no metadata of
       // its artifact: the workspace leaves its state as it is (decision 0055,
       // rule 11), as for a data change.

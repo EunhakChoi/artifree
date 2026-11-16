@@ -698,6 +698,13 @@ fn change_with(kind: &str, extra: &serde_json::Value) -> Result<ArtifactChange, 
 fn a_change_event_reads_a_data_version_only_for_a_data_change() -> Result<(), serde_json::Error> {
     let data = change_with("data_changed", &serde_json::json!({ "data_version": 3 }))?;
     assert_eq!(data.data_version, Some(3));
+    // A write to the shared space (decision 0060 rule 10) states its version
+    // the same way.
+    let shared = change_with(
+        "shared_data_changed",
+        &serde_json::json!({ "data_version": 4 }),
+    )?;
+    assert_eq!(shared.data_version, Some(4));
     let largest = change_with(
         "data_changed",
         &serde_json::json!({ "data_version": 9_007_199_254_740_991_u64 }),
@@ -710,6 +717,11 @@ fn a_change_event_reads_a_data_version_only_for_a_data_change() -> Result<(), se
 
     for refused in [
         change_with("data_changed", &serde_json::json!({})),
+        change_with("shared_data_changed", &serde_json::json!({})),
+        change_with(
+            "shared_data_changed",
+            &serde_json::json!({ "data_version": 0 }),
+        ),
         change_with("data_changed", &serde_json::json!({ "data_version": null })),
         change_with("data_changed", &serde_json::json!({ "data_version": 0 })),
         change_with(
@@ -726,7 +738,8 @@ fn a_change_event_reads_a_data_version_only_for_a_data_change() -> Result<(), se
 }
 
 /// The published schema says what deserializing does: a data version is
-/// required for `data_changed` and forbidden otherwise, and the schema keeps
+/// required for `data_changed` and `shared_data_changed` and forbidden
+/// otherwise, and the schema keeps
 /// its name and body so generated types do not change.
 #[test]
 fn a_change_event_publishes_the_kind_dependent_data_version() -> Result<(), serde_json::Error> {
@@ -738,7 +751,7 @@ fn a_change_event_publishes_the_kind_dependent_data_version() -> Result<(), serd
     assert_eq!(
         schema["if"],
         serde_json::json!({
-            "properties": { "change": { "const": "data_changed" } },
+            "properties": { "change": { "enum": ["data_changed", "shared_data_changed"] } },
             "required": ["change"]
         })
     );

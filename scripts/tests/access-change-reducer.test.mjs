@@ -70,3 +70,18 @@ test('a revision the page already knows is not news', () => {
   });
   assert.equal(next, KNOWN);
 });
+
+// Decision 0060 rule 10: a write to the shared space, as to the caller's own
+// (decision 0040), changes no source and no metadata. Even at revisions the
+// page has not read it is not news, so the case fails if the reducer takes it
+// as a revision.
+for (const kind of ['data_changed', 'shared_data_changed']) {
+  test(`${kind} leaves the workspace as it is`, () => {
+    const event = changeEvent(kind);
+    const ahead = {
+      ...event,
+      change: { ...event.change, revision: 3, data_version: 1 },
+    };
+    assert.equal(learnFrom(KNOWN, { type: 'event', event: ahead }), KNOWN);
+  });
+}

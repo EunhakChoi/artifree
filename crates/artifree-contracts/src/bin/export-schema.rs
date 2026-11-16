@@ -19,7 +19,7 @@ use artifree_contracts::api::{
     ArtifactList, AssetList, AssetResponse, BackgroundStatus, BuildStatus, CancelJobRequest,
     CancelJobResponse, CommitResponse, CreateArtifactRequest, CreateRuntimeViewRequest,
     CreateTokenRequest, CreateTokenResponse, CreateUserRequest, DataMembers, DataOutboxBinding,
-    DataWriteResponse, DeleteAssetRequest, DeleteAssetResponse, DeleteDataRequest,
+    DataWriteQuery, DataWriteResponse, DeleteAssetRequest, DeleteAssetResponse, DeleteDataRequest,
     DuplicateArtifactRequest, DuplicateArtifactResponse, EditFilesRequest, EnqueueJobRequest,
     EnqueueJobResponse, ErrorResponse, FeedPosition, Handoff, HandoffActionRequest, Job, JobList,
     ListArtifactsQuery, ListJobsQuery, Me, Preview, PurgeArtifactRequest, PurgeArtifactResponse,
@@ -148,6 +148,8 @@ fn api_bodies(generator: &mut SchemaGenerator) -> Vec<Schema> {
     // empty object.
     generator.subschema_for::<ReadDataQuery>();
     generator.subschema_for::<ReadDataMembersQuery>();
+    // The write query has one optional field, as the read query.
+    generator.subschema_for::<DataWriteQuery>();
     // The cancel body has no fields, so the root would accept any empty object.
     generator.subschema_for::<CancelJobRequest>();
     bodies

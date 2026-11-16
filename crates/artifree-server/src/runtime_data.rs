@@ -28,6 +28,7 @@ use artifree_contracts::api::{
 };
 use artifree_core::data::DataMutation;
 use artifree_domain::AppDataVersion;
+use artifree_domain::access::Space;
 use artifree_domain::data::DataChange;
 use artifree_domain::identity::RequestKey;
 use artifree_ports::artifact_store::Delivery;
@@ -55,7 +56,9 @@ pub(crate) async fn read(
     // The canonical text is written on the blocking thread, with the read.
     let (version, text) = state
         .run(move |artifacts| {
-            let read = artifacts.data(&actor, &artifact, &path)?;
+            // A frame reaches only the caller's own space until a capability
+            // names the shared one (decision 0060 rule 10, slice S02f3).
+            let read = artifacts.data(&actor, &artifact, Space::Own, &path)?;
             Ok((read.version, read.value.map(|value| value.to_canonical())))
         })
         .await?;
@@ -205,6 +208,7 @@ async fn write(
                     &key,
                     &artifact,
                     DataMutation {
+                        space: Space::Own,
                         base,
                         change: &change,
                         now,

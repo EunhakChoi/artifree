@@ -9,6 +9,8 @@
 use std::fmt;
 use std::str::FromStr;
 
+use crate::data::DataValue;
+
 /// The role of a member of an artifact (decision 0060 rule 1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Role {
@@ -103,6 +105,106 @@ impl Access {
     }
 }
 
+/// Which data or asset space of an artifact a request names (decision 0060
+/// rule 10). Nothing names the shared space by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Space {
+    /// The caller's own space, which only the caller reads and writes.
+    #[default]
+    Own,
+    /// The artifact's declared shared space.
+    Shared,
+}
+
+impl Space {
+    /// Stable lowercase name used in storage, fingerprints and wire contracts.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Own => "own",
+            Self::Shared => "shared",
+        }
+    }
+}
+
+/// The largest runtime manifest an artifact may hold, in bytes (decision 0020).
+pub const MAX_RUNTIME_MANIFEST_BYTES: usize = 16 * 1024;
+
+/// The path of the runtime manifest in a revision (decision 0020 rule 1),
+/// which also declares the shared space (decision 0060 rule 10).
+pub const RUNTIME_MANIFEST_PATH: &str = "artifree-runtime.json";
+
+/// Who may write an artifact's declared shared space (decision 0060 rule 10).
+/// The owner and every member may read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SharedWriters {
+    /// The owner and every editor.
+    Editors,
+    /// The owner and every member.
+    Members,
+}
+
+/// A runtime manifest whose `shared` declaration cannot be read: text that is
+/// not one JSON object, or a `shared` member that is not `"editors"` or
+/// `"members"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MalformedDeclaration;
+
+impl fmt::Display for MalformedDeclaration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a shared space is declared as \"editors\" or \"members\"")
+    }
+}
+
+impl std::error::Error for MalformedDeclaration {}
+
+impl SharedWriters {
+    /// Stable lowercase name, as a manifest declares it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Editors => "editors",
+            Self::Members => "members",
+        }
+    }
+
+    /// What a write of the shared space needs of its caller.
+    #[must_use]
+    pub fn need(self) -> Need {
+        match self {
+            Self::Editors => Need::Change,
+            Self::Members => Need::Read,
+        }
+    }
+
+    /// The shared space a runtime manifest declares: `None` when its object
+    /// has no `shared` member. Only that member is read here; the runtime
+    /// checks the manifest's other members where it uses them.
+    ///
+    /// # Errors
+    ///
+    /// [`MalformedDeclaration`] for a manifest over
+    /// [`MAX_RUNTIME_MANIFEST_BYTES`], text that is not one JSON object under
+    /// the rules of application data, or a `shared` member of any other value.
+    pub fn declared_in(manifest: &[u8]) -> Result<Option<Self>, MalformedDeclaration> {
+        if manifest.len() > MAX_RUNTIME_MANIFEST_BYTES {
+            return Err(MalformedDeclaration);
+        }
+        let text = std::str::from_utf8(manifest).map_err(|_| MalformedDeclaration)?;
+        let DataValue::Object(members) =
+            DataValue::parse_unbounded(text).map_err(|_| MalformedDeclaration)?
+        else {
+            return Err(MalformedDeclaration);
+        };
+        match members.get("shared") {
+            None => Ok(None),
+            Some(DataValue::String(name)) if name == "editors" => Ok(Some(Self::Editors)),
+            Some(DataValue::String(name)) if name == "members" => Ok(Some(Self::Members)),
+            Some(_) => Err(MalformedDeclaration),
+        }
+    }
+}
+
 /// The number an artifact's member list is at: zero until the first change of
 /// access, then raised by one with each change (decision 0060 rule 6). A grant
 /// or a revocation is conditional on it.
@@ -141,7 +243,9 @@ impl fmt::Display for AccessGeneration {
 
 #[cfg(test)]
 mod tests {
-    use super::{Access, Need, Role};
+    use super::{
+        Access, MAX_RUNTIME_MANIFEST_BYTES, MalformedDeclaration, Need, Role, SharedWriters,
+    };
 
     #[test]
     fn each_stand_allows_what_rule_3_says() {
@@ -158,6 +262,38 @@ mod tests {
                 assert_eq!(access.permits(need), expected, "{access:?} {need:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_manifest_declares_a_shared_space_by_one_member() {
+        let declared = |text: &str| SharedWriters::declared_in(text.as_bytes());
+        assert_eq!(declared(r#"{"sdk":"x"}"#), Ok(None));
+        assert_eq!(
+            declared(r#"{"sdk":"x","shared":"editors"}"#),
+            Ok(Some(SharedWriters::Editors))
+        );
+        assert_eq!(
+            declared(r#"{"shared":"members"}"#),
+            Ok(Some(SharedWriters::Members))
+        );
+        for text in [
+            r#"{"shared":"viewers"}"#,
+            r#"{"shared":"Editors"}"#,
+            r#"{"shared":null}"#,
+            r#"{"shared":["editors"]}"#,
+            r#"{"shared":"editors","shared":"members"}"#,
+            r#"["shared"]"#,
+            "not json",
+        ] {
+            assert_eq!(declared(text), Err(MalformedDeclaration), "{text}");
+        }
+        let long = format!(
+            r#"{{"shared":"editors","pad":"{}"}}"#,
+            "a".repeat(MAX_RUNTIME_MANIFEST_BYTES)
+        );
+        assert_eq!(declared(&long), Err(MalformedDeclaration));
+        assert_eq!(SharedWriters::Editors.need(), Need::Change);
+        assert_eq!(SharedWriters::Members.need(), Need::Read);
     }
 
     #[test]

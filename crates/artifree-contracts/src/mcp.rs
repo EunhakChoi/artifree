@@ -18,7 +18,7 @@ use serde_json::Value;
 
 use crate::api::{
     AppData, Artifact, ArtifactList, Asset, AssetList, BuildStatus, CancelJobResponse,
-    CommitResponse, ContentEncoding, DataWriteResponse, DeleteAssetResponse,
+    CommitResponse, ContentEncoding, DataSpaceName, DataWriteResponse, DeleteAssetResponse,
     DuplicateArtifactResponse, EnqueueJobResponse, ErrorResponse, FileChange, FileEdit, FileUpload,
     Handoff, HandoffState, Job, JobKind, JobList, ListArtifactsQuery, Preview, Revision,
     RevisionList, TypeDescriptor, TypeList, TypeReference, UpdateArtifactResponse,
@@ -255,6 +255,10 @@ pub struct GetDataArguments {
     /// No normalization or URL decoding. By default or when empty, the root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// `shared` reads the artifact's declared shared space; by default or
+    /// with `own`, your own data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<DataSpaceName>,
 }
 
 /// Arguments of `set_data`.
@@ -275,6 +279,10 @@ pub struct SetDataArguments {
     /// Retry key: 8-128 ASCII letters, digits, `-`, `_`, `.`, or `:`. Use a
     /// new value for each intended change and resend it unchanged to retry.
     pub idempotency_key: String,
+    /// `shared` writes the artifact's declared shared space; by default or
+    /// with `own`, your own data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<DataSpaceName>,
 }
 
 /// Arguments of `update_data`.
@@ -294,6 +302,10 @@ pub struct UpdateDataArguments {
     /// Retry key: 8-128 ASCII letters, digits, `-`, `_`, `.`, or `:`. Use a
     /// new value for each intended change and resend it unchanged to retry.
     pub idempotency_key: String,
+    /// `shared` patches the artifact's declared shared space; by default or
+    /// with `own`, your own data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<DataSpaceName>,
 }
 
 /// Arguments of `delete_data`.
@@ -310,6 +322,10 @@ pub struct DeleteDataArguments {
     /// Retry key: 8-128 ASCII letters, digits, `-`, `_`, `.`, or `:`. Use a
     /// new value for each intended change and resend it unchanged to retry.
     pub idempotency_key: String,
+    /// `shared` removes from the artifact's declared shared space; by default
+    /// or with `own`, from your own data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<DataSpaceName>,
 }
 
 /// Arguments of `list_assets`.
@@ -917,7 +933,12 @@ fn data_tools() -> [ToolDefinition; 4] {
              or URL decoding; the empty path is the root. A path \
              with nothing at it succeeds with exists false. A path never enters an array. The \
              artifact's files, previews, and exports do not contain this data, and a page \
-             running in a preview cannot read it."
+             running in a preview cannot read it. With space shared, every write tool and this \
+             one use the artifact's shared space instead: one JSON object for the owner and \
+             every member, which exists only while the artifact's current revision declares it \
+             in artifree-runtime.json (\"shared\": \"editors\" or \"members\", naming who may \
+             write it; otherwise not_found, and a role that may not write it is forbidden). \
+             Its writes reach every reader's change stream as shared_data_changed."
                 .into(),
             ToolEffect::Read,
         ),

@@ -1,6 +1,7 @@
 //! Durable storage for application data (decision 0031).
 //!
-//! One data space exists per actor and artifact. Its version is separate from
+//! One data space exists per actor and artifact, and one shared space per
+//! artifact that declares it (decision 0060 rule 10). Its version is separate from
 //! the artifact's source revision and metadata revision: a write that changes
 //! the space raises it by one, and nothing else does. An implementation must
 //! make each write atomic: the artifact check, a frame write's source check
@@ -13,6 +14,7 @@ use std::fmt;
 
 use artifree_domain::AppDataVersion;
 use artifree_domain::SourceRevision;
+use artifree_domain::access::Space;
 use artifree_domain::change::FeedId;
 use artifree_domain::data::{DataChange, DataError, DataSpace};
 use artifree_domain::identity::{ActorId, ArtifactId, StateGeneration, UnixMillis};
@@ -53,10 +55,12 @@ pub struct DataSnapshot {
 pub struct DataWrite<'a> {
     /// Optional outbox precondition; absent for existing direct writes.
     pub fence: Option<&'a OutboxFence>,
-    /// Retry identity; its actor owns the space.
+    /// Retry identity; its actor owns the space, or writes the shared one.
     pub request: RequestIdentity<'a>,
     /// The artifact. It must be outside the trash and not purged.
     pub artifact: &'a ArtifactId,
+    /// The space written: the actor's own, or the artifact's shared space.
+    pub space: Space,
     /// The version the change was prepared against.
     pub base: AppDataVersion,
     /// The change.
@@ -87,6 +91,9 @@ pub enum DataStoreError {
     NotFound,
     /// The current database or enabled user no longer matches the fence.
     OutboxBindingChanged,
+    /// The actor's role does not allow writing the artifact's shared space
+    /// (decision 0060 rules 3 and 10); nothing was written.
+    Forbidden,
     /// The actor already used the key for another request.
     RequestKeyReused,
     /// The space is not at the base version; nothing was written.
@@ -112,6 +119,7 @@ impl fmt::Display for DataStoreError {
         match self {
             Self::OutboxBindingChanged => formatter.write_str("outbox binding changed"),
             Self::NotFound => formatter.write_str("artifact not found"),
+            Self::Forbidden => formatter.write_str("the actor's role does not allow this"),
             Self::RequestKeyReused => {
                 formatter.write_str("request key was already used for a different request")
             }
@@ -137,6 +145,7 @@ impl From<StoreError> for DataStoreError {
     fn from(error: StoreError) -> Self {
         match error {
             StoreError::NotFound => Self::NotFound,
+            StoreError::Forbidden => Self::Forbidden,
             StoreError::RequestKeyReused => Self::RequestKeyReused,
             StoreError::Unavailable(reason) => Self::Unavailable(reason),
             other => Self::Unavailable(other.to_string()),
@@ -164,16 +173,38 @@ pub trait DataStore {
         generation: StateGeneration,
     ) -> Result<OutboxBinding, DataStoreError>;
 
-    /// The space of `actor` for an artifact, and its version, read in one
-    /// snapshot.
+    /// Whether `actor` may write `space` of an artifact as of now: the
+    /// artifact is in place, the actor can read it, and for the shared space
+    /// the head revision declares it and the actor has the role the
+    /// declaration names (decision 0060 rules 4 and 10). A caller checks this
+    /// before it judges a request's content; the write checks it again where
+    /// it commits.
     ///
     /// # Errors
     ///
-    /// [`DataStoreError::NotFound`] or [`DataStoreError::Unavailable`].
+    /// [`DataStoreError::NotFound`], [`DataStoreError::Forbidden`] or
+    /// [`DataStoreError::Unavailable`].
+    fn admit_write(
+        &self,
+        artifact: &ArtifactId,
+        actor: &ActorId,
+        space: Space,
+    ) -> Result<(), DataStoreError>;
+
+    /// The space of `actor` for an artifact, or its shared space, and its
+    /// version, read in one snapshot. The shared space is read only while the
+    /// artifact's head revision declares it (decision 0060 rule 10); the
+    /// caller has checked that `actor` may read the artifact.
+    ///
+    /// # Errors
+    ///
+    /// [`DataStoreError::NotFound`], also for a shared space the head does
+    /// not declare, or [`DataStoreError::Unavailable`].
     fn read_data(
         &self,
         artifact: &ArtifactId,
         actor: &ActorId,
+        space: Space,
     ) -> Result<DataSnapshot, DataStoreError>;
 
     /// Applies a change if the space is at the base version, or returns the
@@ -186,16 +217,27 @@ pub trait DataStore {
     /// alters nothing writes no new version, but its key is recorded. The key
     /// shares its space with the keys of artifact requests, cleanups, and jobs.
     ///
-    /// A change that altered the space also appends one
+    /// A write of the shared space (decision 0060 rule 10) reads, after the
+    /// artifact and the actor's access and before anything else, the
+    /// declaration of the artifact's head revision: a head that declares none
+    /// is [`DataStoreError::NotFound`], and a role the declaration does not let
+    /// write is [`DataStoreError::Forbidden`], a retry included. Its key is in
+    /// the key space of the actor who sends it.
+    ///
+    /// A change that altered the actor's own space also appends one
     /// [`ChangeKind::DataChanged`](crate::artifact_store::ChangeKind::DataChanged)
     /// to the change feed of the actor of the request, whose space changed,
-    /// as the last part of the same step (decision 0040). A replay, a change
-    /// that altered nothing, and a refusal append nothing, and a failure to
-    /// append undoes the whole write.
+    /// as the last part of the same step (decision 0040); one that altered the
+    /// shared space appends one
+    /// [`ChangeKind::SharedDataChanged`](crate::artifact_store::ChangeKind::SharedDataChanged)
+    /// to the feed of the owner and of every member (decision 0060 rule 13).
+    /// A replay, a change that altered nothing, and a refusal append nothing,
+    /// and a failure to append undoes the whole write.
     ///
     /// # Errors
     ///
-    /// [`DataStoreError::NotFound`], [`DataStoreError::RequestKeyReused`],
+    /// [`DataStoreError::NotFound`], [`DataStoreError::Forbidden`],
+    /// [`DataStoreError::RequestKeyReused`],
     /// [`DataStoreError::VersionConflict`], [`DataStoreError::Rejected`], or
     /// [`DataStoreError::Unavailable`].
     fn write_data(&self, request: DataWrite<'_>) -> Result<DataReceipt, DataStoreError>;

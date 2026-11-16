@@ -171,6 +171,7 @@ async fn owner_seed(
         actor.clone(),
         "data-write-seed".parse()?,
         artifact,
+        artifree_domain::access::Space::Own,
         SetDataRequest {
             path: PATH.into(),
             base_data_version: 0,
@@ -478,7 +479,7 @@ fn space(
     let service = ArtifactService::new(SqliteStore::open(&directory.0.join("data.sqlite3"))?);
     let id = operations::artifact_id(artifact).map_err(|error| error.body.message)?;
     let path = operations::data_path("path", PATH).map_err(|error| error.body.message)?;
-    let read = service.data(actor, &id, &path)?;
+    let read = service.data(actor, &id, artifree_domain::access::Space::Own, &path)?;
     let connection = rusqlite::Connection::open(directory.0.join("data.sqlite3"))?;
     let requests: i64 =
         connection.query_row("SELECT COUNT(*) FROM data_requests", [], |row| row.get(0))?;

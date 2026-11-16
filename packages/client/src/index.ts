@@ -12,6 +12,9 @@ export {
 export type {
   ClientConfiguration,
   DataMembersOptions,
+  DataMutationOptions,
+  DataReadOptions,
+  DataSpace,
   DataInput,
   SetDataInput,
   UpdateDataInput,
